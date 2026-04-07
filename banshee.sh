@@ -35,13 +35,15 @@ banshee_load_config() {
         value="${value## }"; value="${value%% }"
         case "$key" in
             search_paths)
-                # Split on comma into array (zsh and bash compatible)
-                local IFS=','
-                if [[ -n "${ZSH_VERSION:-}" ]]; then
-                    BANSHEE_SEARCH_PATHS=( ${=value} )
-                else
-                    read -ra BANSHEE_SEARCH_PATHS <<< "$value"
-                fi
+                # Split on comma without touching IFS
+                BANSHEE_SEARCH_PATHS=()
+                local _remainder="$value"
+                while [[ -n "$_remainder" ]]; do
+                    local _entry="${_remainder%%,*}"
+                    _entry="${_entry## }"; _entry="${_entry%% }"
+                    BANSHEE_SEARCH_PATHS+=("$_entry")
+                    [[ "$_remainder" == *,* ]] && _remainder="${_remainder#*,}" || _remainder=""
+                done
                 ;;
             max_depth)    BANSHEE_MAX_DEPTH="$value" ;;
             keybind)      BANSHEE_KEYBIND="$value" ;;
