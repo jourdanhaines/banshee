@@ -28,7 +28,8 @@ banshee_load_config() {
         [[ -z "$key" || "$key" == \#* ]] && continue
         case "$key" in
             search_paths)
-                IFS=',' read -ra BANSHEE_SEARCH_PATHS <<< "$value"
+                IFS=',' read -rA BANSHEE_SEARCH_PATHS <<< "$value" 2>/dev/null \
+                    || IFS=',' read -ra BANSHEE_SEARCH_PATHS <<< "$value"
                 ;;
             max_depth)
                 BANSHEE_MAX_DEPTH="$value"
@@ -320,6 +321,8 @@ banshee_main() {
 }
 
 # Only run main if executed directly (not sourced)
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# BASH_SOURCE is bash-only; ZSH_EVAL_CONTEXT is zsh-only
+if [[ -n "${BASH_SOURCE+x}" && "${BASH_SOURCE[0]}" == "${0}" ]] \
+    || [[ -n "${ZSH_EVAL_CONTEXT+x}" && "$ZSH_EVAL_CONTEXT" == "toplevel" ]]; then
     banshee_main "$@"
 fi
