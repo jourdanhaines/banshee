@@ -25,35 +25,36 @@ BANSHEE_CACHE_TTL=300  # seconds
 # --- Load config ---
 banshee_load_config() {
     [[ -f "$BANSHEE_CONFIG_FILE" ]] || return 0
-    # Source the config file (bash-compatible key=value)
-    while IFS='=' read -r key value; do
-        key=$(echo "$key" | xargs)
-        value=$(echo "$value" | xargs)
-        [[ -z "$key" || "$key" == \#* ]] && continue
+    local line key value
+    while read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" == *"="* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key## }"; key="${key%% }"
+        value="${value## }"; value="${value%% }"
         case "$key" in
             search_paths)
-                IFS=',' read -rA BANSHEE_SEARCH_PATHS <<< "$value" 2>/dev/null \
-                    || IFS=',' read -ra BANSHEE_SEARCH_PATHS <<< "$value"
+                # Split on comma into array (zsh and bash compatible)
+                local IFS=','
+                if [[ -n "${ZSH_VERSION:-}" ]]; then
+                    BANSHEE_SEARCH_PATHS=( ${=value} )
+                else
+                    read -ra BANSHEE_SEARCH_PATHS <<< "$value"
+                fi
                 ;;
-            max_depth)
-                BANSHEE_MAX_DEPTH="$value"
-                ;;
-            keybind)
-                BANSHEE_KEYBIND="$value"
-                ;;
-            fzf_opts)
-                BANSHEE_FZF_OPTS="$value"
-                ;;
-            cache_ttl)
-                BANSHEE_CACHE_TTL="$value"
-                ;;
+            max_depth)    BANSHEE_MAX_DEPTH="$value" ;;
+            keybind)      BANSHEE_KEYBIND="$value" ;;
+            fzf_opts)     BANSHEE_FZF_OPTS="$value" ;;
+            cache_ttl)    BANSHEE_CACHE_TTL="$value" ;;
         esac
     done < "$BANSHEE_CONFIG_FILE"
 }
 
 # --- Ensure directories exist ---
 banshee_init() {
-    mkdir -p "$BANSHEE_CONFIG_DIR" "$BANSHEE_DATA_DIR"
+    [[ -d "$BANSHEE_CONFIG_DIR" ]] || command mkdir -p "$BANSHEE_CONFIG_DIR"
+    [[ -d "$BANSHEE_DATA_DIR" ]]   || command mkdir -p "$BANSHEE_DATA_DIR"
     banshee_load_config
 }
 
