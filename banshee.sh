@@ -337,11 +337,11 @@ banshee_main() {
             if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
                 while IFS='|' read -r name path; do
                     [[ -z "$name" ]] && continue
-                    local status="stopped"
+                    local state="stopped"
                     if banshee_has_tmux && tmux has-session -t "=$name" 2>/dev/null; then
-                        status="running"
+                        state="running"
                     fi
-                    printf "  %-20s %s [%s]\n" "$name" "$path" "$status"
+                    printf "  %-20s %s [%s]\n" "$name" "$path" "$state"
                 done < "$BANSHEE_SESSION_FILE"
             else
                 echo "banshee: no saved sessions"
