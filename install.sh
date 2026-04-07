@@ -3,10 +3,12 @@
 # https://github.com/jourdanhaines/banshee
 set -euo pipefail
 
+BANSHEE_REPO="jourdanhaines/banshee"
+BANSHEE_BRANCH="main"
+BANSHEE_RAW_URL="https://raw.githubusercontent.com/${BANSHEE_REPO}/${BANSHEE_BRANCH}"
 BANSHEE_INSTALL_DIR="${HOME}/.local/share/banshee/plugin"
 BANSHEE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/banshee"
 BANSHEE_BIN_DIR="${HOME}/.local/bin"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 info() { echo -e "\033[1;34m::\033[0m $*"; }
 ok()   { echo -e "\033[1;32m✓\033[0m $*"; }
@@ -18,6 +20,7 @@ check_deps() {
     local missing=()
     command -v fzf &>/dev/null || missing+=("fzf")
     command -v git &>/dev/null || missing+=("git")
+    command -v curl &>/dev/null || { err "curl is required for remote install"; exit 1; }
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         err "Missing required dependencies: ${missing[*]}"
@@ -31,14 +34,23 @@ check_deps() {
     command -v fd &>/dev/null   || warn "fd not found — falling back to find (slower)"
 }
 
+# --- Download a file from the repo ---
+download() {
+    local file="$1" dest="$2"
+    curl -fsSL "${BANSHEE_RAW_URL}/${file}" -o "$dest" || {
+        err "Failed to download $file"
+        exit 1
+    }
+}
+
 # --- Install files ---
 install_files() {
     info "Installing banshee to $BANSHEE_INSTALL_DIR"
     mkdir -p "$BANSHEE_INSTALL_DIR" "$BANSHEE_BIN_DIR"
 
-    cp "$SCRIPT_DIR/banshee.sh"          "$BANSHEE_INSTALL_DIR/"
-    cp "$SCRIPT_DIR/banshee.plugin.zsh"  "$BANSHEE_INSTALL_DIR/"
-    cp "$SCRIPT_DIR/banshee.plugin.bash" "$BANSHEE_INSTALL_DIR/"
+    download "banshee.sh"          "$BANSHEE_INSTALL_DIR/banshee.sh"
+    download "banshee.plugin.zsh"  "$BANSHEE_INSTALL_DIR/banshee.plugin.zsh"
+    download "banshee.plugin.bash" "$BANSHEE_INSTALL_DIR/banshee.plugin.bash"
     chmod +x "$BANSHEE_INSTALL_DIR/banshee.sh"
 
     # Create a standalone executable symlink
@@ -54,7 +66,7 @@ install_config() {
         warn "Config already exists at $BANSHEE_CONFIG_DIR/banshee.conf — skipping"
     else
         mkdir -p "$BANSHEE_CONFIG_DIR"
-        cp "$SCRIPT_DIR/banshee.conf" "$BANSHEE_CONFIG_DIR/banshee.conf"
+        download "banshee.conf" "$BANSHEE_CONFIG_DIR/banshee.conf"
         ok "Default config installed to $BANSHEE_CONFIG_DIR/banshee.conf"
     fi
 }

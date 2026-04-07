@@ -12,9 +12,7 @@ Banshee scans your filesystem for git repos, lets you fuzzy-find one, and drops 
 ## Install
 
 ```sh
-git clone https://github.com/jourdanhaines/banshee.git
-cd banshee
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/jourdanhaines/banshee/main/install.sh | bash
 ```
 
 Then add to your shell config:
