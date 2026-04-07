@@ -124,22 +124,54 @@ banshee_select_repo() {
         fi
     fi
 
+    # Build name->path mapping
+    local -A repo_map
+    local names=""
+    while IFS= read -r repo_path; do
+        local name
+        name=$(basename "$repo_path")
+        repo_map[$name]="$repo_path"
+        names+="$name"$'\n'
+    done <<< "$repos"
+
+    local preview_cmd='
+        name={}
+        path=$(echo "$BANSHEE_REPO_LIST" | grep "|${name}$" | head -1 | cut -d"|" -f1)
+        echo -e "\033[1;34m$path\033[0m"
+        echo ""
+        readme="$path/README.md"
+        if [[ -f "$readme" ]]; then
+            while IFS= read -r line; do echo "$line"; done < "$readme"
+        else
+            echo "No preview"
+        fi
+    '
+
+    # Export repo list as path|name pairs for the preview command
+    local repo_list=""
+    while IFS= read -r repo_path; do
+        [[ -z "$repo_path" ]] && continue
+        repo_list+="$repo_path|$(basename "$repo_path")"$'\n'
+    done <<< "$repos"
+
     local fzf_args=(
-        --height=40%
         --layout=reverse
         --border
         --prompt="banshee> "
         --header="Select a git repository"
-        --preview='ls -la --color=always {}'
-        --preview-window=right:40%
+        --preview="$preview_cmd"
+        --preview-label-pos=0
+        --preview-window=right:50%
     )
 
     [[ -n "$query" ]] && fzf_args+=(--query="$query")
     [[ -n "$BANSHEE_FZF_OPTS" ]] && eval "fzf_args+=($BANSHEE_FZF_OPTS)"
 
-    local selected
-    selected=$(echo "$repos" | fzf "${fzf_args[@]}") || return 1
-    echo "$selected"
+    local selected_name
+    selected_name=$(echo "$names" | sed '/^$/d' | BANSHEE_REPO_LIST="$repo_list" fzf "${fzf_args[@]}") || return 1
+
+    # Resolve name back to full path
+    echo "${repo_map[$selected_name]}"
 }
 
 # --- tmux session management ---
