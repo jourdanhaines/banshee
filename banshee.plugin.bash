@@ -19,7 +19,7 @@ banshee() {
             ;;
         *)
             local selected
-            selected=$(banshee_select_repo "${1:-}") || return 1
+            selected=$(banshee_select_repo "${1:-}") || return 0
 
             if banshee_has_tmux; then
                 banshee_goto_repo "$selected"

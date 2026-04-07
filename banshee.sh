@@ -2,7 +2,11 @@
 # banshee - fluid git repository navigation powered by fzf
 # https://github.com/jourdanhaines/banshee
 
-set -euo pipefail
+# Only apply strict mode when executed directly, not when sourced
+if [[ -n "${BASH_SOURCE+x}" && "${BASH_SOURCE[0]}" == "${0}" ]] \
+    || [[ -n "${ZSH_EVAL_CONTEXT+x}" && "$ZSH_EVAL_CONTEXT" == "toplevel" ]]; then
+    set -euo pipefail
+fi
 
 BANSHEE_VERSION="0.1.0"
 BANSHEE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/banshee"
