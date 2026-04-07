@@ -108,6 +108,22 @@ banshee_select_repo() {
 
     [[ -z "$repos" ]] && echo "banshee: no git repositories found" >&2 && return 1
 
+    # Exact basename match — go directly without fzf
+    if [[ -n "$query" ]]; then
+        local exact_matches
+        exact_matches=$(echo "$repos" | while IFS= read -r r; do
+            [[ "$(basename "$r")" == "$query" ]] && echo "$r"
+        done)
+        if [[ -n "$exact_matches" ]]; then
+            local count
+            count=$(echo "$exact_matches" | wc -l)
+            if (( count == 1 )); then
+                echo "$exact_matches"
+                return 0
+            fi
+        fi
+    fi
+
     local fzf_args=(
         --height=40%
         --layout=reverse
