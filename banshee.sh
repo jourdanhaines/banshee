@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+# banshee - fluid git repository navigation powered by fzf
+# https://github.com/jourdanhaines/banshee
+
+set -euo pipefail
+
+BANSHEE_VERSION="0.1.0"
+BANSHEE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/banshee"
+BANSHEE_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/banshee"
+BANSHEE_CONFIG_FILE="$BANSHEE_CONFIG_DIR/banshee.conf"
+BANSHEE_SESSION_FILE="$BANSHEE_DATA_DIR/sessions"
+BANSHEE_CACHE_FILE="$BANSHEE_DATA_DIR/repo_cache"
+
+# --- Defaults (overridable via config) ---
+BANSHEE_SEARCH_PATHS=("$HOME")
+BANSHEE_MAX_DEPTH=5
+BANSHEE_KEYBIND="ctrl-f"
+BANSHEE_FZF_OPTS=""
+BANSHEE_CACHE_TTL=300  # seconds
+
+# --- Load config ---
+banshee_load_config() {
+    [[ -f "$BANSHEE_CONFIG_FILE" ]] || return 0
+    # Source the config file (bash-compatible key=value)
+    while IFS='=' read -r key value; do
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs)
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        case "$key" in
+            search_paths)
+                IFS=',' read -ra BANSHEE_SEARCH_PATHS <<< "$value"
+                ;;
+            max_depth)
+                BANSHEE_MAX_DEPTH="$value"
+                ;;
+            keybind)
+                BANSHEE_KEYBIND="$value"
+                ;;
+            fzf_opts)
+                BANSHEE_FZF_OPTS="$value"
+                ;;
+            cache_ttl)
+                BANSHEE_CACHE_TTL="$value"
+                ;;
+        esac
+    done < "$BANSHEE_CONFIG_FILE"
+}
+
+# --- Ensure directories exist ---
+banshee_init() {
+    mkdir -p "$BANSHEE_CONFIG_DIR" "$BANSHEE_DATA_DIR"
+    banshee_load_config
+}
+
+# --- Find git repositories ---
+banshee_find_repos() {
+    local use_cache=false
+
+    # Check cache freshness
+    if [[ -f "$BANSHEE_CACHE_FILE" ]]; then
+        local cache_age
+        cache_age=$(( $(date +%s) - $(stat -c %Y "$BANSHEE_CACHE_FILE" 2>/dev/null || echo 0) ))
+        if (( cache_age < BANSHEE_CACHE_TTL )); then
+            use_cache=true
+        fi
+    fi
+
+    if $use_cache; then
+        cat "$BANSHEE_CACHE_FILE"
+        return
+    fi
+
+    local repos=()
+    for search_path in "${BANSHEE_SEARCH_PATHS[@]}"; do
+        search_path=$(eval echo "$search_path")  # expand ~
+        [[ -d "$search_path" ]] || continue
+
+        if command -v fd &>/dev/null; then
+            while IFS= read -r repo; do
+                repos+=("$(dirname "$repo")")
+            done < <(fd --hidden --no-ignore --type d --max-depth "$BANSHEE_MAX_DEPTH" '^\.git$' "$search_path" 2>/dev/null)
+        else
+            while IFS= read -r repo; do
+                repos+=("$(dirname "$repo")")
+            done < <(find "$search_path" -maxdepth "$BANSHEE_MAX_DEPTH" -type d -name ".git" 2>/dev/null)
+        fi
+    done
+
+    # Deduplicate and sort
+    printf '%s\n' "${repos[@]}" | sort -u | tee "$BANSHEE_CACHE_FILE"
+}
+
+# --- List repo names (basenames) for completion ---
+banshee_list_repo_names() {
+    banshee_find_repos | xargs -I{} basename {} | sort -u
+}
+
+# --- Select a repo via fzf ---
+banshee_select_repo() {
+    local query="${1:-}"
+    local repos
+    repos=$(banshee_find_repos)
+
+    [[ -z "$repos" ]] && echo "banshee: no git repositories found" >&2 && return 1
+
+    local fzf_args=(
+        --height=40%
+        --layout=reverse
+        --border
+        --prompt="banshee> "
+        --header="Select a git repository"
+        --preview='ls -la --color=always {}'
+        --preview-window=right:40%
+    )
+
+    [[ -n "$query" ]] && fzf_args+=(--query="$query")
+    [[ -n "$BANSHEE_FZF_OPTS" ]] && eval "fzf_args+=($BANSHEE_FZF_OPTS)"
+
+    local selected
+    selected=$(echo "$repos" | fzf "${fzf_args[@]}") || return 1
+    echo "$selected"
+}
+
+# --- tmux session management ---
+banshee_has_tmux() {
+    command -v tmux &>/dev/null
+}
+
+banshee_session_name() {
+    local repo_path="$1"
+    local name
+    name=$(basename "$repo_path")
+    # tmux doesn't allow dots or colons in session names
+    echo "${name//[.:]/_}"
+}
+
+banshee_goto_repo() {
+    local repo_path="$1"
+
+    if ! banshee_has_tmux; then
+        # No tmux: just cd
+        echo "$repo_path"
+        return 0
+    fi
+
+    local session_name
+    session_name=$(banshee_session_name "$repo_path")
+
+    # Save session for persistence
+    banshee_save_session "$session_name" "$repo_path"
+
+    # Check if we're inside tmux
+    if [[ -n "${TMUX:-}" ]]; then
+        # Inside tmux
+        if tmux has-session -t "=$session_name" 2>/dev/null; then
+            tmux switch-client -t "=$session_name"
+        else
+            tmux new-session -d -s "$session_name" -c "$repo_path"
+            tmux switch-client -t "=$session_name"
+        fi
+    else
+        # Outside tmux
+        if tmux has-session -t "=$session_name" 2>/dev/null; then
+            tmux attach-session -t "=$session_name"
+        else
+            tmux new-session -s "$session_name" -c "$repo_path"
+        fi
+    fi
+}
+
+# --- Session persistence ---
+banshee_save_session() {
+    local session_name="$1"
+    local repo_path="$2"
+
+    # Remove existing entry for this session, then append
+    if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
+        local tmp
+        tmp=$(grep -v "^${session_name}|" "$BANSHEE_SESSION_FILE" 2>/dev/null || true)
+        echo "$tmp" > "$BANSHEE_SESSION_FILE"
+    fi
+    echo "${session_name}|${repo_path}" >> "$BANSHEE_SESSION_FILE"
+}
+
+banshee_remove_session() {
+    local session_name="$1"
+    [[ -f "$BANSHEE_SESSION_FILE" ]] || return 0
+    local tmp
+    tmp=$(grep -v "^${session_name}|" "$BANSHEE_SESSION_FILE" 2>/dev/null || true)
+    echo "$tmp" > "$BANSHEE_SESSION_FILE"
+}
+
+banshee_sync_sessions() {
+    # Remove sessions from persistence that are no longer running in tmux
+    [[ -f "$BANSHEE_SESSION_FILE" ]] || return 0
+    banshee_has_tmux || return 0
+
+    local active_sessions
+    active_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+
+    local synced=""
+    while IFS='|' read -r name path; do
+        [[ -z "$name" ]] && continue
+        if echo "$active_sessions" | grep -qx "$name"; then
+            synced+="${name}|${path}"$'\n'
+        fi
+    done < "$BANSHEE_SESSION_FILE"
+    echo "$synced" > "$BANSHEE_SESSION_FILE"
+}
+
+banshee_restore_sessions() {
+    banshee_has_tmux || { echo "banshee: tmux is not installed" >&2; return 1; }
+    [[ -f "$BANSHEE_SESSION_FILE" ]] || { echo "banshee: no saved sessions to restore" >&2; return 1; }
+
+    local restored=0
+    while IFS='|' read -r name path; do
+        [[ -z "$name" ]] && continue
+        [[ -d "$path" ]] || { echo "banshee: skipping $name (directory $path no longer exists)" >&2; continue; }
+
+        if ! tmux has-session -t "=$name" 2>/dev/null; then
+            tmux new-session -d -s "$name" -c "$path"
+            echo "banshee: restored session '$name' -> $path"
+            ((restored++))
+        else
+            echo "banshee: session '$name' already running"
+        fi
+    done < "$BANSHEE_SESSION_FILE"
+
+    if (( restored == 0 )); then
+        echo "banshee: no sessions needed restoring"
+    else
+        echo "banshee: restored $restored session(s)"
+    fi
+}
+
+# --- Clear repo cache ---
+banshee_clear_cache() {
+    rm -f "$BANSHEE_CACHE_FILE"
+    echo "banshee: cache cleared"
+}
+
+# --- Usage ---
+banshee_usage() {
+    cat <<'EOF'
+banshee - fluid git repository navigation powered by fzf
+
+Usage:
+  banshee [query]         Find and navigate to a git repository
+  banshee -r, --restore   Restore saved tmux sessions
+  banshee -s, --sync      Sync saved sessions with running tmux sessions
+  banshee -l, --list      List saved sessions
+  banshee -c, --clear     Clear the repository cache
+  banshee -v, --version   Show version
+  banshee -h, --help      Show this help
+
+Configuration: ~/.config/banshee/banshee.conf
+
+EOF
+}
+
+# --- Main entry point ---
+banshee_main() {
+    banshee_init
+
+    case "${1:-}" in
+        -h|--help)
+            banshee_usage
+            return 0
+            ;;
+        -v|--version)
+            echo "banshee $BANSHEE_VERSION"
+            return 0
+            ;;
+        -r|--restore)
+            banshee_restore_sessions
+            return $?
+            ;;
+        -s|--sync)
+            banshee_sync_sessions
+            echo "banshee: sessions synced"
+            return 0
+            ;;
+        -l|--list)
+            if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
+                while IFS='|' read -r name path; do
+                    [[ -z "$name" ]] && continue
+                    local status="stopped"
+                    if banshee_has_tmux && tmux has-session -t "=$name" 2>/dev/null; then
+                        status="running"
+                    fi
+                    printf "  %-20s %s [%s]\n" "$name" "$path" "$status"
+                done < "$BANSHEE_SESSION_FILE"
+            else
+                echo "banshee: no saved sessions"
+            fi
+            return 0
+            ;;
+        -c|--clear)
+            banshee_clear_cache
+            return 0
+            ;;
+        -*)
+            echo "banshee: unknown option '$1'" >&2
+            banshee_usage >&2
+            return 1
+            ;;
+        *)
+            # Select repo with optional query
+            local selected
+            selected=$(banshee_select_repo "${1:-}") || return 1
+
+            if banshee_has_tmux; then
+                banshee_goto_repo "$selected"
+            else
+                # No tmux — output path for cd (called via shell function wrapper)
+                echo "$selected"
+            fi
+            ;;
+    esac
+}
+
+# Only run main if executed directly (not sourced)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    banshee_main "$@"
+fi
