@@ -10,10 +10,10 @@ BANSHEE_INSTALL_DIR="${HOME}/.local/share/banshee/plugin"
 BANSHEE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/banshee"
 BANSHEE_BIN_DIR="${HOME}/.local/bin"
 
-info() { echo -e "\033[1;34m::\033[0m $*"; }
-ok()   { echo -e "\033[1;32m✓\033[0m $*"; }
-warn() { echo -e "\033[1;33m!\033[0m $*"; }
-err()  { echo -e "\033[1;31m✗\033[0m $*" >&2; }
+info() { printf "\033[1;34m::\033[0m %s\n" "$*"; }
+ok()   { printf "\033[1;32m✓\033[0m %s\n" "$*"; }
+warn() { printf "\033[1;33m!\033[0m %s\n" "$*"; }
+err()  { printf "\033[1;31m✗\033[0m %s\n" "$*" >&2; }
 
 # --- Check dependencies ---
 check_deps() {
@@ -25,8 +25,13 @@ check_deps() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         err "Missing required dependencies: ${missing[*]}"
         echo "  Install them with your package manager, e.g.:"
-        echo "    sudo pacman -S ${missing[*]}"
-        echo "    sudo apt install ${missing[*]}"
+        if [[ "$OSTYPE" == darwin* ]]; then
+            echo "    brew install ${missing[*]}"
+        elif command -v pacman &>/dev/null; then
+            echo "    sudo pacman -S ${missing[*]}"
+        else
+            echo "    sudo apt install ${missing[*]}"
+        fi
         exit 1
     fi
 
@@ -121,7 +126,11 @@ uninstall() {
     # Remove source line from shell config
     for rc_file in "$HOME/.zshrc" "$HOME/.bashrc"; do
         if [[ -f "$rc_file" ]] && grep -qF "banshee" "$rc_file"; then
-            sed -i '/# banshee - git repo switcher/d;/banshee\.plugin\./d' "$rc_file"
+            if [[ "$OSTYPE" == darwin* ]]; then
+                sed -i '' '/# banshee - git repo switcher/d;/banshee\.plugin\./d' "$rc_file"
+            else
+                sed -i '/# banshee - git repo switcher/d;/banshee\.plugin\./d' "$rc_file"
+            fi
             ok "Removed banshee from $rc_file"
         fi
     done

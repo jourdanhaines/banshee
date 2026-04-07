@@ -67,7 +67,13 @@ banshee_find_repos() {
     # Check cache freshness
     if [[ -f "$BANSHEE_CACHE_FILE" ]]; then
         local cache_age
-        cache_age=$(( $(date +%s) - $(stat -c %Y "$BANSHEE_CACHE_FILE" 2>/dev/null || echo 0) ))
+        local file_mtime
+        if [[ "$OSTYPE" == darwin* ]]; then
+            file_mtime=$(stat -f %m "$BANSHEE_CACHE_FILE" 2>/dev/null || echo 0)
+        else
+            file_mtime=$(stat -c %Y "$BANSHEE_CACHE_FILE" 2>/dev/null || echo 0)
+        fi
+        cache_age=$(( $(date +%s) - file_mtime ))
         if (( cache_age < BANSHEE_CACHE_TTL )); then
             use_cache=true
         fi
@@ -140,7 +146,7 @@ banshee_select_repo() {
     local preview_cmd='
         name={}
         path=$(echo "$BANSHEE_REPO_LIST" | grep "|${name}$" | head -1 | cut -d"|" -f1)
-        echo -e "\033[1;34m$path\033[0m"
+        printf "\033[1;34m%s\033[0m\n" "$path"
         echo ""
         readme="$path/README.md"
         if [[ -f "$readme" ]]; then
