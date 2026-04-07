@@ -250,16 +250,16 @@ banshee_sync_sessions() {
     banshee_has_tmux || return 0
 
     # Start with existing saved sessions that are still running
-    local synced="" line name path
+    local synced="" line sname spath
     if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
         local active_sessions
         active_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
         while read -r line; do
             [[ -z "$line" ]] && continue
-            name="${line%%|*}"
-            path="${line#*|}"
-            if echo "$active_sessions" | command grep -qx "$name"; then
-                synced+="${name}|${path}"$'\n'
+            sname="${line%%|*}"
+            spath="${line#*|}"
+            if echo "$active_sessions" | command grep -qx "$sname"; then
+                synced+="${sname}|${spath}"$'\n'
             fi
         done < "$BANSHEE_SESSION_FILE"
     fi
@@ -284,19 +284,19 @@ banshee_restore_sessions() {
     banshee_has_tmux || { echo "banshee: tmux is not installed" >&2; return 1; }
     [[ -f "$BANSHEE_SESSION_FILE" ]] || { echo "banshee: no saved sessions to restore" >&2; return 1; }
 
-    local restored=0 line name path
+    local restored=0 line sname spath
     while read -r line; do
         [[ -z "$line" ]] && continue
-        name="${line%%|*}"
-        path="${line#*|}"
-        [[ -d "$path" ]] || { echo "banshee: skipping $name (directory $path no longer exists)" >&2; continue; }
+        sname="${line%%|*}"
+        spath="${line#*|}"
+        [[ -d "$spath" ]] || { echo "banshee: skipping $sname (directory $spath no longer exists)" >&2; continue; }
 
-        if ! tmux has-session -t "=$name" 2>/dev/null; then
-            tmux new-session -d -s "$name" -c "$path"
-            echo "banshee: restored session '$name' -> $path"
+        if ! tmux has-session -t "=$sname" 2>/dev/null; then
+            tmux new-session -d -s "$sname" -c "$spath"
+            echo "banshee: restored session '$sname' -> $spath"
             ((restored++))
         else
-            echo "banshee: session '$name' already running"
+            echo "banshee: session '$sname' already running"
         fi
     done < "$BANSHEE_SESSION_FILE"
 
@@ -356,16 +356,16 @@ banshee_main() {
             ;;
         -l|--list)
             if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
-                local line name path
+                local line sname spath
                 while read -r line; do
                     [[ -z "$line" ]] && continue
-                    name="${line%%|*}"
-                    path="${line#*|}"
+                    sname="${line%%|*}"
+                    spath="${line#*|}"
                     local state="stopped"
-                    if banshee_has_tmux && tmux has-session -t "=$name" 2>/dev/null; then
+                    if banshee_has_tmux && tmux has-session -t "=$sname" 2>/dev/null; then
                         state="running"
                     fi
-                    printf "  %-20s %s [%s]\n" "$name" "$path" "$state"
+                    printf "  %-20s %s [%s]\n" "$sname" "$spath" "$state"
                 done < "$BANSHEE_SESSION_FILE"
             else
                 echo "banshee: no saved sessions"
