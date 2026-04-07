@@ -39,10 +39,13 @@ _banshee_keybind() {
 _banshee_read_keybind() {
     local conf="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/banshee.conf"
     [[ -f "$conf" ]] || return
-    while IFS='=' read -r key value; do
-        key="${key## }"; key="${key%% }"
-        value="${value## }"; value="${value%% }"
-        [[ "$key" == "keybind" ]] && BANSHEE_KEYBIND="$value" && return
+    local line
+    while read -r line; do
+        [[ "$line" == *"keybind"*"="* ]] || continue
+        BANSHEE_KEYBIND="${line#*=}"
+        BANSHEE_KEYBIND="${BANSHEE_KEYBIND## }"
+        BANSHEE_KEYBIND="${BANSHEE_KEYBIND%% }"
+        return
     done < "$conf"
 }
 _banshee_read_keybind
