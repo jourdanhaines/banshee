@@ -34,13 +34,20 @@ check_deps() {
     command -v fd &>/dev/null   || warn "fd not found — falling back to find (slower)"
 }
 
-# --- Download a file from the repo ---
+# --- Resolve script directory (for local installs) ---
+BANSHEE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+
+# --- Fetch a file (local copy preferred, fallback to GitHub) ---
 download() {
     local file="$1" dest="$2"
-    curl -fsSL "${BANSHEE_RAW_URL}/${file}" -o "$dest" || {
-        err "Failed to download $file"
-        exit 1
-    }
+    if [[ -f "$BANSHEE_SCRIPT_DIR/$file" ]]; then
+        cp "$BANSHEE_SCRIPT_DIR/$file" "$dest"
+    else
+        curl -fsSL "${BANSHEE_RAW_URL}/${file}" -o "$dest" || {
+            err "Failed to download $file"
+            exit 1
+        }
+    fi
 }
 
 # --- Install files ---
