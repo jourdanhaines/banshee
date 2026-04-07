@@ -38,40 +38,40 @@ _banshee_widget() {
 }
 zle -N _banshee_widget
 
-# Load config to get keybind
-banshee_init
+# Read keybind from config file directly (no init, no subcommands)
+_banshee_read_keybind() {
+    local conf="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/banshee.conf"
+    [[ -f "$conf" ]] || return
+    while IFS='=' read -r key value; do
+        key="${key## }"; key="${key%% }"
+        value="${value## }"; value="${value%% }"
+        [[ "$key" == "keybind" ]] && BANSHEE_KEYBIND="$value" && return
+    done < "$conf"
+}
+_banshee_read_keybind
 
 # Bind the key (configurable via banshee.conf)
-bindkey "^f" _banshee_widget 2>/dev/null  # default fallback
-case "$BANSHEE_KEYBIND" in
+case "${BANSHEE_KEYBIND:-ctrl-f}" in
     ctrl-f)  bindkey "^f" _banshee_widget ;;
     ctrl-g)  bindkey "^g" _banshee_widget ;;
     ctrl-b)  bindkey "^b" _banshee_widget ;;
     ctrl-p)  bindkey "^p" _banshee_widget ;;
     ctrl-o)  bindkey "^o" _banshee_widget ;;
     ctrl-\\) bindkey "^\\" _banshee_widget ;;
-    *)
-        # Attempt to bind raw sequence if it looks like a key notation
-        bindkey "$BANSHEE_KEYBIND" _banshee_widget 2>/dev/null || true
-        ;;
+    *)       bindkey "$BANSHEE_KEYBIND" _banshee_widget 2>/dev/null || true ;;
 esac
 
 # --- Tab completion ---
 _banshee_complete() {
     local -a repos
     repos=("${(@f)$(banshee_find_repos | while IFS= read -r line; do basename "$line"; done | sort -u)}")
-
-    # If only one match, complete it directly
-    # If multiple matches or partial input, offer completion list
     _describe 'git repositories' repos
 }
 
 compdef _banshee_complete banshee
 
 # --- Sync sessions on shell exit (if tmux is available) ---
-if banshee_has_tmux; then
-    _banshee_zshexit() {
-        banshee_sync_sessions 2>/dev/null
-    }
-    add-zsh-hook zshexit _banshee_zshexit 2>/dev/null || true
-fi
+_banshee_zshexit() {
+    command -v tmux &>/dev/null && banshee_sync_sessions 2>/dev/null
+}
+add-zsh-hook zshexit _banshee_zshexit 2>/dev/null || true
