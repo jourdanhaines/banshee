@@ -247,22 +247,36 @@ banshee_remove_session() {
 }
 
 banshee_sync_sessions() {
-    # Remove sessions from persistence that are no longer running in tmux
-    [[ -f "$BANSHEE_SESSION_FILE" ]] || return 0
     banshee_has_tmux || return 0
 
-    local active_sessions
-    active_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
-
+    # Start with existing saved sessions that are still running
     local synced="" line name path
+    if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
+        local active_sessions
+        active_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+        while read -r line; do
+            [[ -z "$line" ]] && continue
+            name="${line%%|*}"
+            path="${line#*|}"
+            if echo "$active_sessions" | command grep -qx "$name"; then
+                synced+="${name}|${path}"$'\n'
+            fi
+        done < "$BANSHEE_SESSION_FILE"
+    fi
+
+    # Add any running tmux sessions whose working directory is a git repo
+    local sess_name sess_path
     while read -r line; do
         [[ -z "$line" ]] && continue
-        name="${line%%|*}"
-        path="${line#*|}"
-        if echo "$active_sessions" | command grep -qx "$name"; then
-            synced+="${name}|${path}"$'\n'
-        fi
-    done < "$BANSHEE_SESSION_FILE"
+        sess_name="${line%%|*}"
+        sess_path="${line#*|}"
+        # Skip if already tracked
+        [[ "$synced" == *"${sess_name}|"* ]] && continue
+        # Only add if it's a git repo
+        [[ -d "${sess_path}/.git" ]] || continue
+        synced+="${sess_name}|${sess_path}"$'\n'
+    done <<< "$(tmux list-sessions -F '#{session_name}|#{session_path}' 2>/dev/null || true)"
+
     echo "$synced" > "$BANSHEE_SESSION_FILE"
 }
 
