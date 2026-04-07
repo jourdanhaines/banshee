@@ -71,36 +71,38 @@ install_config() {
     fi
 }
 
-# --- Detect shell and print sourcing instructions ---
-print_shell_setup() {
+# --- Add source line to shell config ---
+setup_shell() {
     local shell_name
     shell_name=$(basename "${SHELL:-bash}")
 
-    echo ""
-    info "Add the following to your shell config:"
-    echo ""
-
+    local rc_file plugin_file source_line
     case "$shell_name" in
         zsh)
-            echo "  # ~/.zshrc"
-            echo "  source \"$BANSHEE_INSTALL_DIR/banshee.plugin.zsh\""
-            ;;
-        bash)
-            echo "  # ~/.bashrc"
-            echo "  source \"$BANSHEE_INSTALL_DIR/banshee.plugin.bash\""
+            rc_file="$HOME/.zshrc"
+            plugin_file="$BANSHEE_INSTALL_DIR/banshee.plugin.zsh"
             ;;
         *)
-            echo "  # For your shell, source the appropriate plugin file:"
-            echo "  source \"$BANSHEE_INSTALL_DIR/banshee.plugin.bash\""
+            rc_file="$HOME/.bashrc"
+            plugin_file="$BANSHEE_INSTALL_DIR/banshee.plugin.bash"
             ;;
     esac
 
+    source_line="source \"$plugin_file\""
+
+    # Already present — skip
+    if [[ -f "$rc_file" ]] && grep -qF "$plugin_file" "$rc_file"; then
+        ok "Shell config already set up in $rc_file"
+        return
+    fi
+
+    echo "" >> "$rc_file"
+    echo "# banshee - git repo switcher" >> "$rc_file"
+    echo "$source_line" >> "$rc_file"
+    ok "Added source line to $rc_file"
+
     echo ""
-    echo "  Then restart your shell or run: source ~/.${shell_name}rc"
-    echo ""
-    echo "  Make sure ~/.local/bin is in your PATH:"
-    echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-    echo ""
+    info "Restart your shell or run: source $rc_file"
 }
 
 # --- Uninstall ---
@@ -108,9 +110,17 @@ uninstall() {
     info "Uninstalling banshee..."
     rm -rf "$BANSHEE_INSTALL_DIR"
     rm -f "$BANSHEE_BIN_DIR/banshee"
+
+    # Remove source line from shell config
+    for rc_file in "$HOME/.zshrc" "$HOME/.bashrc"; do
+        if [[ -f "$rc_file" ]] && grep -qF "banshee" "$rc_file"; then
+            sed -i '/# banshee - git repo switcher/d;/banshee\.plugin\./d' "$rc_file"
+            ok "Removed banshee from $rc_file"
+        fi
+    done
+
     ok "banshee uninstalled"
     warn "Config left at $BANSHEE_CONFIG_DIR (remove manually if desired)"
-    warn "Remember to remove the source line from your shell config"
 }
 
 # --- Main ---
@@ -126,7 +136,7 @@ case "${1:-}" in
         check_deps
         install_files
         install_config
-        print_shell_setup
+        setup_shell
         ok "Installation complete!"
         ;;
 esac
