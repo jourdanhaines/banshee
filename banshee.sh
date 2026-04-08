@@ -14,6 +14,7 @@ BANSHEE_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/banshee"
 BANSHEE_CONFIG_FILE="$BANSHEE_CONFIG_DIR/banshee.conf"
 BANSHEE_SESSION_FILE="$BANSHEE_DATA_DIR/sessions"
 BANSHEE_CACHE_FILE="$BANSHEE_DATA_DIR/repo_cache"
+BANSHEE_STATE_FILE="$BANSHEE_DATA_DIR/session_state"
 
 # --- Defaults (overridable via config) ---
 BANSHEE_SEARCH_PATHS=("$HOME")
@@ -284,27 +285,162 @@ banshee_sync_sessions() {
     done <<< "$(tmux list-sessions -F '#{session_name}|#{session_path}' 2>/dev/null || true)"
 
     echo "$synced" > "$BANSHEE_SESSION_FILE"
+    banshee_save_state
 }
 
-banshee_restore_sessions() {
-    banshee_has_tmux || { echo "banshee: tmux is not installed" >&2; return 1; }
-    [[ -f "$BANSHEE_SESSION_FILE" ]] || { echo "banshee: no saved sessions to restore" >&2; return 1; }
+# --- Save detailed session state (panes, layouts, directories) ---
+banshee_save_state() {
+    banshee_has_tmux || return 0
+    [[ -f "$BANSHEE_SESSION_FILE" ]] || return 0
 
-    local restored=0 line sname spath
-    while read -r line; do
+    : > "$BANSHEE_STATE_FILE"
+
+    local line sname
+    while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         sname="${line%%|*}"
-        spath="${line#*|}"
-        [[ -d "$spath" ]] || { echo "banshee: skipping $sname (directory $spath no longer exists)" >&2; continue; }
+        tmux has-session -t "=$sname" 2>/dev/null || continue
+        tmux list-panes -t "=$sname" -s \
+            -F '#{session_name}|#{window_index}|#{window_name}|#{pane_index}|#{pane_current_path}|#{pane_active}|#{window_active}|#{window_layout}' \
+            >> "$BANSHEE_STATE_FILE" 2>/dev/null || true
+    done < "$BANSHEE_SESSION_FILE"
+}
 
-        if ! tmux has-session -t "=$sname" 2>/dev/null; then
+# --- Restore sessions with full pane/window state ---
+banshee_restore_sessions() {
+    banshee_has_tmux || { echo "banshee: tmux is not installed" >&2; return 1; }
+
+    local has_state=false
+    [[ -f "$BANSHEE_STATE_FILE" && -s "$BANSHEE_STATE_FILE" ]] && has_state=true
+
+    # Fall back to simple restore if no detailed state
+    if ! $has_state; then
+        [[ -f "$BANSHEE_SESSION_FILE" ]] || { echo "banshee: no saved sessions to restore" >&2; return 1; }
+        local restored=0 line sname spath
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            sname="${line%%|*}"
+            spath="${line#*|}"
+            [[ -d "$spath" ]] || continue
+            if ! tmux has-session -t "=$sname" 2>/dev/null; then
+                tmux new-session -d -s "$sname" -c "$spath"
+                echo "banshee: restored session '$sname' -> $spath"
+                ((restored++))
+            fi
+        done < "$BANSHEE_SESSION_FILE"
+        if (( restored == 0 )); then
+            echo "banshee: no sessions needed restoring"
+        else
+            echo "banshee: restored $restored session(s)"
+        fi
+        return 0
+    fi
+
+    # Full state restore
+    local restored=0
+    local base_idx
+    base_idx=$(tmux show-option -gv base-index 2>/dev/null || echo 0)
+
+    # Get unique session names from state file
+    local sessions
+    sessions=$(awk -F'|' '{print $1}' "$BANSHEE_STATE_FILE" | sort -u)
+
+    local sname
+    while IFS= read -r sname; do
+        [[ -z "$sname" ]] && continue
+
+        if tmux has-session -t "=$sname" 2>/dev/null; then
+            echo "banshee: session '$sname' already running"
+            continue
+        fi
+
+        local win_num=0 active_win_num="" prev_win_idx=""
+        local first_pane=true cur_win_target="" prev_layout=""
+        local _rest _sn win_idx win_name pane_idx pane_dir pane_active win_active win_layout
+
+        while IFS= read -r pane_line; do
+            [[ -z "$pane_line" ]] && continue
+            # Parse pipe-separated fields without IFS mutation
+            _rest="$pane_line"
+            _sn="${_rest%%|*}"; _rest="${_rest#*|}"
+            [[ "$_sn" == "$sname" ]] || continue
+            win_idx="${_rest%%|*}"; _rest="${_rest#*|}"
+            win_name="${_rest%%|*}"; _rest="${_rest#*|}"
+            pane_idx="${_rest%%|*}"; _rest="${_rest#*|}"
+            pane_dir="${_rest%%|*}"; _rest="${_rest#*|}"
+            pane_active="${_rest%%|*}"; _rest="${_rest#*|}"
+            win_active="${_rest%%|*}"; _rest="${_rest#*|}"
+            win_layout="$_rest"
+
+            [[ -d "$pane_dir" ]] || pane_dir="$HOME"
+
+            if [[ "$win_idx" != "$prev_win_idx" ]]; then
+                # Apply layout to previous window
+                if [[ -n "$cur_win_target" && -n "$prev_layout" ]]; then
+                    tmux select-layout -t "$cur_win_target" "$prev_layout" 2>/dev/null || true
+                fi
+
+                if $first_pane; then
+                    tmux new-session -d -s "$sname" -c "$pane_dir"
+                    first_pane=false
+                else
+                    tmux new-window -t "=$sname" -c "$pane_dir"
+                fi
+
+                cur_win_target="=$sname:$((base_idx + win_num))"
+
+                if [[ -n "$win_name" && "$win_name" != "zsh" && "$win_name" != "bash" && "$win_name" != "fish" ]]; then
+                    tmux rename-window -t "$cur_win_target" "$win_name" 2>/dev/null || true
+                fi
+
+                if [[ "$win_active" == "1" ]]; then
+                    active_win_num=$((base_idx + win_num))
+                fi
+                prev_win_idx="$win_idx"
+                prev_layout="$win_layout"
+                ((win_num++))
+            else
+                # Additional pane in current window — split
+                tmux split-window -t "$cur_win_target" -c "$pane_dir"
+                prev_layout="$win_layout"
+            fi
+
+            # Select active pane
+            if [[ "$pane_active" == "1" && -n "$cur_win_target" ]]; then
+                tmux select-pane -t "${cur_win_target}.${pane_idx}" 2>/dev/null || true
+            fi
+        done < "$BANSHEE_STATE_FILE"
+
+        # Apply layout to last window
+        if [[ -n "$cur_win_target" && -n "$prev_layout" ]]; then
+            tmux select-layout -t "$cur_win_target" "$prev_layout" 2>/dev/null || true
+        fi
+
+        # Select active window
+        if [[ -n "$active_win_num" ]]; then
+            tmux select-window -t "=$sname:${active_win_num}" 2>/dev/null || true
+        fi
+
+        if (( win_num > 0 )); then
+            echo "banshee: restored session '$sname' ($win_num window(s))"
+            ((restored++))
+        fi
+    done <<< "$sessions"
+
+    # Also restore sessions from session file that aren't in state file
+    if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
+        local line spath
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            sname="${line%%|*}"
+            spath="${line#*|}"
+            tmux has-session -t "=$sname" 2>/dev/null && continue
+            [[ -d "$spath" ]] || continue
             tmux new-session -d -s "$sname" -c "$spath"
             echo "banshee: restored session '$sname' -> $spath"
             ((restored++))
-        else
-            echo "banshee: session '$sname' already running"
-        fi
-    done < "$BANSHEE_SESSION_FILE"
+        done < "$BANSHEE_SESSION_FILE"
+    fi
 
     if (( restored == 0 )); then
         echo "banshee: no sessions needed restoring"
@@ -326,8 +462,8 @@ banshee - fluid git repository navigation powered by fzf
 
 Usage:
   banshee [query]         Find and navigate to a git repository
-  banshee -r, --restore   Restore saved tmux sessions
-  banshee -s, --sync      Sync saved sessions with running tmux sessions
+  banshee -r, --restore   Restore saved tmux sessions (panes, layouts, directories)
+  banshee -s, --sync      Sync and save session state (panes, layouts, directories)
   banshee -l, --list      List saved sessions
   banshee -c, --clear     Clear the repository cache
   banshee -v, --version   Show version
