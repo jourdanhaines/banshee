@@ -22,6 +22,7 @@ BANSHEE_MAX_DEPTH=5
 BANSHEE_KEYBIND="ctrl-f"
 BANSHEE_FZF_OPTS=""
 BANSHEE_CACHE_TTL=300  # seconds
+BANSHEE_STARTUP_PROMPT=true
 
 # --- Load config ---
 banshee_load_config() {
@@ -46,10 +47,11 @@ banshee_load_config() {
                     [[ "$_remainder" == *,* ]] && _remainder="${_remainder#*,}" || _remainder=""
                 done
                 ;;
-            max_depth)    BANSHEE_MAX_DEPTH="$value" ;;
-            keybind)      BANSHEE_KEYBIND="$value" ;;
-            fzf_opts)     BANSHEE_FZF_OPTS="$value" ;;
-            cache_ttl)    BANSHEE_CACHE_TTL="$value" ;;
+            max_depth)      BANSHEE_MAX_DEPTH="$value" ;;
+            keybind)        BANSHEE_KEYBIND="$value" ;;
+            fzf_opts)       BANSHEE_FZF_OPTS="$value" ;;
+            cache_ttl)      BANSHEE_CACHE_TTL="$value" ;;
+            startup_prompt) BANSHEE_STARTUP_PROMPT="$value" ;;
         esac
     done < "$BANSHEE_CONFIG_FILE"
 }
@@ -306,9 +308,85 @@ banshee_save_state() {
     done < "$BANSHEE_SESSION_FILE"
 }
 
+# --- Build list of saved session names (newline-separated, sorted, unique) ---
+banshee_saved_session_names() {
+    [[ -f "$BANSHEE_SESSION_FILE" ]] || return 0
+    local line sname
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        sname="${line%%|*}"
+        [[ -z "$sname" ]] && continue
+        echo "$sname"
+    done < "$BANSHEE_SESSION_FILE" | sort -u
+}
+
+# --- Kill running tmux sessions not in saved list ---
+banshee_kill_extra_sessions() {
+    banshee_has_tmux || return 0
+
+    local saved
+    saved=$(banshee_saved_session_names)
+
+    local current_session=""
+    if [[ -n "${TMUX:-}" ]]; then
+        current_session=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+    fi
+
+    local killed=0 rsess
+    while IFS= read -r rsess; do
+        [[ -z "$rsess" ]] && continue
+        # Skip saved sessions
+        if [[ -n "$saved" ]] && echo "$saved" | command grep -qx "$rsess"; then
+            continue
+        fi
+        # Don't kill the session we're currently attached to
+        if [[ "$rsess" == "$current_session" ]]; then
+            echo "banshee: skipping current session '$rsess' (attached)"
+            continue
+        fi
+        if tmux kill-session -t "=$rsess" 2>/dev/null; then
+            echo "banshee: killed session '$rsess'"
+            ((killed++))
+        fi
+    done <<< "$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)"
+
+    (( killed > 0 )) && echo "banshee: killed $killed extra session(s)"
+    return 0
+}
+
+# --- Prompt user to restore if saved != running ---
+banshee_check_startup_restore() {
+    banshee_has_tmux || return 0
+    [[ "${BANSHEE_STARTUP_PROMPT:-true}" == "true" ]] || return 0
+    [[ -n "${TMUX:-}" ]] && return 0
+    [[ -t 0 && -t 1 ]] || return 0
+    [[ -n "${BANSHEE_STARTUP_CHECKED:-}" ]] && return 0
+    export BANSHEE_STARTUP_CHECKED=1
+
+    local saved
+    saved=$(banshee_saved_session_names)
+    [[ -z "$saved" ]] && return 0
+
+    local running
+    running=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | sort -u || true)
+
+    [[ "$saved" == "$running" ]] && return 0
+
+    printf "banshee: restore saved sessions? [Y/n] "
+    local reply=""
+    read -r reply || return 0
+    case "$reply" in
+        ""|y|Y|yes|YES|Yes)
+            banshee_restore_sessions true
+            ;;
+    esac
+}
+
 # --- Restore sessions with full pane/window state ---
+# Arg 1: keep_others (true/false) — if false, kill running sessions not in saved list
 banshee_restore_sessions() {
     banshee_has_tmux || { echo "banshee: tmux is not installed" >&2; return 1; }
+    local keep_others="${1:-false}"
 
     local has_state=false
     [[ -f "$BANSHEE_STATE_FILE" && -s "$BANSHEE_STATE_FILE" ]] && has_state=true
@@ -332,6 +410,9 @@ banshee_restore_sessions() {
             echo "banshee: no sessions needed restoring"
         else
             echo "banshee: restored $restored session(s)"
+        fi
+        if [[ "$keep_others" != "true" ]]; then
+            banshee_kill_extra_sessions
         fi
         return 0
     fi
@@ -447,6 +528,10 @@ banshee_restore_sessions() {
     else
         echo "banshee: restored $restored session(s)"
     fi
+
+    if [[ "$keep_others" != "true" ]]; then
+        banshee_kill_extra_sessions
+    fi
 }
 
 # --- Clear repo cache ---
@@ -462,7 +547,8 @@ banshee - fluid git repository navigation powered by fzf
 
 Usage:
   banshee [query]         Find and navigate to a git repository
-  banshee -r, --restore   Restore saved tmux sessions (panes, layouts, directories)
+  banshee -r, --restore   Restore saved tmux sessions; kill any not in saved list
+  banshee -rk, -r -k      Restore saved sessions, keep other running sessions
   banshee -s, --sync      Sync and save session state (panes, layouts, directories)
   banshee -l, --list      List saved sessions
   banshee -c, --clear     Clear the repository cache
@@ -488,7 +574,13 @@ banshee_main() {
             return 0
             ;;
         -r|--restore)
-            banshee_restore_sessions
+            local keep=false
+            [[ "${2:-}" == "-k" || "${2:-}" == "--keep" ]] && keep=true
+            banshee_restore_sessions "$keep"
+            return $?
+            ;;
+        -rk|-kr|--restore-keep)
+            banshee_restore_sessions true
             return $?
             ;;
         -s|--sync)

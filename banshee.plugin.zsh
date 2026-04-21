@@ -13,7 +13,7 @@ banshee() {
     banshee_init
 
     case "${1:-}" in
-        -h|--help|-v|--version|-r|--restore|-s|--sync|-l|--list|-c|--clear)
+        -h|--help|-v|--version|-r|--restore|-rk|-kr|--restore-keep|-s|--sync|-l|--list|-c|--clear)
             banshee_main "$@"
             return $?
             ;;
@@ -78,3 +78,9 @@ _banshee_zshexit() {
     command -v tmux &>/dev/null && banshee_sync_sessions 2>/dev/null
 }
 add-zsh-hook zshexit _banshee_zshexit 2>/dev/null || true
+
+# --- Startup: prompt to restore saved sessions if they differ from running ---
+if [[ -o interactive ]]; then
+    banshee_init 2>/dev/null
+    banshee_check_startup_restore
+fi

@@ -13,7 +13,7 @@ banshee() {
     banshee_init
 
     case "${1:-}" in
-        -h|--help|-v|--version|-r|--restore|-s|--sync|-l|--list|-c|--clear)
+        -h|--help|-v|--version|-r|--restore|-rk|-kr|--restore-keep|-s|--sync|-l|--list|-c|--clear)
             banshee_main "$@"
             return $?
             ;;
@@ -77,7 +77,7 @@ _banshee_completions() {
 
     # Handle flag completion
     if [[ "$cur" == -* ]]; then
-        COMPREPLY=($(compgen -W "--help --version --restore --sync --list --clear" -- "$cur"))
+        COMPREPLY=($(compgen -W "--help --version --restore --restore-keep --sync --list --clear -r -rk -k -s -l -c" -- "$cur"))
         return
     fi
 
@@ -95,4 +95,10 @@ if command -v tmux &>/dev/null; then
         banshee_sync_sessions 2>/dev/null
     }
     trap _banshee_bash_exit EXIT
+fi
+
+# --- Startup: prompt to restore saved sessions if they differ from running ---
+if [[ $- == *i* ]]; then
+    banshee_init 2>/dev/null
+    banshee_check_startup_restore
 fi
