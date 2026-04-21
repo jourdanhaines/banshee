@@ -40,7 +40,11 @@ check_deps() {
 }
 
 # --- Resolve script directory (for local installs) ---
-BANSHEE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    BANSHEE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+else
+    BANSHEE_SCRIPT_DIR=""
+fi
 
 # --- Fetch a file (local copy preferred, fallback to GitHub) ---
 download() {
