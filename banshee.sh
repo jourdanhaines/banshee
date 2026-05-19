@@ -8,13 +8,13 @@ if [[ -n "${BASH_SOURCE+x}" && "${BASH_SOURCE[0]}" == "${0}" ]] \
     set -euo pipefail
 fi
 
-BANSHEE_VERSION="0.1.0"
+BANSHEE_VERSION="0.2.0"
 BANSHEE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/banshee"
 BANSHEE_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/banshee"
 BANSHEE_CONFIG_FILE="$BANSHEE_CONFIG_DIR/banshee.conf"
-BANSHEE_SESSION_FILE="$BANSHEE_DATA_DIR/sessions"
+BANSHEE_SESSIONS_DIR="$BANSHEE_CONFIG_DIR/sessions"
 BANSHEE_CACHE_FILE="$BANSHEE_DATA_DIR/repo_cache"
-BANSHEE_STATE_FILE="$BANSHEE_DATA_DIR/session_state"
+BANSHEE_LAST_FILE="$BANSHEE_DATA_DIR/last_loaded"
 
 # --- Defaults (overridable via config) ---
 BANSHEE_SEARCH_PATHS=("$HOME")
@@ -37,7 +37,6 @@ banshee_load_config() {
         value="${value## }"; value="${value%% }"
         case "$key" in
             search_paths)
-                # Split on comma without touching IFS
                 BANSHEE_SEARCH_PATHS=()
                 local _remainder="$value"
                 while [[ -n "$_remainder" ]]; do
@@ -56,10 +55,16 @@ banshee_load_config() {
     done < "$BANSHEE_CONFIG_FILE"
 }
 
-# --- Ensure directories exist ---
+# --- Ensure directories exist + migrate from old session storage ---
 banshee_init() {
-    [[ -d "$BANSHEE_CONFIG_DIR" ]] || command mkdir -p "$BANSHEE_CONFIG_DIR"
-    [[ -d "$BANSHEE_DATA_DIR" ]]   || command mkdir -p "$BANSHEE_DATA_DIR"
+    [[ -d "$BANSHEE_CONFIG_DIR" ]]   || command mkdir -p "$BANSHEE_CONFIG_DIR"
+    [[ -d "$BANSHEE_SESSIONS_DIR" ]] || command mkdir -p "$BANSHEE_SESSIONS_DIR"
+    [[ -d "$BANSHEE_DATA_DIR" ]]     || command mkdir -p "$BANSHEE_DATA_DIR"
+
+    # Migration: drop the old flat session/state files (no useful mapping to JSON model)
+    [[ -f "$BANSHEE_DATA_DIR/sessions" ]] && rm -f "$BANSHEE_DATA_DIR/sessions" 2>/dev/null
+    [[ -f "$BANSHEE_DATA_DIR/session_state" ]] && rm -f "$BANSHEE_DATA_DIR/session_state" 2>/dev/null
+
     banshee_load_config
 }
 
@@ -67,7 +72,6 @@ banshee_init() {
 banshee_find_repos() {
     local use_cache=false
 
-    # Check cache freshness
     if [[ -f "$BANSHEE_CACHE_FILE" ]]; then
         local cache_age
         local file_mtime
@@ -89,7 +93,7 @@ banshee_find_repos() {
 
     local repos=()
     for search_path in "${BANSHEE_SEARCH_PATHS[@]}"; do
-        search_path=$(eval echo "$search_path")  # expand ~
+        search_path=$(eval echo "$search_path")
         [[ -d "$search_path" ]] || continue
 
         if command -v fd &>/dev/null; then
@@ -103,7 +107,6 @@ banshee_find_repos() {
         fi
     done
 
-    # Deduplicate and sort
     printf '%s\n' "${repos[@]}" | sort -u | tee "$BANSHEE_CACHE_FILE"
 }
 
@@ -120,7 +123,6 @@ banshee_select_repo() {
 
     [[ -z "$repos" ]] && echo "banshee: no git repositories found" >&2 && return 1
 
-    # Exact basename match — go directly without fzf
     if [[ -n "$query" ]]; then
         local exact_matches
         exact_matches=$(echo "$repos" | while IFS= read -r r; do
@@ -136,7 +138,6 @@ banshee_select_repo() {
         fi
     fi
 
-    # Build name->path mapping
     local -A repo_map
     local names=""
     while IFS= read -r repo_path; do
@@ -159,7 +160,6 @@ banshee_select_repo() {
         fi
     '
 
-    # Export repo list as path|name pairs for the preview command
     local repo_list=""
     while IFS= read -r repo_path; do
         [[ -z "$repo_path" ]] && continue
@@ -182,28 +182,26 @@ banshee_select_repo() {
     local selected_name
     selected_name=$(echo "$names" | sed '/^$/d' | BANSHEE_REPO_LIST="$repo_list" fzf "${fzf_args[@]}") || return 1
 
-    # Resolve name back to full path
     echo "${repo_map[$selected_name]}"
 }
 
-# --- tmux session management ---
+# --- tmux helpers ---
 banshee_has_tmux() {
     command -v tmux &>/dev/null
 }
 
 banshee_session_name() {
-    local repo_path="$1"
-    local name
-    name=$(basename "$repo_path")
-    # tmux doesn't allow dots or colons in session names
-    echo "${name//[.:]/_}"
+    local raw="$1"
+    # If it's a path, strip to basename
+    [[ "$raw" == */* ]] && raw=$(basename "$raw")
+    # tmux disallows '.' and ':' in session names
+    echo "${raw//[.:]/_}"
 }
 
 banshee_goto_repo() {
     local repo_path="$1"
 
     if ! banshee_has_tmux; then
-        # No tmux: just cd
         echo "$repo_path"
         return 0
     fi
@@ -211,12 +209,7 @@ banshee_goto_repo() {
     local session_name
     session_name=$(banshee_session_name "$repo_path")
 
-    # Save session for persistence
-    banshee_save_session "$session_name" "$repo_path"
-
-    # Check if we're inside tmux
     if [[ -n "${TMUX:-}" ]]; then
-        # Inside tmux
         if tmux has-session -t "=$session_name" 2>/dev/null; then
             tmux switch-client -t "=$session_name"
         else
@@ -224,7 +217,6 @@ banshee_goto_repo() {
             tmux switch-client -t "=$session_name"
         fi
     else
-        # Outside tmux
         if tmux has-session -t "=$session_name" 2>/dev/null; then
             tmux attach-session -t "=$session_name"
         else
@@ -233,129 +225,371 @@ banshee_goto_repo() {
     fi
 }
 
-# --- Session persistence ---
-banshee_save_session() {
-    local session_name="$1"
-    local repo_path="$2"
+# --- Repo cache ---
+banshee_clear_cache() {
+    rm -f "$BANSHEE_CACHE_FILE"
+    echo "banshee: cache cleared"
+}
 
-    # Remove existing entry for this session, then append
-    if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
-        local tmp
-        tmp=$(grep -v "^${session_name}|" "$BANSHEE_SESSION_FILE" 2>/dev/null || true)
-        echo "$tmp" > "$BANSHEE_SESSION_FILE"
+# =============================================================================
+# Session config subsystem (JSON-driven)
+# =============================================================================
+
+banshee_require_jq() {
+    if ! command -v jq &>/dev/null; then
+        echo "banshee: jq is required for session management" >&2
+        echo "  install it with your package manager (e.g. 'sudo pacman -S jq', 'brew install jq', 'sudo apt install jq')" >&2
+        return 1
     fi
-    echo "${session_name}|${repo_path}" >> "$BANSHEE_SESSION_FILE"
 }
 
-banshee_remove_session() {
-    local session_name="$1"
-    [[ -f "$BANSHEE_SESSION_FILE" ]] || return 0
-    local tmp
-    tmp=$(grep -v "^${session_name}|" "$BANSHEE_SESSION_FILE" 2>/dev/null || true)
-    echo "$tmp" > "$BANSHEE_SESSION_FILE"
+banshee_expand_path() {
+    local p="$1"
+    [[ "$p" == "~" ]] && { echo "$HOME"; return; }
+    [[ "$p" == "~/"* ]] && p="$HOME/${p:2}"
+    echo "$p"
 }
 
-banshee_sync_sessions() {
-    banshee_has_tmux || return 0
-
-    # Start with existing saved sessions that are still running
-    local synced="" line sname spath
-    if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
-        local active_sessions
-        active_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
-        while read -r line; do
-            [[ -z "$line" ]] && continue
-            sname="${line%%|*}"
-            spath="${line#*|}"
-            if echo "$active_sessions" | command grep -qx "$sname"; then
-                synced+="${sname}|${spath}"$'\n'
+banshee_resolve_editor() {
+    local ed="${EDITOR:-${VISUAL:-}}"
+    if [[ -z "$ed" ]]; then
+        local cand
+        for cand in nvim vim nano vi; do
+            if command -v "$cand" &>/dev/null; then
+                ed="$cand"
+                break
             fi
-        done < "$BANSHEE_SESSION_FILE"
+        done
     fi
-
-    # Add any running tmux sessions whose working directory is a git repo
-    local sess_name sess_path
-    while read -r line; do
-        [[ -z "$line" ]] && continue
-        sess_name="${line%%|*}"
-        sess_path="${line#*|}"
-        # Skip if already tracked
-        [[ "$synced" == *"${sess_name}|"* ]] && continue
-        # Only add if it's a git repo
-        [[ -d "${sess_path}/.git" ]] || continue
-        synced+="${sess_name}|${sess_path}"$'\n'
-    done <<< "$(tmux list-sessions -F '#{session_name}|#{session_path}' 2>/dev/null || true)"
-
-    echo "$synced" > "$BANSHEE_SESSION_FILE"
-    banshee_save_state
+    echo "$ed"
 }
 
-# --- Save detailed session state (panes, layouts, directories) ---
-banshee_save_state() {
-    banshee_has_tmux || return 0
-    [[ -f "$BANSHEE_SESSION_FILE" ]] || return 0
-
-    : > "$BANSHEE_STATE_FILE"
-
-    local line sname
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        sname="${line%%|*}"
-        tmux has-session -t "=$sname" 2>/dev/null || continue
-        tmux list-panes -t "=$sname" -s \
-            -F '#{session_name}|#{window_index}|#{window_name}|#{pane_index}|#{pane_current_path}|#{pane_active}|#{window_active}|#{window_layout}' \
-            >> "$BANSHEE_STATE_FILE" 2>/dev/null || true
-    done < "$BANSHEE_SESSION_FILE"
+banshee_write_default_template() {
+    local cfg="$1" name="$2"
+    cat > "$cfg" <<EOF
+{
+  "v": 1,
+  "sessions": [
+    {
+      "name": "$name",
+      "windows": [
+        {
+          "name": "<window_name>",
+          "panes": [
+            { "run": "<target_command>" }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
 }
 
-# --- Build list of saved session names (newline-separated, sorted, unique) ---
-banshee_saved_session_names() {
-    [[ -f "$BANSHEE_SESSION_FILE" ]] || return 0
-    local line sname
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        sname="${line%%|*}"
-        [[ -z "$sname" ]] && continue
-        echo "$sname"
-    done < "$BANSHEE_SESSION_FILE" | sort -u
-}
-
-# --- Kill running tmux sessions not in saved list ---
-banshee_kill_extra_sessions() {
-    banshee_has_tmux || return 0
-
-    local saved
-    saved=$(banshee_saved_session_names)
-
-    local current_session=""
-    if [[ -n "${TMUX:-}" ]]; then
-        current_session=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+banshee_validate_config() {
+    local cfg="$1"
+    if ! jq empty "$cfg" 2>/dev/null; then
+        echo "banshee: invalid JSON in $cfg" >&2
+        return 1
     fi
-
-    local killed=0 rsess
-    while IFS= read -r rsess; do
-        [[ -z "$rsess" ]] && continue
-        # Skip saved sessions
-        if [[ -n "$saved" ]] && echo "$saved" | command grep -qx "$rsess"; then
-            continue
-        fi
-        # Don't kill the session we're currently attached to
-        if [[ "$rsess" == "$current_session" ]]; then
-            echo "banshee: skipping current session '$rsess' (attached)"
-            continue
-        fi
-        if tmux kill-session -t "=$rsess" 2>/dev/null; then
-            echo "banshee: killed session '$rsess'"
-            ((killed++))
-        fi
-    done <<< "$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)"
-
-    (( killed > 0 )) && echo "banshee: killed $killed extra session(s)"
+    if ! jq -e '.v == 1' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg missing or unsupported \"v\" (must be 1)" >&2
+        return 1
+    fi
+    if ! jq -e '.sessions | type == "array" and length > 0' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg .sessions must be a non-empty array" >&2
+        return 1
+    fi
+    if ! jq -e '.sessions | all(has("name") and (.name | type == "string" and length > 0))' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg each session needs a non-empty \"name\"" >&2
+        return 1
+    fi
+    if ! jq -e '.sessions | all(.windows | type == "array" and length > 0)' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg each session needs non-empty \"windows\" array" >&2
+        return 1
+    fi
+    if ! jq -e '.sessions | all(.windows | all(.panes | type == "array" and length > 0))' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg each window needs non-empty \"panes\" array" >&2
+        return 1
+    fi
     return 0
 }
 
-# --- Prompt user to restore if saved != running ---
-banshee_check_startup_restore() {
+banshee_session_config_path() {
+    echo "$BANSHEE_SESSIONS_DIR/${1}.json"
+}
+
+# Open editor on config; loop until valid JSON or user cancels.
+# Args: <name> <mode>   mode = "load" | "edit_only"
+banshee_edit_session() {
+    local name="$1" mode="$2"
+    banshee_require_jq || return 1
+
+    [[ -d "$BANSHEE_SESSIONS_DIR" ]] || command mkdir -p "$BANSHEE_SESSIONS_DIR"
+
+    local cfg
+    cfg=$(banshee_session_config_path "$name")
+
+    if [[ ! -f "$cfg" ]]; then
+        if [[ "$mode" == "edit_only" ]]; then
+            echo "banshee: session config '$name' does not exist ($cfg)" >&2
+            return 1
+        fi
+        # -s <name>: file missing → write default + open editor
+        banshee_write_default_template "$cfg" "$name"
+
+        local ed
+        ed=$(banshee_resolve_editor)
+        [[ -z "$ed" ]] && { echo "banshee: no editor found (set \$EDITOR)" >&2; return 1; }
+
+        while true; do
+            "$ed" "$cfg"
+            if banshee_validate_config "$cfg"; then
+                break
+            fi
+            printf "banshee: config invalid. [r]eopen editor / [c]ancel? "
+            local reply=""
+            read -r reply || return 1
+            case "$reply" in
+                ""|r|R) continue ;;
+                *) return 1 ;;
+            esac
+        done
+
+        banshee_load_session "$name"
+        return $?
+    fi
+
+    if [[ "$mode" == "edit_only" ]]; then
+        local ed
+        ed=$(banshee_resolve_editor)
+        [[ -z "$ed" ]] && { echo "banshee: no editor found (set \$EDITOR)" >&2; return 1; }
+
+        while true; do
+            "$ed" "$cfg"
+            if banshee_validate_config "$cfg"; then
+                break
+            fi
+            printf "banshee: config invalid. [r]eopen editor / [c]ancel? "
+            local reply=""
+            read -r reply || return 1
+            case "$reply" in
+                ""|r|R) continue ;;
+                *) return 1 ;;
+            esac
+        done
+        return 0
+    fi
+
+    # -s <name> with existing file: just load
+    banshee_load_session "$name"
+}
+
+# Recursive pane layout walker.
+# Args: <target_pane_id> <panes_json> <base_cwd> <depth>
+# depth 0 → vertical splits (rows); depth 1 → horizontal (cols); alternating.
+# Uses newline-separated pane-id string instead of arrays for bash/zsh portability.
+banshee_build_panes() {
+    local target_pane="$1" panes_json="$2" base_cwd="$3" depth="$4"
+
+    local len
+    len=$(printf '%s' "$panes_json" | jq 'length')
+    (( len == 0 )) && return 0
+
+    local dir
+    if (( depth % 2 == 0 )); then dir="-v"; else dir="-h"; fi
+
+    # Pass 1: create sibling panes by splitting the previously-created sibling.
+    # Splitting the *just-created* sibling keeps panes in JSON order.
+    local pane_ids="$target_pane"
+    local prev_pane="$target_pane"
+
+    local i percentage new_pane
+    for ((i=1; i<len; i++)); do
+        # Carrier keeps 1/(len-i+1) share; new pane takes the rest.
+        percentage=$((100 - 100 / (len - i + 1)))
+        (( percentage < 1 )) && percentage=1
+        (( percentage > 99 )) && percentage=99
+        new_pane=$(tmux split-window -P -F '#{pane_id}' "$dir" -l "${percentage}%" -t "$prev_pane" -c "$base_cwd" 2>/dev/null) || {
+            echo "banshee: split-window failed (depth=$depth, i=$i)" >&2
+            return 1
+        }
+        pane_ids="$pane_ids"$'\n'"$new_pane"
+        prev_pane="$new_pane"
+    done
+
+    # Pass 2: assign content (commands or recursion) to each sibling.
+    # Two-pass avoids interleaving outer splits with inner recursion.
+    local element is_array run pane_cwd cur_pane
+    i=0
+    while IFS= read -r cur_pane; do
+        [[ -z "$cur_pane" ]] && { i=$((i+1)); continue; }
+        element=$(printf '%s' "$panes_json" | jq -c ".[$i]")
+        is_array=$(printf '%s' "$element" | jq -r 'type == "array"')
+
+        if [[ "$is_array" == "true" ]]; then
+            banshee_build_panes "$cur_pane" "$element" "$base_cwd" $((depth + 1)) || return 1
+        else
+            run=$(printf '%s' "$element" | jq -r '.run // ""')
+            pane_cwd=$(printf '%s' "$element" | jq -r '.cwd // ""')
+            if [[ -n "$pane_cwd" ]]; then
+                pane_cwd=$(banshee_expand_path "$pane_cwd")
+                if [[ -d "$pane_cwd" ]]; then
+                    tmux send-keys -t "$cur_pane" -l "cd $pane_cwd"
+                    tmux send-keys -t "$cur_pane" Enter
+                fi
+            fi
+            if [[ -n "$run" ]]; then
+                tmux send-keys -t "$cur_pane" -l "$run"
+                tmux send-keys -t "$cur_pane" Enter
+            fi
+        fi
+        i=$((i+1))
+    done <<< "$pane_ids"
+}
+
+# Build one tmux session from a sessions[i] JSON blob.
+banshee_build_tmux_session() {
+    local session_json="$1"
+
+    local sname scwd
+    sname=$(printf '%s' "$session_json" | jq -r '.name')
+    sname=$(banshee_session_name "$sname")
+    scwd=$(printf '%s' "$session_json" | jq -r '.cwd // ""')
+    [[ -z "$scwd" ]] && scwd="$HOME"
+    scwd=$(banshee_expand_path "$scwd")
+    [[ -d "$scwd" ]] || scwd="$HOME"
+
+    if tmux has-session -t "=$sname" 2>/dev/null; then
+        echo "banshee: session '$sname' already running — skipping"
+        echo "$sname"  # still emit so caller can target it
+        return 0
+    fi
+
+    local win_count
+    win_count=$(printf '%s' "$session_json" | jq '.windows | length')
+
+    local w wjson wname wcwd panes_json first_pane
+    for ((w=0; w<win_count; w++)); do
+        wjson=$(printf '%s' "$session_json" | jq -c ".windows[$w]")
+        wname=$(printf '%s' "$wjson" | jq -r '.name // ""')
+        wcwd=$(printf '%s' "$wjson" | jq -r '.cwd // ""')
+        [[ -z "$wcwd" ]] && wcwd="$scwd"
+        wcwd=$(banshee_expand_path "$wcwd")
+        [[ -d "$wcwd" ]] || wcwd="$scwd"
+        panes_json=$(printf '%s' "$wjson" | jq -c '.panes')
+
+        if (( w == 0 )); then
+            if [[ -n "$wname" ]]; then
+                tmux new-session -d -s "$sname" -n "$wname" -c "$wcwd"
+            else
+                tmux new-session -d -s "$sname" -c "$wcwd"
+            fi
+        else
+            if [[ -n "$wname" ]]; then
+                tmux new-window -d -t "=$sname:" -n "$wname" -c "$wcwd"
+            else
+                tmux new-window -d -t "=$sname:" -c "$wcwd"
+            fi
+        fi
+
+        first_pane=$(tmux display-message -p -t "=$sname:{end}" '#{pane_id}' 2>/dev/null)
+        [[ -z "$first_pane" ]] && { echo "banshee: failed to resolve first pane id for $sname" >&2; return 1; }
+
+        banshee_build_panes "$first_pane" "$panes_json" "$wcwd" 0 || return 1
+    done
+
+    tmux select-window -t "=$sname:^" 2>/dev/null || true
+    echo "banshee: created session '$sname'" >&2
+    echo "$sname"
+}
+
+banshee_load_session() {
+    local name="$1"
+    banshee_require_jq || return 1
+    banshee_has_tmux || { echo "banshee: tmux is not installed" >&2; return 1; }
+
+    local cfg
+    cfg=$(banshee_session_config_path "$name")
+    [[ -f "$cfg" ]] || { echo "banshee: no session config '$name'" >&2; return 1; }
+    banshee_validate_config "$cfg" || return 1
+
+    local count i session_json first_session="" built
+    count=$(jq '.sessions | length' "$cfg")
+    for ((i=0; i<count; i++)); do
+        session_json=$(jq -c ".sessions[$i]" "$cfg")
+        built=$(banshee_build_tmux_session "$session_json") || return 1
+        [[ -z "$first_session" && -n "$built" ]] && first_session="$built"
+    done
+
+    # Atomic record of last loaded bundle name
+    local tmp="${BANSHEE_LAST_FILE}.tmp.$$"
+    printf '%s\n' "$name" > "$tmp"
+    mv -f "$tmp" "$BANSHEE_LAST_FILE"
+
+    [[ -z "$first_session" ]] && return 0
+
+    if [[ -n "${TMUX:-}" ]]; then
+        tmux switch-client -t "=$first_session" 2>/dev/null || true
+    else
+        tmux attach-session -t "=$first_session"
+    fi
+}
+
+banshee_restore_last() {
+    [[ -f "$BANSHEE_LAST_FILE" ]] || { echo "banshee: no previously loaded session" >&2; return 1; }
+    local name
+    name=$(head -n1 "$BANSHEE_LAST_FILE" 2>/dev/null | tr -d '\r\n')
+    [[ -z "$name" ]] && { echo "banshee: no previously loaded session" >&2; return 1; }
+    banshee_load_session "$name"
+}
+
+banshee_list_sessions() {
+    if [[ ! -d "$BANSHEE_SESSIONS_DIR" ]]; then
+        echo "banshee: no session configs"
+        return 0
+    fi
+    shopt -s nullglob 2>/dev/null || true
+    local files=("$BANSHEE_SESSIONS_DIR"/*.json)
+    shopt -u nullglob 2>/dev/null || true
+    if (( ${#files[@]} == 0 )); then
+        echo "banshee: no session configs"
+        return 0
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        echo "banshee: jq required to list sessions" >&2
+        return 1
+    fi
+
+    local last=""
+    [[ -f "$BANSHEE_LAST_FILE" ]] && last=$(head -n1 "$BANSHEE_LAST_FILE" 2>/dev/null | tr -d '\r\n')
+
+    local f bundle_name sessions sn marker state sname
+    for f in "${files[@]}"; do
+        bundle_name=$(basename "$f" .json)
+        marker=""
+        [[ "$bundle_name" == "$last" ]] && marker=" (last)"
+        sessions=$(jq -r '.sessions[].name' "$f" 2>/dev/null || true)
+        printf "  %s%s\n" "$bundle_name" "$marker"
+        if [[ -z "$sessions" ]]; then
+            printf "    (invalid config)\n"
+            continue
+        fi
+        while IFS= read -r sn; do
+            [[ -z "$sn" ]] && continue
+            sname=$(banshee_session_name "$sn")
+            state="stopped"
+            if banshee_has_tmux && tmux has-session -t "=$sname" 2>/dev/null; then
+                state="running"
+            fi
+            printf "    %-24s [%s]\n" "$sn" "$state"
+        done <<< "$sessions"
+    done
+}
+
+# --- Startup prompt: offer to restore last loaded session if not all running ---
+banshee_startup_prompt() {
     banshee_has_tmux || return 0
     [[ "${BANSHEE_STARTUP_PROMPT:-true}" == "true" ]] || return 0
     [[ -n "${TMUX:-}" ]] && return 0
@@ -363,181 +597,41 @@ banshee_check_startup_restore() {
     [[ -n "${BANSHEE_STARTUP_CHECKED:-}" ]] && return 0
     export BANSHEE_STARTUP_CHECKED=1
 
-    local saved
-    saved=$(banshee_saved_session_names)
-    [[ -z "$saved" ]] && return 0
+    [[ -f "$BANSHEE_LAST_FILE" ]] || return 0
+    command -v jq &>/dev/null || return 0
 
-    local running
-    running=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | sort -u || true)
+    local name
+    name=$(head -n1 "$BANSHEE_LAST_FILE" 2>/dev/null | tr -d '\r\n')
+    [[ -z "$name" ]] && return 0
 
-    [[ "$saved" == "$running" ]] && return 0
+    local cfg
+    cfg=$(banshee_session_config_path "$name")
+    [[ -f "$cfg" ]] || return 0
 
-    printf "banshee: restore saved sessions? [Y/n] "
+    local names_to_check
+    names_to_check=$(jq -r '.sessions[].name' "$cfg" 2>/dev/null) || return 0
+    [[ -z "$names_to_check" ]] && return 0
+
+    local all_running=true sn sname
+    while IFS= read -r sn; do
+        [[ -z "$sn" ]] && continue
+        sname=$(banshee_session_name "$sn")
+        if ! tmux has-session -t "=$sname" 2>/dev/null; then
+            all_running=false
+            break
+        fi
+    done <<< "$names_to_check"
+
+    $all_running && return 0
+
+    printf "banshee: restore last session '%s'? [Y/n] " "$name"
     local reply=""
     read -r reply || return 0
     case "$reply" in
         ""|y|Y|yes|YES|Yes)
-            banshee_restore_sessions true
+            banshee_restore_last
             ;;
     esac
-}
-
-# --- Restore sessions with full pane/window state ---
-# Arg 1: keep_others (true/false) — if false, kill running sessions not in saved list
-banshee_restore_sessions() {
-    banshee_has_tmux || { echo "banshee: tmux is not installed" >&2; return 1; }
-    local keep_others="${1:-false}"
-
-    local has_state=false
-    [[ -f "$BANSHEE_STATE_FILE" && -s "$BANSHEE_STATE_FILE" ]] && has_state=true
-
-    # Fall back to simple restore if no detailed state
-    if ! $has_state; then
-        [[ -f "$BANSHEE_SESSION_FILE" ]] || { echo "banshee: no saved sessions to restore" >&2; return 1; }
-        local restored=0 line sname spath
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            sname="${line%%|*}"
-            spath="${line#*|}"
-            [[ -d "$spath" ]] || continue
-            if ! tmux has-session -t "=$sname" 2>/dev/null; then
-                tmux new-session -d -s "$sname" -c "$spath"
-                echo "banshee: restored session '$sname' -> $spath"
-                ((restored++))
-            fi
-        done < "$BANSHEE_SESSION_FILE"
-        if (( restored == 0 )); then
-            echo "banshee: no sessions needed restoring"
-        else
-            echo "banshee: restored $restored session(s)"
-        fi
-        if [[ "$keep_others" != "true" ]]; then
-            banshee_kill_extra_sessions
-        fi
-        return 0
-    fi
-
-    # Full state restore
-    local restored=0
-    local base_idx
-    base_idx=$(tmux show-option -gv base-index 2>/dev/null || echo 0)
-
-    # Get unique session names from state file
-    local sessions
-    sessions=$(awk -F'|' '{print $1}' "$BANSHEE_STATE_FILE" | sort -u)
-
-    local sname
-    while IFS= read -r sname; do
-        [[ -z "$sname" ]] && continue
-
-        if tmux has-session -t "=$sname" 2>/dev/null; then
-            echo "banshee: session '$sname' already running"
-            continue
-        fi
-
-        local win_num=0 active_win_num="" prev_win_idx=""
-        local first_pane=true cur_win_target="" prev_layout=""
-        local _rest _sn win_idx win_name pane_idx pane_dir pane_active win_active win_layout
-
-        while IFS= read -r pane_line; do
-            [[ -z "$pane_line" ]] && continue
-            # Parse pipe-separated fields without IFS mutation
-            _rest="$pane_line"
-            _sn="${_rest%%|*}"; _rest="${_rest#*|}"
-            [[ "$_sn" == "$sname" ]] || continue
-            win_idx="${_rest%%|*}"; _rest="${_rest#*|}"
-            win_name="${_rest%%|*}"; _rest="${_rest#*|}"
-            pane_idx="${_rest%%|*}"; _rest="${_rest#*|}"
-            pane_dir="${_rest%%|*}"; _rest="${_rest#*|}"
-            pane_active="${_rest%%|*}"; _rest="${_rest#*|}"
-            win_active="${_rest%%|*}"; _rest="${_rest#*|}"
-            win_layout="$_rest"
-
-            [[ -d "$pane_dir" ]] || pane_dir="$HOME"
-
-            if [[ "$win_idx" != "$prev_win_idx" ]]; then
-                # Apply layout to previous window
-                if [[ -n "$cur_win_target" && -n "$prev_layout" ]]; then
-                    tmux select-layout -t "$cur_win_target" "$prev_layout" 2>/dev/null || true
-                fi
-
-                if $first_pane; then
-                    tmux new-session -d -s "$sname" -c "$pane_dir"
-                    first_pane=false
-                else
-                    tmux new-window -t "=$sname" -c "$pane_dir"
-                fi
-
-                cur_win_target="=$sname:$((base_idx + win_num))"
-
-                if [[ -n "$win_name" && "$win_name" != "zsh" && "$win_name" != "bash" && "$win_name" != "fish" ]]; then
-                    tmux rename-window -t "$cur_win_target" "$win_name" 2>/dev/null || true
-                fi
-
-                if [[ "$win_active" == "1" ]]; then
-                    active_win_num=$((base_idx + win_num))
-                fi
-                prev_win_idx="$win_idx"
-                prev_layout="$win_layout"
-                ((win_num++))
-            else
-                # Additional pane in current window — split
-                tmux split-window -t "$cur_win_target" -c "$pane_dir"
-                prev_layout="$win_layout"
-            fi
-
-            # Select active pane
-            if [[ "$pane_active" == "1" && -n "$cur_win_target" ]]; then
-                tmux select-pane -t "${cur_win_target}.${pane_idx}" 2>/dev/null || true
-            fi
-        done < "$BANSHEE_STATE_FILE"
-
-        # Apply layout to last window
-        if [[ -n "$cur_win_target" && -n "$prev_layout" ]]; then
-            tmux select-layout -t "$cur_win_target" "$prev_layout" 2>/dev/null || true
-        fi
-
-        # Select active window
-        if [[ -n "$active_win_num" ]]; then
-            tmux select-window -t "=$sname:${active_win_num}" 2>/dev/null || true
-        fi
-
-        if (( win_num > 0 )); then
-            echo "banshee: restored session '$sname' ($win_num window(s))"
-            ((restored++))
-        fi
-    done <<< "$sessions"
-
-    # Also restore sessions from session file that aren't in state file
-    if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
-        local line spath
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            sname="${line%%|*}"
-            spath="${line#*|}"
-            tmux has-session -t "=$sname" 2>/dev/null && continue
-            [[ -d "$spath" ]] || continue
-            tmux new-session -d -s "$sname" -c "$spath"
-            echo "banshee: restored session '$sname' -> $spath"
-            ((restored++))
-        done < "$BANSHEE_SESSION_FILE"
-    fi
-
-    if (( restored == 0 )); then
-        echo "banshee: no sessions needed restoring"
-    else
-        echo "banshee: restored $restored session(s)"
-    fi
-
-    if [[ "$keep_others" != "true" ]]; then
-        banshee_kill_extra_sessions
-    fi
-}
-
-# --- Clear repo cache ---
-banshee_clear_cache() {
-    rm -f "$BANSHEE_CACHE_FILE"
-    echo "banshee: cache cleared"
 }
 
 # --- Usage ---
@@ -547,15 +641,16 @@ banshee - fluid git repository navigation powered by fzf
 
 Usage:
   banshee [query]         Find and navigate to a git repository
-  banshee -r, --restore   Restore saved tmux sessions; kill any not in saved list
-  banshee -rk, -r -k      Restore saved sessions, keep other running sessions
-  banshee -s, --sync      Sync and save session state (panes, layouts, directories)
-  banshee -l, --list      List saved sessions
-  banshee -c, --clear     Clear the repository cache
-  banshee -v, --version   Show version
-  banshee -h, --help      Show this help
+  banshee -s <name>       Load session config <name> (open editor if new)
+  banshee -se <name>      Edit existing session config <name>
+  banshee -r              Restore last loaded session
+  banshee -l              List session configs and their state
+  banshee -c              Clear the repository cache
+  banshee -v              Show version
+  banshee -h              Show this help
 
-Configuration: ~/.config/banshee/banshee.conf
+Session configs: ~/.config/banshee/sessions/<name>.json (JSON, requires jq)
+Configuration:   ~/.config/banshee/banshee.conf
 
 EOF
 }
@@ -574,36 +669,27 @@ banshee_main() {
             return 0
             ;;
         -r|--restore)
-            local keep=false
-            [[ "${2:-}" == "-k" || "${2:-}" == "--keep" ]] && keep=true
-            banshee_restore_sessions "$keep"
+            banshee_restore_last
             return $?
             ;;
-        -rk|-kr|--restore-keep)
-            banshee_restore_sessions true
+        -s|--session)
+            if [[ -z "${2:-}" ]]; then
+                echo "banshee: -s requires a session name" >&2
+                return 1
+            fi
+            banshee_edit_session "$2" load
             return $?
             ;;
-        -s|--sync)
-            banshee_sync_sessions
-            echo "banshee: sessions synced"
-            return 0
+        -se|--edit)
+            if [[ -z "${2:-}" ]]; then
+                echo "banshee: -se requires a session name" >&2
+                return 1
+            fi
+            banshee_edit_session "$2" edit_only
+            return $?
             ;;
         -l|--list)
-            if [[ -f "$BANSHEE_SESSION_FILE" ]]; then
-                local line sname spath
-                while read -r line; do
-                    [[ -z "$line" ]] && continue
-                    sname="${line%%|*}"
-                    spath="${line#*|}"
-                    local state="stopped"
-                    if banshee_has_tmux && tmux has-session -t "=$sname" 2>/dev/null; then
-                        state="running"
-                    fi
-                    printf "  %-20s %s [%s]\n" "$sname" "$spath" "$state"
-                done < "$BANSHEE_SESSION_FILE"
-            else
-                echo "banshee: no saved sessions"
-            fi
+            banshee_list_sessions
             return 0
             ;;
         -c|--clear)
@@ -616,14 +702,12 @@ banshee_main() {
             return 1
             ;;
         *)
-            # Select repo with optional query
             local selected
             selected=$(banshee_select_repo "${1:-}") || return 1
 
             if banshee_has_tmux; then
                 banshee_goto_repo "$selected"
             else
-                # No tmux — output path for cd (called via shell function wrapper)
                 echo "$selected"
             fi
             ;;
@@ -631,7 +715,6 @@ banshee_main() {
 }
 
 # Only run main if executed directly (not sourced)
-# BASH_SOURCE is bash-only; ZSH_EVAL_CONTEXT is zsh-only
 if [[ -n "${BASH_SOURCE+x}" && "${BASH_SOURCE[0]}" == "${0}" ]] \
     || [[ -n "${ZSH_EVAL_CONTEXT+x}" && "$ZSH_EVAL_CONTEXT" == "toplevel" ]]; then
     banshee_main "$@"
