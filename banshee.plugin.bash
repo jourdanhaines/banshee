@@ -13,7 +13,11 @@ banshee() {
     banshee_init
 
     case "${1:-}" in
-        -h|--help|-v|--version|-r|--restore|-rk|-kr|--restore-keep|-s|--sync|-l|--list|-c|--clear)
+        -h|--help|-v|--version|-r|--restore|-s|--session|-se|--edit|-l|--list|-c|--clear)
+            banshee_main "$@"
+            return $?
+            ;;
+        -*)
             banshee_main "$@"
             return $?
             ;;
@@ -74,10 +78,26 @@ _banshee_bind_key
 # --- Tab completion ---
 _banshee_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]:-}"
+
+    # After -s/-se, complete session config names
+    if [[ "$prev" == "-s" || "$prev" == "--session" || "$prev" == "-se" || "$prev" == "--edit" ]]; then
+        local sessions_dir="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/sessions"
+        local names=""
+        if [[ -d "$sessions_dir" ]]; then
+            local f
+            for f in "$sessions_dir"/*.json; do
+                [[ -e "$f" ]] || continue
+                names+="$(basename "$f" .json) "
+            done
+        fi
+        COMPREPLY=($(compgen -W "$names" -- "$cur"))
+        return
+    fi
 
     # Handle flag completion
     if [[ "$cur" == -* ]]; then
-        COMPREPLY=($(compgen -W "--help --version --restore --restore-keep --sync --list --clear -r -rk -k -s -l -c" -- "$cur"))
+        COMPREPLY=($(compgen -W "--help --version --restore --session --edit --list --clear -r -s -se -l -c" -- "$cur"))
         return
     fi
 
@@ -89,16 +109,8 @@ _banshee_completions() {
 
 complete -F _banshee_completions banshee
 
-# --- Sync sessions on shell exit (if tmux is available) ---
-if command -v tmux &>/dev/null; then
-    _banshee_bash_exit() {
-        banshee_sync_sessions 2>/dev/null
-    }
-    trap _banshee_bash_exit EXIT
-fi
-
-# --- Startup: prompt to restore saved sessions if they differ from running ---
+# --- Startup: prompt to restore last loaded session if not all running ---
 if [[ $- == *i* ]]; then
     banshee_init 2>/dev/null
-    banshee_check_startup_restore
+    banshee_startup_prompt
 fi

@@ -13,7 +13,11 @@ banshee() {
     banshee_init
 
     case "${1:-}" in
-        -h|--help|-v|--version|-r|--restore|-rk|-kr|--restore-keep|-s|--sync|-l|--list|-c|--clear)
+        -h|--help|-v|--version|-r|--restore|-s|--session|-se|--edit|-l|--list|-c|--clear)
+            banshee_main "$@"
+            return $?
+            ;;
+        -*)
             banshee_main "$@"
             return $?
             ;;
@@ -66,6 +70,23 @@ esac
 
 # --- Tab completion ---
 _banshee_complete() {
+    local prev="${words[CURRENT-1]:-}"
+
+    # After -s/-se, complete session config names
+    if [[ "$prev" == "-s" || "$prev" == "--session" || "$prev" == "-se" || "$prev" == "--edit" ]]; then
+        local sessions_dir="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/sessions"
+        local -a names
+        names=()
+        if [[ -d "$sessions_dir" ]]; then
+            local f
+            for f in "$sessions_dir"/*.json(N); do
+                names+=("${f:t:r}")
+            done
+        fi
+        _describe 'session configs' names
+        return
+    fi
+
     local -a repos
     repos=("${(@f)$(banshee_find_repos | while IFS= read -r line; do basename "$line"; done | sort -u)}")
     _describe 'git repositories' repos
@@ -73,14 +94,8 @@ _banshee_complete() {
 
 compdef _banshee_complete banshee
 
-# --- Sync sessions on shell exit (if tmux is available) ---
-_banshee_zshexit() {
-    command -v tmux &>/dev/null && banshee_sync_sessions 2>/dev/null
-}
-add-zsh-hook zshexit _banshee_zshexit 2>/dev/null || true
-
-# --- Startup: prompt to restore saved sessions if they differ from running ---
+# --- Startup: prompt to restore last loaded session if not all running ---
 if [[ -o interactive ]]; then
     banshee_init 2>/dev/null
-    banshee_check_startup_restore
+    banshee_startup_prompt
 fi
