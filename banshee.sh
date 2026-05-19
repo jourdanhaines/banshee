@@ -8,20 +8,21 @@ if [[ -n "${BASH_SOURCE+x}" && "${BASH_SOURCE[0]}" == "${0}" ]] \
     set -euo pipefail
 fi
 
-BANSHEE_VERSION="0.2.0"
+BANSHEE_VERSION="0.3.0"
 BANSHEE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/banshee"
 BANSHEE_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/banshee"
 BANSHEE_CONFIG_FILE="$BANSHEE_CONFIG_DIR/banshee.conf"
 BANSHEE_SESSIONS_DIR="$BANSHEE_CONFIG_DIR/sessions"
+BANSHEE_GROUPS_DIR="$BANSHEE_CONFIG_DIR/groups"
 BANSHEE_CACHE_FILE="$BANSHEE_DATA_DIR/repo_cache"
-BANSHEE_LAST_FILE="$BANSHEE_DATA_DIR/last_loaded"
+BANSHEE_LAST_FILE="$BANSHEE_DATA_DIR/last_action"
 
 # --- Defaults (overridable via config) ---
 BANSHEE_SEARCH_PATHS=("$HOME")
 BANSHEE_MAX_DEPTH=5
 BANSHEE_KEYBIND="ctrl-f"
 BANSHEE_FZF_OPTS=""
-BANSHEE_CACHE_TTL=300  # seconds
+BANSHEE_CACHE_TTL=300
 BANSHEE_STARTUP_PROMPT=true
 
 # --- Load config ---
@@ -55,15 +56,24 @@ banshee_load_config() {
     done < "$BANSHEE_CONFIG_FILE"
 }
 
-# --- Ensure directories exist + migrate from old session storage ---
+# --- Ensure directories exist + migrate stale state ---
 banshee_init() {
     [[ -d "$BANSHEE_CONFIG_DIR" ]]   || command mkdir -p "$BANSHEE_CONFIG_DIR"
     [[ -d "$BANSHEE_SESSIONS_DIR" ]] || command mkdir -p "$BANSHEE_SESSIONS_DIR"
+    [[ -d "$BANSHEE_GROUPS_DIR" ]]   || command mkdir -p "$BANSHEE_GROUPS_DIR"
     [[ -d "$BANSHEE_DATA_DIR" ]]     || command mkdir -p "$BANSHEE_DATA_DIR"
 
-    # Migration: drop the old flat session/state files (no useful mapping to JSON model)
+    # Migrate from very-old flat session/state files
     [[ -f "$BANSHEE_DATA_DIR/sessions" ]] && rm -f "$BANSHEE_DATA_DIR/sessions" 2>/dev/null
     [[ -f "$BANSHEE_DATA_DIR/session_state" ]] && rm -f "$BANSHEE_DATA_DIR/session_state" 2>/dev/null
+
+    # Migrate 0.2.0 last_loaded → 0.3.0 last_action (prefix as target since it pointed at a bundle)
+    if [[ -f "$BANSHEE_DATA_DIR/last_loaded" && ! -f "$BANSHEE_LAST_FILE" ]]; then
+        local old
+        old=$(head -n1 "$BANSHEE_DATA_DIR/last_loaded" 2>/dev/null | tr -d '\r\n')
+        [[ -n "$old" ]] && printf 'target:%s\n' "$old" > "$BANSHEE_LAST_FILE"
+        rm -f "$BANSHEE_DATA_DIR/last_loaded" 2>/dev/null
+    fi
 
     banshee_load_config
 }
@@ -73,8 +83,7 @@ banshee_find_repos() {
     local use_cache=false
 
     if [[ -f "$BANSHEE_CACHE_FILE" ]]; then
-        local cache_age
-        local file_mtime
+        local cache_age file_mtime
         if [[ "$OSTYPE" == darwin* ]]; then
             file_mtime=$(stat -f %m "$BANSHEE_CACHE_FILE" 2>/dev/null || echo 0)
         else
@@ -115,7 +124,25 @@ banshee_list_repo_names() {
     banshee_find_repos | xargs -I{} basename {} | sort -u
 }
 
-# --- Select a repo via fzf ---
+# --- Exact-match a target name against repo basenames. Echo single repo path or empty. ---
+banshee_find_repo_exact() {
+    local target="$1"
+    [[ -z "$target" ]] && return 1
+    local repos
+    repos=$(banshee_find_repos)
+    [[ -z "$repos" ]] && return 1
+    local matches
+    matches=$(echo "$repos" | while IFS= read -r r; do
+        [[ "$(basename "$r")" == "$target" ]] && echo "$r"
+    done)
+    [[ -z "$matches" ]] && return 1
+    local count
+    count=$(echo "$matches" | wc -l)
+    (( count == 1 )) || return 1
+    echo "$matches"
+}
+
+# --- Select a repo via fzf (returns path) ---
 banshee_select_repo() {
     local query="${1:-}"
     local repos
@@ -124,17 +151,10 @@ banshee_select_repo() {
     [[ -z "$repos" ]] && echo "banshee: no git repositories found" >&2 && return 1
 
     if [[ -n "$query" ]]; then
-        local exact_matches
-        exact_matches=$(echo "$repos" | while IFS= read -r r; do
-            [[ "$(basename "$r")" == "$query" ]] && echo "$r"
-        done)
-        if [[ -n "$exact_matches" ]]; then
-            local count
-            count=$(echo "$exact_matches" | wc -l)
-            if (( count == 1 )); then
-                echo "$exact_matches"
-                return 0
-            fi
+        local exact
+        if exact=$(banshee_find_repo_exact "$query"); then
+            echo "$exact"
+            return 0
         fi
     fi
 
@@ -149,10 +169,10 @@ banshee_select_repo() {
 
     local preview_cmd='
         name={}
-        path=$(echo "$BANSHEE_REPO_LIST" | grep "|${name}$" | head -1 | cut -d"|" -f1)
-        printf "\033[1;34m%s\033[0m\n" "$path"
+        rpath=$(echo "$BANSHEE_REPO_LIST" | grep "|${name}$" | head -1 | cut -d"|" -f1)
+        printf "\033[1;34m%s\033[0m\n" "$rpath"
         echo ""
-        readme="$path/README.md"
+        readme="$rpath/README.md"
         if [[ -f "$readme" ]]; then
             while IFS= read -r line; do echo "$line"; done < "$readme"
         else
@@ -192,36 +212,26 @@ banshee_has_tmux() {
 
 banshee_session_name() {
     local raw="$1"
-    # If it's a path, strip to basename
     [[ "$raw" == */* ]] && raw=$(basename "$raw")
-    # tmux disallows '.' and ':' in session names
     echo "${raw//[.:]/_}"
 }
 
-banshee_goto_repo() {
-    local repo_path="$1"
+# Create a plain (no-config) tmux session detached. Idempotent.
+banshee_create_plain_session() {
+    local name="$1" cwd="$2"
+    banshee_has_tmux || return 1
+    tmux has-session -t "=$name" 2>/dev/null && return 0
+    tmux new-session -d -s "$name" -c "$cwd"
+}
 
-    if ! banshee_has_tmux; then
-        echo "$repo_path"
-        return 0
-    fi
-
-    local session_name
-    session_name=$(banshee_session_name "$repo_path")
-
+# Attach (outside tmux) or switch-client (inside tmux) to a session.
+banshee_attach_or_switch() {
+    local name="$1"
+    banshee_has_tmux || return 1
     if [[ -n "${TMUX:-}" ]]; then
-        if tmux has-session -t "=$session_name" 2>/dev/null; then
-            tmux switch-client -t "=$session_name"
-        else
-            tmux new-session -d -s "$session_name" -c "$repo_path"
-            tmux switch-client -t "=$session_name"
-        fi
+        tmux switch-client -t "=$name" 2>/dev/null || true
     else
-        if tmux has-session -t "=$session_name" 2>/dev/null; then
-            tmux attach-session -t "=$session_name"
-        else
-            tmux new-session -s "$session_name" -c "$repo_path"
-        fi
+        tmux attach-session -t "=$name"
     fi
 }
 
@@ -232,13 +242,13 @@ banshee_clear_cache() {
 }
 
 # =============================================================================
-# Session config subsystem (JSON-driven)
+# JSON / session-config subsystem
 # =============================================================================
 
 banshee_require_jq() {
     if ! command -v jq &>/dev/null; then
-        echo "banshee: jq is required for session management" >&2
-        echo "  install it with your package manager (e.g. 'sudo pacman -S jq', 'brew install jq', 'sudo apt install jq')" >&2
+        echo "banshee: jq is required for session/group management" >&2
+        echo "  install via your package manager (e.g. 'pacman -S jq', 'brew install jq', 'apt install jq')" >&2
         return 1
     fi
 }
@@ -256,32 +266,47 @@ banshee_resolve_editor() {
         local cand
         for cand in nvim vim nano vi; do
             if command -v "$cand" &>/dev/null; then
-                ed="$cand"
-                break
+                ed="$cand"; break
             fi
         done
     fi
     echo "$ed"
 }
 
+banshee_target_config_path() {
+    echo "$BANSHEE_SESSIONS_DIR/${1}.json"
+}
+
+banshee_group_config_path() {
+    echo "$BANSHEE_GROUPS_DIR/${1}.json"
+}
+
 banshee_write_default_template() {
-    local cfg="$1" name="$2"
+    local cfg="$1" target="$2"
     cat > "$cfg" <<EOF
 {
   "v": 1,
-  "sessions": [
+  "name": "$target",
+  "windows": [
     {
-      "name": "$name",
-      "windows": [
-        {
-          "name": "<window_name>",
-          "panes": [
-            { "run": "<target_command>" }
-          ]
-        }
+      "name": "<window_name>",
+      "panes": [
+        { "run": "<target_command>" }
       ]
     }
   ]
+}
+EOF
+}
+
+banshee_write_default_group_template() {
+    local cfg="$1" name="$2"
+    local targets_json="$3"   # already a JSON array string like ["a","b"]
+    cat > "$cfg" <<EOF
+{
+  "v": 1,
+  "name": "$name",
+  "targets": $targets_json
 }
 EOF
 }
@@ -292,103 +317,97 @@ banshee_validate_config() {
         echo "banshee: invalid JSON in $cfg" >&2
         return 1
     fi
+    if jq -e 'has("sessions")' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg uses the 0.2.0 \"sessions\" wrapper which is no longer supported." >&2
+        echo "  Split each session into its own ~/.config/banshee/sessions/<target>.json file (drop the wrapper)." >&2
+        return 1
+    fi
     if ! jq -e '.v == 1' "$cfg" &>/dev/null; then
         echo "banshee: $cfg missing or unsupported \"v\" (must be 1)" >&2
         return 1
     fi
-    if ! jq -e '.sessions | type == "array" and length > 0' "$cfg" &>/dev/null; then
-        echo "banshee: $cfg .sessions must be a non-empty array" >&2
+    if ! jq -e '.name | type == "string" and length > 0' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg missing non-empty \"name\"" >&2
         return 1
     fi
-    if ! jq -e '.sessions | all(has("name") and (.name | type == "string" and length > 0))' "$cfg" &>/dev/null; then
-        echo "banshee: $cfg each session needs a non-empty \"name\"" >&2
+    if ! jq -e '.windows | type == "array" and length > 0' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg \"windows\" must be a non-empty array" >&2
         return 1
     fi
-    if ! jq -e '.sessions | all(.windows | type == "array" and length > 0)' "$cfg" &>/dev/null; then
-        echo "banshee: $cfg each session needs non-empty \"windows\" array" >&2
-        return 1
-    fi
-    if ! jq -e '.sessions | all(.windows | all(.panes | type == "array" and length > 0))' "$cfg" &>/dev/null; then
-        echo "banshee: $cfg each window needs non-empty \"panes\" array" >&2
+    if ! jq -e '.windows | all(.panes | type == "array" and length > 0)' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg each window needs a non-empty \"panes\" array" >&2
         return 1
     fi
     return 0
 }
 
-banshee_session_config_path() {
-    echo "$BANSHEE_SESSIONS_DIR/${1}.json"
+banshee_validate_group_config() {
+    local cfg="$1"
+    if ! jq empty "$cfg" 2>/dev/null; then
+        echo "banshee: invalid JSON in $cfg" >&2
+        return 1
+    fi
+    if ! jq -e '.v == 1' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg missing or unsupported \"v\" (must be 1)" >&2
+        return 1
+    fi
+    if ! jq -e '.name | type == "string" and length > 0' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg missing non-empty \"name\"" >&2
+        return 1
+    fi
+    if ! jq -e '.targets | type == "array" and length > 0 and all(type == "string" and length > 0)' "$cfg" &>/dev/null; then
+        echo "banshee: $cfg \"targets\" must be a non-empty array of strings" >&2
+        return 1
+    fi
+    return 0
 }
 
-# Open editor on config; loop until valid JSON or user cancels.
-# Args: <name> <mode>   mode = "load" | "edit_only"
-banshee_edit_session() {
-    local name="$1" mode="$2"
+# Open editor on a target config; loop until valid JSON or user cancels.
+# Args: <target> <mode>   mode = "load" | "no_load"
+banshee_edit_session_config() {
+    local target="$1" mode="$2"
     banshee_require_jq || return 1
 
+    local cfg
+    cfg=$(banshee_target_config_path "$target")
     [[ -d "$BANSHEE_SESSIONS_DIR" ]] || command mkdir -p "$BANSHEE_SESSIONS_DIR"
 
-    local cfg
-    cfg=$(banshee_session_config_path "$name")
-
+    local created=0
     if [[ ! -f "$cfg" ]]; then
-        if [[ "$mode" == "edit_only" ]]; then
-            echo "banshee: session config '$name' does not exist ($cfg)" >&2
-            return 1
+        banshee_write_default_template "$cfg" "$target"
+        created=1
+    fi
+
+    local ed
+    ed=$(banshee_resolve_editor)
+    [[ -z "$ed" ]] && { echo "banshee: no editor found (set \$EDITOR)" >&2; return 1; }
+
+    while true; do
+        "$ed" "$cfg"
+        if banshee_validate_config "$cfg"; then
+            break
         fi
-        # -s <name>: file missing → write default + open editor
-        banshee_write_default_template "$cfg" "$name"
+        printf "banshee: config invalid. [r]eopen editor / [c]ancel? "
+        local reply=""
+        read -r reply || { (( created )) && rm -f "$cfg"; return 1; }
+        case "$reply" in
+            ""|r|R) continue ;;
+            *) (( created )) && rm -f "$cfg"; return 1 ;;
+        esac
+    done
 
-        local ed
-        ed=$(banshee_resolve_editor)
-        [[ -z "$ed" ]] && { echo "banshee: no editor found (set \$EDITOR)" >&2; return 1; }
-
-        while true; do
-            "$ed" "$cfg"
-            if banshee_validate_config "$cfg"; then
-                break
-            fi
-            printf "banshee: config invalid. [r]eopen editor / [c]ancel? "
-            local reply=""
-            read -r reply || return 1
-            case "$reply" in
-                ""|r|R) continue ;;
-                *) return 1 ;;
-            esac
-        done
-
-        banshee_load_session "$name"
+    if [[ "$mode" == "load" ]]; then
+        banshee_resolve_and_load "$target" default true
         return $?
     fi
-
-    if [[ "$mode" == "edit_only" ]]; then
-        local ed
-        ed=$(banshee_resolve_editor)
-        [[ -z "$ed" ]] && { echo "banshee: no editor found (set \$EDITOR)" >&2; return 1; }
-
-        while true; do
-            "$ed" "$cfg"
-            if banshee_validate_config "$cfg"; then
-                break
-            fi
-            printf "banshee: config invalid. [r]eopen editor / [c]ancel? "
-            local reply=""
-            read -r reply || return 1
-            case "$reply" in
-                ""|r|R) continue ;;
-                *) return 1 ;;
-            esac
-        done
-        return 0
-    fi
-
-    # -s <name> with existing file: just load
-    banshee_load_session "$name"
+    return 0
 }
 
-# Recursive pane layout walker.
+# =============================================================================
+# Pane layout — recursive walker (UNCHANGED from 0.2.0 logic)
+# =============================================================================
 # Args: <target_pane_id> <panes_json> <base_cwd> <depth>
 # depth 0 → vertical splits (rows); depth 1 → horizontal (cols); alternating.
-# Uses newline-separated pane-id string instead of arrays for bash/zsh portability.
 banshee_build_panes() {
     local target_pane="$1" panes_json="$2" base_cwd="$3" depth="$4"
 
@@ -399,14 +418,11 @@ banshee_build_panes() {
     local dir
     if (( depth % 2 == 0 )); then dir="-v"; else dir="-h"; fi
 
-    # Pass 1: create sibling panes by splitting the previously-created sibling.
-    # Splitting the *just-created* sibling keeps panes in JSON order.
     local pane_ids="$target_pane"
     local prev_pane="$target_pane"
 
     local i percentage new_pane
     for ((i=1; i<len; i++)); do
-        # Carrier keeps 1/(len-i+1) share; new pane takes the rest.
         percentage=$((100 - 100 / (len - i + 1)))
         (( percentage < 1 )) && percentage=1
         (( percentage > 99 )) && percentage=99
@@ -418,8 +434,6 @@ banshee_build_panes() {
         prev_pane="$new_pane"
     done
 
-    # Pass 2: assign content (commands or recursion) to each sibling.
-    # Two-pass avoids interleaving outer splits with inner recursion.
     local element is_array run pane_cwd cur_pane
     i=0
     while IFS= read -r cur_pane; do
@@ -448,30 +462,32 @@ banshee_build_panes() {
     done <<< "$pane_ids"
 }
 
-# Build one tmux session from a sessions[i] JSON blob.
+# Build one tmux session from a per-target config JSON.
+# Args: <target_name> <config_json> <default_cwd>
+# target_name is authoritative for the tmux session name (overrides .name).
 banshee_build_tmux_session() {
-    local session_json="$1"
+    local target_name="$1" cfg_json="$2" default_cwd="$3"
 
-    local sname scwd
-    sname=$(printf '%s' "$session_json" | jq -r '.name')
-    sname=$(banshee_session_name "$sname")
-    scwd=$(printf '%s' "$session_json" | jq -r '.cwd // ""')
-    [[ -z "$scwd" ]] && scwd="$HOME"
-    scwd=$(banshee_expand_path "$scwd")
-    [[ -d "$scwd" ]] || scwd="$HOME"
+    local sname
+    sname=$(banshee_session_name "$target_name")
 
     if tmux has-session -t "=$sname" 2>/dev/null; then
-        echo "banshee: session '$sname' already running — skipping"
-        echo "$sname"  # still emit so caller can target it
+        echo "banshee: session '$sname' already running — skipping" >&2
         return 0
     fi
 
+    local scwd
+    scwd=$(printf '%s' "$cfg_json" | jq -r '.cwd // ""')
+    [[ -z "$scwd" ]] && scwd="$default_cwd"
+    scwd=$(banshee_expand_path "$scwd")
+    [[ -d "$scwd" ]] || scwd="$HOME"
+
     local win_count
-    win_count=$(printf '%s' "$session_json" | jq '.windows | length')
+    win_count=$(printf '%s' "$cfg_json" | jq '.windows | length')
 
     local w wjson wname wcwd panes_json first_pane
     for ((w=0; w<win_count; w++)); do
-        wjson=$(printf '%s' "$session_json" | jq -c ".windows[$w]")
+        wjson=$(printf '%s' "$cfg_json" | jq -c ".windows[$w]")
         wname=$(printf '%s' "$wjson" | jq -r '.name // ""')
         wcwd=$(printf '%s' "$wjson" | jq -r '.cwd // ""')
         [[ -z "$wcwd" ]] && wcwd="$scwd"
@@ -500,95 +516,299 @@ banshee_build_tmux_session() {
     done
 
     tmux select-window -t "=$sname:^" 2>/dev/null || true
-    echo "banshee: created session '$sname'" >&2
-    echo "$sname"
+    echo "banshee: built session '$sname'" >&2
 }
 
-banshee_load_session() {
+# =============================================================================
+# Resolve & load — the central target-loading dispatcher
+# =============================================================================
+# Args: <target> <mode> <attach>
+#   mode:   "default"     load config if exists; else plain at repo; else error
+#           "require_cfg" if config missing, drop into editor flow then load
+#   attach: "true" / "false"
+banshee_resolve_and_load() {
+    local target="$1" mode="${2:-default}" attach="${3:-true}"
+    [[ -z "$target" ]] && { echo "banshee: empty target" >&2; return 1; }
+    banshee_has_tmux || { echo "banshee: tmux is not installed" >&2; return 1; }
+
+    local cfg
+    cfg=$(banshee_target_config_path "$target")
+    local repo_path=""
+    repo_path=$(banshee_find_repo_exact "$target" 2>/dev/null) || repo_path=""
+
+    if [[ -f "$cfg" ]]; then
+        banshee_require_jq || return 1
+        banshee_validate_config "$cfg" || return 1
+        local cfg_json default_cwd
+        cfg_json=$(jq -c '.' "$cfg")
+        default_cwd="${repo_path:-$HOME}"
+        banshee_build_tmux_session "$target" "$cfg_json" "$default_cwd" || return 1
+    else
+        if [[ "$mode" == "require_cfg" ]]; then
+            banshee_edit_session_config "$target" load
+            return $?
+        fi
+        if [[ -z "$repo_path" ]]; then
+            echo "banshee: no config or matching repo for '$target'" >&2
+            return 1
+        fi
+        local sname
+        sname=$(banshee_session_name "$target")
+        banshee_create_plain_session "$sname" "$repo_path" || return 1
+    fi
+
+    banshee_record_last_action target "$target"
+
+    if [[ "$attach" == "true" ]]; then
+        local sname
+        sname=$(banshee_session_name "$target")
+        banshee_attach_or_switch "$sname"
+    fi
+}
+
+# =============================================================================
+# Groups
+# =============================================================================
+
+# Build the union pool of selectable target names: repos ∪ existing session configs.
+banshee_target_pool() {
+    {
+        banshee_find_repos 2>/dev/null | while IFS= read -r p; do
+            [[ -n "$p" ]] && basename "$p"
+        done
+        if [[ -d "$BANSHEE_SESSIONS_DIR" ]]; then
+            shopt -s nullglob 2>/dev/null || true
+            local f
+            for f in "$BANSHEE_SESSIONS_DIR"/*.json; do
+                [[ -e "$f" ]] || continue
+                basename "$f" .json
+            done
+            shopt -u nullglob 2>/dev/null || true
+        fi
+    } | sort -u
+}
+
+# fzf multi-select. Args: <group_name> <current_csv>
+# Outputs newline-separated selected targets in pick order; non-zero on cancel.
+banshee_group_select_prompt() {
+    local name="$1" current_csv="${2:-}"
+
+    command -v fzf &>/dev/null || { echo "banshee: fzf required for group select" >&2; return 1; }
+
+    local pool
+    pool=$(banshee_target_pool)
+    [[ -z "$pool" ]] && { echo "banshee: no targets available (no repos found, no session configs)" >&2; return 1; }
+
+    # Reorder so current selections (if any) appear first in the list.
+    local ordered="$pool"
+    if [[ -n "$current_csv" ]]; then
+        local first="" rest="" item
+        local _rest="$current_csv" _item
+        while [[ -n "$_rest" ]]; do
+            _item="${_rest%%,*}"
+            _item="${_item## }"; _item="${_item%% }"
+            if [[ -n "$_item" ]] && echo "$pool" | command grep -qx "$_item"; then
+                first+="$_item"$'\n'
+            fi
+            [[ "$_rest" == *,* ]] && _rest="${_rest#*,}" || _rest=""
+        done
+        # everything in pool not already in first
+        rest=$(echo "$pool" | while IFS= read -r item; do
+            [[ -z "$item" ]] && continue
+            if ! echo "$first" | command grep -qx "$item"; then
+                echo "$item"
+            fi
+        done)
+        ordered="${first}${rest}"
+    fi
+
+    local header
+    if [[ -n "$current_csv" ]]; then
+        header="editing group '$name' — current: $current_csv — TAB to toggle, ENTER to confirm"
+    else
+        header="select targets for group '$name' — TAB to toggle, ENTER to confirm"
+    fi
+
+    local out
+    out=$(printf '%s' "$ordered" | sed '/^$/d' | fzf --multi --layout=reverse --border --prompt="targets> " --header="$header") || return 1
+    [[ -z "$out" ]] && return 1
+    printf '%s\n' "$out"
+}
+
+banshee_write_group() {
+    local name="$1" selections="$2"
+    local targets_json
+    targets_json=$(printf '%s\n' "$selections" | sed '/^$/d' | jq -R . | jq -s -c .)
+    local cfg
+    cfg=$(banshee_group_config_path "$name")
+    [[ -d "$BANSHEE_GROUPS_DIR" ]] || command mkdir -p "$BANSHEE_GROUPS_DIR"
+    banshee_write_default_group_template "$cfg" "$name" "$targets_json"
+    banshee_validate_group_config "$cfg" || return 1
+    return 0
+}
+
+banshee_load_group() {
     local name="$1"
     banshee_require_jq || return 1
     banshee_has_tmux || { echo "banshee: tmux is not installed" >&2; return 1; }
 
     local cfg
-    cfg=$(banshee_session_config_path "$name")
-    [[ -f "$cfg" ]] || { echo "banshee: no session config '$name'" >&2; return 1; }
-    banshee_validate_config "$cfg" || return 1
+    cfg=$(banshee_group_config_path "$name")
 
-    local count i session_json first_session="" built
-    count=$(jq '.sessions | length' "$cfg")
-    for ((i=0; i<count; i++)); do
-        session_json=$(jq -c ".sessions[$i]" "$cfg")
-        built=$(banshee_build_tmux_session "$session_json") || return 1
-        [[ -z "$first_session" && -n "$built" ]] && first_session="$built"
-    done
+    if [[ ! -f "$cfg" ]]; then
+        local selections
+        selections=$(banshee_group_select_prompt "$name" "") || { echo "banshee: group creation cancelled" >&2; return 1; }
+        banshee_write_group "$name" "$selections" || return 1
+    fi
 
-    # Atomic record of last loaded bundle name
+    banshee_validate_group_config "$cfg" || return 1
+
+    local targets first=""
+    targets=$(jq -r '.targets[]' "$cfg")
+    [[ -z "$targets" ]] && { echo "banshee: group '$name' has no targets" >&2; return 1; }
+
+    local t
+    while IFS= read -r t; do
+        [[ -z "$t" ]] && continue
+        [[ -z "$first" ]] && first="$t"
+        banshee_resolve_and_load "$t" default false || echo "banshee: target '$t' failed to load" >&2
+    done <<< "$targets"
+
+    banshee_record_last_action group "$name"
+
+    [[ -z "$first" ]] && return 0
+    local fname
+    fname=$(banshee_session_name "$first")
+    banshee_attach_or_switch "$fname"
+}
+
+banshee_edit_group() {
+    local name="$1"
+    banshee_require_jq || return 1
+
+    local cfg
+    cfg=$(banshee_group_config_path "$name")
+
+    local current_csv=""
+    if [[ -f "$cfg" ]] && banshee_validate_group_config "$cfg" 2>/dev/null; then
+        current_csv=$(jq -r '.targets | join(",")' "$cfg")
+    fi
+
+    local selections
+    selections=$(banshee_group_select_prompt "$name" "$current_csv") || { echo "banshee: edit cancelled" >&2; return 1; }
+    banshee_write_group "$name" "$selections" || return 1
+    echo "banshee: group '$name' saved"
+}
+
+# =============================================================================
+# Last action tracking
+# =============================================================================
+
+# Args: <type: target|group> <name>
+banshee_record_last_action() {
+    local type="$1" name="$2"
+    [[ -z "$type" || -z "$name" ]] && return 0
     local tmp="${BANSHEE_LAST_FILE}.tmp.$$"
-    printf '%s\n' "$name" > "$tmp"
+    printf '%s:%s\n' "$type" "$name" > "$tmp"
     mv -f "$tmp" "$BANSHEE_LAST_FILE"
-
-    [[ -z "$first_session" ]] && return 0
-
-    if [[ -n "${TMUX:-}" ]]; then
-        tmux switch-client -t "=$first_session" 2>/dev/null || true
-    else
-        tmux attach-session -t "=$first_session"
-    fi
 }
 
-banshee_restore_last() {
-    [[ -f "$BANSHEE_LAST_FILE" ]] || { echo "banshee: no previously loaded session" >&2; return 1; }
-    local name
-    name=$(head -n1 "$BANSHEE_LAST_FILE" 2>/dev/null | tr -d '\r\n')
-    [[ -z "$name" ]] && { echo "banshee: no previously loaded session" >&2; return 1; }
-    banshee_load_session "$name"
+banshee_read_last_action() {
+    [[ -f "$BANSHEE_LAST_FILE" ]] || return 1
+    head -n1 "$BANSHEE_LAST_FILE" 2>/dev/null | tr -d '\r\n'
 }
 
-banshee_list_sessions() {
-    if [[ ! -d "$BANSHEE_SESSIONS_DIR" ]]; then
-        echo "banshee: no session configs"
-        return 0
+banshee_restore_last_action() {
+    local entry
+    entry=$(banshee_read_last_action) || { echo "banshee: no previous action" >&2; return 1; }
+    [[ -z "$entry" ]] && { echo "banshee: no previous action" >&2; return 1; }
+    local type="${entry%%:*}"
+    local name="${entry#*:}"
+    [[ -z "$type" || -z "$name" || "$type" == "$name" ]] && { echo "banshee: malformed last_action: $entry" >&2; return 1; }
+    case "$type" in
+        target) banshee_resolve_and_load "$name" default true ;;
+        group)  banshee_load_group "$name" ;;
+        *) echo "banshee: unknown last_action type '$type'" >&2; return 1 ;;
+    esac
+}
+
+# =============================================================================
+# List
+# =============================================================================
+
+banshee_list_all() {
+    local last_entry="" last_type="" last_name=""
+    if last_entry=$(banshee_read_last_action 2>/dev/null); then
+        last_type="${last_entry%%:*}"
+        last_name="${last_entry#*:}"
     fi
+
+    local printed_target=0 printed_group=0
+
+    # Targets
     shopt -s nullglob 2>/dev/null || true
-    local files=("$BANSHEE_SESSIONS_DIR"/*.json)
+    local target_files=("$BANSHEE_SESSIONS_DIR"/*.json)
     shopt -u nullglob 2>/dev/null || true
-    if (( ${#files[@]} == 0 )); then
-        echo "banshee: no session configs"
-        return 0
-    fi
-
-    if ! command -v jq &>/dev/null; then
-        echo "banshee: jq required to list sessions" >&2
-        return 1
-    fi
-
-    local last=""
-    [[ -f "$BANSHEE_LAST_FILE" ]] && last=$(head -n1 "$BANSHEE_LAST_FILE" 2>/dev/null | tr -d '\r\n')
-
-    local f bundle_name sessions sn marker state sname
-    for f in "${files[@]}"; do
-        bundle_name=$(basename "$f" .json)
-        marker=""
-        [[ "$bundle_name" == "$last" ]] && marker=" (last)"
-        sessions=$(jq -r '.sessions[].name' "$f" 2>/dev/null || true)
-        printf "  %s%s\n" "$bundle_name" "$marker"
-        if [[ -z "$sessions" ]]; then
-            printf "    (invalid config)\n"
-            continue
-        fi
-        while IFS= read -r sn; do
-            [[ -z "$sn" ]] && continue
-            sname=$(banshee_session_name "$sn")
+    if (( ${#target_files[@]} > 0 )); then
+        echo "Targets:"
+        printed_target=1
+        local f tname sname state marker
+        for f in "${target_files[@]}"; do
+            tname=$(basename "$f" .json)
+            sname=$(banshee_session_name "$tname")
             state="stopped"
             if banshee_has_tmux && tmux has-session -t "=$sname" 2>/dev/null; then
                 state="running"
             fi
-            printf "    %-24s [%s]\n" "$sn" "$state"
-        done <<< "$sessions"
-    done
+            marker=""
+            [[ "$last_type" == "target" && "$last_name" == "$tname" ]] && marker=" (last)"
+            printf "  %-24s [%s]%s\n" "$tname" "$state" "$marker"
+        done
+    fi
+
+    # Groups
+    shopt -s nullglob 2>/dev/null || true
+    local group_files=("$BANSHEE_GROUPS_DIR"/*.json)
+    shopt -u nullglob 2>/dev/null || true
+    if (( ${#group_files[@]} > 0 )); then
+        (( printed_target )) && echo ""
+        echo "Groups:"
+        printed_group=1
+        if ! command -v jq &>/dev/null; then
+            echo "  (jq required to list group contents)"
+            return 0
+        fi
+        local f gname targets marker t tsname tstate
+        for f in "${group_files[@]}"; do
+            gname=$(basename "$f" .json)
+            marker=""
+            [[ "$last_type" == "group" && "$last_name" == "$gname" ]] && marker=" (last)"
+            printf "  %s%s\n" "$gname" "$marker"
+            if ! banshee_validate_group_config "$f" 2>/dev/null; then
+                printf "    (invalid group config)\n"
+                continue
+            fi
+            targets=$(jq -r '.targets[]' "$f")
+            while IFS= read -r t; do
+                [[ -z "$t" ]] && continue
+                tsname=$(banshee_session_name "$t")
+                tstate="stopped"
+                if banshee_has_tmux && tmux has-session -t "=$tsname" 2>/dev/null; then
+                    tstate="running"
+                fi
+                printf "    %-22s [%s]\n" "$t" "$tstate"
+            done <<< "$targets"
+        done
+    fi
+
+    if (( ! printed_target && ! printed_group )); then
+        echo "banshee: no session configs or groups"
+    fi
 }
 
-# --- Startup prompt: offer to restore last loaded session if not all running ---
+# =============================================================================
+# Startup prompt
+# =============================================================================
 banshee_startup_prompt() {
     banshee_has_tmux || return 0
     [[ "${BANSHEE_STARTUP_PROMPT:-true}" == "true" ]] || return 0
@@ -597,65 +817,75 @@ banshee_startup_prompt() {
     [[ -n "${BANSHEE_STARTUP_CHECKED:-}" ]] && return 0
     export BANSHEE_STARTUP_CHECKED=1
 
-    [[ -f "$BANSHEE_LAST_FILE" ]] || return 0
+    local entry
+    entry=$(banshee_read_last_action) || return 0
+    [[ -z "$entry" ]] && return 0
+    local type="${entry%%:*}" name="${entry#*:}"
+    [[ -z "$type" || -z "$name" ]] && return 0
+
     command -v jq &>/dev/null || return 0
 
-    local name
-    name=$(head -n1 "$BANSHEE_LAST_FILE" 2>/dev/null | tr -d '\r\n')
-    [[ -z "$name" ]] && return 0
-
-    local cfg
-    cfg=$(banshee_session_config_path "$name")
-    [[ -f "$cfg" ]] || return 0
-
-    local names_to_check
-    names_to_check=$(jq -r '.sessions[].name' "$cfg" 2>/dev/null) || return 0
-    [[ -z "$names_to_check" ]] && return 0
-
-    local all_running=true sn sname
-    while IFS= read -r sn; do
-        [[ -z "$sn" ]] && continue
-        sname=$(banshee_session_name "$sn")
-        if ! tmux has-session -t "=$sname" 2>/dev/null; then
-            all_running=false
-            break
-        fi
-    done <<< "$names_to_check"
+    local all_running=true
+    case "$type" in
+        target)
+            local sname
+            sname=$(banshee_session_name "$name")
+            tmux has-session -t "=$sname" 2>/dev/null || all_running=false
+            ;;
+        group)
+            local cfg
+            cfg=$(banshee_group_config_path "$name")
+            [[ -f "$cfg" ]] || return 0
+            local targets t tsname
+            targets=$(jq -r '.targets[]' "$cfg" 2>/dev/null) || return 0
+            [[ -z "$targets" ]] && return 0
+            while IFS= read -r t; do
+                [[ -z "$t" ]] && continue
+                tsname=$(banshee_session_name "$t")
+                tmux has-session -t "=$tsname" 2>/dev/null || { all_running=false; break; }
+            done <<< "$targets"
+            ;;
+        *) return 0 ;;
+    esac
 
     $all_running && return 0
 
-    printf "banshee: restore last session '%s'? [Y/n] " "$name"
+    printf "banshee: restore last %s '%s'? [Y/n] " "$type" "$name"
     local reply=""
     read -r reply || return 0
     case "$reply" in
-        ""|y|Y|yes|YES|Yes)
-            banshee_restore_last
-            ;;
+        ""|y|Y|yes|YES|Yes) banshee_restore_last_action ;;
     esac
 }
 
-# --- Usage ---
+# =============================================================================
+# Usage + main dispatch
+# =============================================================================
 banshee_usage() {
     cat <<'EOF'
-banshee - fluid git repository navigation powered by fzf
+banshee - fluid git repo navigation + declarative tmux sessions
 
 Usage:
-  banshee [query]         Find and navigate to a git repository
-  banshee -s <name>       Load session config <name> (open editor if new)
-  banshee -se <name>      Edit existing session config <name>
-  banshee -r              Restore last loaded session
-  banshee -l              List session configs and their state
-  banshee -c              Clear the repository cache
+  banshee [query]         fzf repo picker → load target (config if defined, else plain)
+  banshee <target>        Load target directly (exact-match)
+  banshee -s <target>     Load target; if no config, open $EDITOR to create one
+  banshee -se <target>    Edit (or create) target session config; no load
+  banshee -g <name>       Load group; if missing, prompt multi-select to create
+  banshee -ge <name>      Edit (or create) group via multi-select; no load
+  banshee -r              Re-run last action (target or group)
+  banshee -l              List session configs and groups
+  banshee -c              Clear repository cache
   banshee -v              Show version
   banshee -h              Show this help
 
-Session configs: ~/.config/banshee/sessions/<name>.json (JSON, requires jq)
-Configuration:   ~/.config/banshee/banshee.conf
+Configs: ~/.config/banshee/sessions/<target>.json  (per-target)
+Groups:  ~/.config/banshee/groups/<name>.json
+Config:  ~/.config/banshee/banshee.conf
+Requires: fzf, git, jq (and tmux for session features)
 
 EOF
 }
 
-# --- Main entry point ---
 banshee_main() {
     banshee_init
 
@@ -669,27 +899,43 @@ banshee_main() {
             return 0
             ;;
         -r|--restore)
-            banshee_restore_last
+            banshee_restore_last_action
             return $?
             ;;
         -s|--session)
             if [[ -z "${2:-}" ]]; then
-                echo "banshee: -s requires a session name" >&2
+                echo "banshee: -s requires a target name" >&2
                 return 1
             fi
-            banshee_edit_session "$2" load
+            banshee_resolve_and_load "$2" require_cfg true
             return $?
             ;;
-        -se|--edit)
+        -se|--edit-session)
             if [[ -z "${2:-}" ]]; then
-                echo "banshee: -se requires a session name" >&2
+                echo "banshee: -se requires a target name" >&2
                 return 1
             fi
-            banshee_edit_session "$2" edit_only
+            banshee_edit_session_config "$2" no_load
+            return $?
+            ;;
+        -g|--group)
+            if [[ -z "${2:-}" ]]; then
+                echo "banshee: -g requires a group name" >&2
+                return 1
+            fi
+            banshee_load_group "$2"
+            return $?
+            ;;
+        -ge|--edit-group)
+            if [[ -z "${2:-}" ]]; then
+                echo "banshee: -ge requires a group name" >&2
+                return 1
+            fi
+            banshee_edit_group "$2"
             return $?
             ;;
         -l|--list)
-            banshee_list_sessions
+            banshee_list_all
             return 0
             ;;
         -c|--clear)
@@ -702,14 +948,23 @@ banshee_main() {
             return 1
             ;;
         *)
-            local selected
-            selected=$(banshee_select_repo "${1:-}") || return 1
-
-            if banshee_has_tmux; then
-                banshee_goto_repo "$selected"
-            else
-                echo "$selected"
+            local query="${1:-}"
+            local target=""
+            if [[ -n "$query" ]]; then
+                # Exact-match against existing target config or repo first
+                if [[ -f "$(banshee_target_config_path "$query")" ]]; then
+                    target="$query"
+                elif banshee_find_repo_exact "$query" >/dev/null 2>&1; then
+                    target="$query"
+                fi
             fi
+            if [[ -z "$target" ]]; then
+                local selected
+                selected=$(banshee_select_repo "$query") || return 1
+                target=$(basename "$selected")
+            fi
+            banshee_resolve_and_load "$target" default true
+            return $?
             ;;
     esac
 }
