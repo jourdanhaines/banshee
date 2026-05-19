@@ -2,12 +2,12 @@
 
 Fast git repository switching and declarative tmux sessions for the terminal, powered by [fzf](https://github.com/junegunn/fzf).
 
-Banshee fuzzy-finds git repos and drops you into them. When tmux is installed, it also lets you define rich session presets in JSON — windows, splits, and per-pane commands.
+Banshee fuzzy-finds git repos, drops you into them, and — when a target has a session config — auto-loads its declared tmux layout (windows, splits, commands). Groups bundle multiple targets into a single launch.
 
 ## Dependencies
 
 **Required:** `fzf`, `git`, `jq`
-**Optional:** `tmux` (sessions), `fd` (faster repo scanning)
+**Optional:** `tmux` (sessions/groups), `fd` (faster repo scanning)
 
 ## Install
 
@@ -29,48 +29,47 @@ Ensure `~/.local/bin` is in your `PATH`.
 
 ## Usage
 
-```sh
-banshee              # fzf repo picker
-banshee myproject    # fzf with pre-filled query
-banshee -s <name>    # load session config (open editor if it doesn't exist)
-banshee -se <name>   # edit existing session config (no auto-load)
-banshee -r           # restore last loaded session
-banshee -l           # list session configs and their tmux state
-banshee -c           # clear repo cache
-```
+| Command | What it does |
+|---------|--------------|
+| `banshee` | fzf repo picker → load the picked target |
+| `banshee <target>` | Load `<target>` (config-driven if defined, otherwise plain session at repo path) |
+| `banshee -s <target>` | Load `<target>`; if no config exists, open `$EDITOR` to create one first |
+| `banshee -se <target>` | Edit (or create) the `<target>` session config; **no load** |
+| `banshee -g <name>` | Load group `<name>`; if missing, fzf multi-select prompts to create it |
+| `banshee -ge <name>` | Edit (or create) the group via multi-select; **no load** |
+| `banshee -r` | Re-run the last action (target or group) |
+| `banshee -l` | List session configs and groups, with running state |
+| `banshee -c` | Clear the repository cache |
 
-**Ctrl+F** launches the repo picker inline (configurable).
+**Ctrl+F** opens the picker inline (configurable in `banshee.conf`).
 
-Tab completion: `banshee <tab>` completes repo names; `banshee -s <tab>` completes session config names.
+Tab completion:
+- `banshee <tab>` — repo basenames
+- `banshee -s <tab>` / `banshee -se <tab>` — existing target configs
+- `banshee -g <tab>` / `banshee -ge <tab>` — existing groups
 
-## Session configs
+## Target session configs
 
-Each session config is a JSON file at `~/.config/banshee/sessions/<name>.json`. A single file can define multiple tmux sessions (a "bundle"), each with its own windows and panes.
+A target is a name (typically a repo basename). When `banshee <target>` runs, banshee looks for `~/.config/banshee/sessions/<target>.json` — if found, the tmux session is constructed from that config. Otherwise a plain session opens at the repo path.
 
 ```json
 {
   "v": 1,
-  "sessions": [
+  "name": "blacksheep",
+  "cwd": "~/dev/blacksheep",
+  "windows": [
     {
-      "name": "projectA",
-      "cwd": "~/dev/projectA",
-      "windows": [
-        {
-          "name": "neovim",
-          "panes": [
-            { "run": "nvim" }
-          ]
-        },
-        {
-          "name": "dev",
-          "panes": [
-            { "run": "bun nx dev app" },
-            [
-              { "run": "bun nx serve server" },
-              { "run": "bun nx serve worker" }
-            ]
-          ]
-        }
+      "name": "neovim",
+      "panes": [ { "run": "nvim" } ]
+    },
+    {
+      "name": "dev",
+      "panes": [
+        { "run": "bun nx dev app" },
+        [
+          { "run": "bun nx serve server" },
+          { "run": "bun nx serve worker" }
+        ]
       ]
     }
   ]
@@ -82,14 +81,13 @@ Each session config is a JSON file at `~/.config/banshee/sessions/<name>.json`. 
 | Field | Required | Notes |
 |-------|----------|-------|
 | `v` | yes | Schema version. Only `1` supported. |
-| `sessions[]` | yes | One entry per tmux session to create. |
-| `sessions[].name` | yes | tmux session name (`.` / `:` → `_`). |
-| `sessions[].cwd` | no | Default working dir. `~` expanded. Falls back to `$HOME`. |
-| `sessions[].windows[]` | yes | tmux windows, in order. |
+| `name` | yes | Informational. tmux session name comes from the filename. |
+| `cwd` | no | Default working dir for windows/panes. `~` expanded. Falls back to the matching repo path, then `$HOME`. |
+| `windows[]` | yes | tmux windows, in order. |
 | `windows[].name` | no | tmux window name. |
 | `windows[].cwd` | no | Overrides session `cwd`. |
 | `windows[].panes` | yes | Recursive layout tree. |
-| `panes[i]` | yes | Either `{ "run": "<cmd>", "cwd": "<optional>" }` or a nested array. |
+| `panes[i]` | yes | Either `{ "run": "<cmd>", "cwd": "<optional>" }` or a nested array for sub-splits. |
 
 ### Pane layout tree
 
@@ -108,17 +106,37 @@ The `dev` window above lays out as:
 +----------+-----------+
 ```
 
-### First-time flow
+## Groups
+
+A group is a saved multi-select of targets — useful for "launch my whole work setup at once".
 
 ```sh
-banshee -s work       # file doesn't exist → editor opens with default template
-                      # save valid JSON → bundle gets loaded
-banshee -s work       # subsequent runs → load immediately
-banshee -se work      # edit without loading
-banshee -r            # rebuild last-loaded bundle (e.g. after reboot)
+banshee -g work
 ```
 
-The last `-s <name>` invocation is remembered in `~/.local/share/banshee/last_loaded`. `banshee -r` reads that and re-runs the load.
+On first invocation, an fzf multi-select prompt appears with all known targets (repo basenames ∪ existing target configs). TAB to mark, ENTER to confirm. The selections are saved to `~/.config/banshee/groups/work.json`:
+
+```json
+{
+  "v": 1,
+  "name": "work",
+  "targets": ["banshee", "blacksheep", "dotfiles"]
+}
+```
+
+Subsequent runs of `banshee -g work` create a tmux session for each target (config-driven if defined, plain otherwise) and attach to the first one in the list.
+
+```sh
+banshee -ge work
+```
+
+Re-runs the multi-select prompt — current selections are listed in the header and floated to the top of the pool for quick re-ticking. Saves without launching.
+
+## Last action / `-r`
+
+Every `banshee <target>`, `banshee -s <target>`, and `banshee -g <name>` records itself to `~/.local/share/banshee/last_action`. `banshee -r` replays whichever was most recent. Useful after reboot or `tmux kill-server`.
+
+`-se`, `-ge`, `-l`, `-c` do **not** update the last action.
 
 ## Configuration
 
@@ -130,7 +148,7 @@ max_depth = 5                           # how deep to look
 keybind = ctrl-f                        # inline launch key
 cache_ttl = 300                         # repo cache lifetime (seconds)
 fzf_opts =                              # extra fzf flags
-startup_prompt = true                   # offer to restore last session on shell start
+startup_prompt = true                   # offer to restore last action on shell start
 ```
 
 ## Uninstall
