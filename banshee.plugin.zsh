@@ -8,12 +8,12 @@ BANSHEE_PLUGIN_DIR="${0:A:h}"
 # Source the core script
 source "$BANSHEE_PLUGIN_DIR/banshee.sh"
 
-# --- Shell wrapper (so cd works in the current shell) ---
+# --- Shell wrapper (so cd works in the current shell when no tmux) ---
 banshee() {
     banshee_init
 
     case "${1:-}" in
-        -h|--help|-v|--version|-r|--restore|-s|--session|-se|--edit|-l|--list|-c|--clear)
+        -h|--help|-v|--version|-r|--restore|-l|--list|-c|--clear|-s|--session|-se|--edit-session|-g|--group|-ge|--edit-group)
             banshee_main "$@"
             return $?
             ;;
@@ -22,14 +22,13 @@ banshee() {
             return $?
             ;;
         *)
+            if banshee_has_tmux; then
+                banshee_main "$@"
+                return $?
+            fi
             local selected
             selected=$(banshee_select_repo "${1:-}") || return 0
-
-            if banshee_has_tmux; then
-                banshee_goto_repo "$selected"
-            else
-                cd "$selected" || return 1
-            fi
+            cd "$selected" || return 1
             ;;
     esac
 }
@@ -42,7 +41,6 @@ _banshee_widget() {
 }
 zle -N _banshee_widget
 
-# Read keybind from config file directly (no init, no subcommands)
 _banshee_read_keybind() {
     local conf="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/banshee.conf"
     [[ -f "$conf" ]] || return
@@ -57,7 +55,6 @@ _banshee_read_keybind() {
 }
 _banshee_read_keybind
 
-# Bind the key (configurable via banshee.conf)
 case "${BANSHEE_KEYBIND:-ctrl-f}" in
     ctrl-f)  bindkey "^f" _banshee_widget ;;
     ctrl-g)  bindkey "^g" _banshee_widget ;;
@@ -71,21 +68,35 @@ esac
 # --- Tab completion ---
 _banshee_complete() {
     local prev="${words[CURRENT-1]:-}"
+    local sessions_dir="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/sessions"
+    local groups_dir="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/groups"
 
-    # After -s/-se, complete session config names
-    if [[ "$prev" == "-s" || "$prev" == "--session" || "$prev" == "-se" || "$prev" == "--edit" ]]; then
-        local sessions_dir="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/sessions"
-        local -a names
-        names=()
-        if [[ -d "$sessions_dir" ]]; then
-            local f
-            for f in "$sessions_dir"/*.json(N); do
-                names+=("${f:t:r}")
-            done
-        fi
-        _describe 'session configs' names
-        return
-    fi
+    case "$prev" in
+        -s|--session|-se|--edit-session)
+            local -a names
+            names=()
+            if [[ -d "$sessions_dir" ]]; then
+                local f
+                for f in "$sessions_dir"/*.json(N); do
+                    names+=("${f:t:r}")
+                done
+            fi
+            _describe 'target configs' names
+            return
+            ;;
+        -g|--group|-ge|--edit-group)
+            local -a names
+            names=()
+            if [[ -d "$groups_dir" ]]; then
+                local f
+                for f in "$groups_dir"/*.json(N); do
+                    names+=("${f:t:r}")
+                done
+            fi
+            _describe 'groups' names
+            return
+            ;;
+    esac
 
     local -a repos
     repos=("${(@f)$(banshee_find_repos | while IFS= read -r line; do basename "$line"; done | sort -u)}")
@@ -94,7 +105,7 @@ _banshee_complete() {
 
 compdef _banshee_complete banshee
 
-# --- Startup: prompt to restore last loaded session if not all running ---
+# --- Startup: prompt to restore last action if not running ---
 if [[ -o interactive ]]; then
     banshee_init 2>/dev/null
     banshee_startup_prompt

@@ -8,12 +8,12 @@ BANSHEE_PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source the core script
 source "$BANSHEE_PLUGIN_DIR/banshee.sh"
 
-# --- Shell wrapper (so cd works in the current shell) ---
+# --- Shell wrapper (so cd works in the current shell when no tmux) ---
 banshee() {
     banshee_init
 
     case "${1:-}" in
-        -h|--help|-v|--version|-r|--restore|-s|--session|-se|--edit|-l|--list|-c|--clear)
+        -h|--help|-v|--version|-r|--restore|-l|--list|-c|--clear|-s|--session|-se|--edit-session|-g|--group|-ge|--edit-group)
             banshee_main "$@"
             return $?
             ;;
@@ -22,14 +22,13 @@ banshee() {
             return $?
             ;;
         *)
+            if banshee_has_tmux; then
+                banshee_main "$@"
+                return $?
+            fi
             local selected
             selected=$(banshee_select_repo "${1:-}") || return 0
-
-            if banshee_has_tmux; then
-                banshee_goto_repo "$selected"
-            else
-                cd "$selected" || return 1
-            fi
+            cd "$selected" || return 1
             ;;
     esac
 }
@@ -39,7 +38,6 @@ _banshee_keybind() {
     banshee
 }
 
-# Read keybind from config file directly (no init, no subcommands)
 _banshee_read_keybind() {
     local conf="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/banshee.conf"
     [[ -f "$conf" ]] || return
@@ -54,7 +52,6 @@ _banshee_read_keybind() {
 }
 _banshee_read_keybind
 
-# Bind the key (configurable via banshee.conf)
 _banshee_bind_key() {
     local key_seq
     case "${BANSHEE_KEYBIND:-ctrl-f}" in
@@ -67,7 +64,6 @@ _banshee_bind_key() {
         *)       key_seq="$BANSHEE_KEYBIND" ;;
     esac
 
-    # Only bind if the terminal supports it (interactive shell with readline)
     if [[ $- == *i* ]] && [[ -t 0 ]]; then
         bind -x "\"$key_seq\": _banshee_keybind" 2>/dev/null || true
     fi
@@ -79,29 +75,41 @@ _banshee_bind_key
 _banshee_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]:-}"
+    local sessions_dir="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/sessions"
+    local groups_dir="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/groups"
 
-    # After -s/-se, complete session config names
-    if [[ "$prev" == "-s" || "$prev" == "--session" || "$prev" == "-se" || "$prev" == "--edit" ]]; then
-        local sessions_dir="${XDG_CONFIG_HOME:-$HOME/.config}/banshee/sessions"
-        local names=""
-        if [[ -d "$sessions_dir" ]]; then
-            local f
-            for f in "$sessions_dir"/*.json; do
-                [[ -e "$f" ]] || continue
-                names+="$(basename "$f" .json) "
-            done
-        fi
-        COMPREPLY=($(compgen -W "$names" -- "$cur"))
-        return
-    fi
+    case "$prev" in
+        -s|--session|-se|--edit-session)
+            local names=""
+            if [[ -d "$sessions_dir" ]]; then
+                local f
+                for f in "$sessions_dir"/*.json; do
+                    [[ -e "$f" ]] || continue
+                    names+="$(basename "$f" .json) "
+                done
+            fi
+            COMPREPLY=($(compgen -W "$names" -- "$cur"))
+            return
+            ;;
+        -g|--group|-ge|--edit-group)
+            local names=""
+            if [[ -d "$groups_dir" ]]; then
+                local f
+                for f in "$groups_dir"/*.json; do
+                    [[ -e "$f" ]] || continue
+                    names+="$(basename "$f" .json) "
+                done
+            fi
+            COMPREPLY=($(compgen -W "$names" -- "$cur"))
+            return
+            ;;
+    esac
 
-    # Handle flag completion
     if [[ "$cur" == -* ]]; then
-        COMPREPLY=($(compgen -W "--help --version --restore --session --edit --list --clear -r -s -se -l -c" -- "$cur"))
+        COMPREPLY=($(compgen -W "--help --version --restore --session --edit-session --group --edit-group --list --clear -r -s -se -g -ge -l -c" -- "$cur"))
         return
     fi
 
-    # Complete repository names
     local repos
     repos=$(banshee_find_repos 2>/dev/null | while IFS= read -r line; do basename "$line"; done | sort -u)
     COMPREPLY=($(compgen -W "$repos" -- "$cur"))
@@ -109,7 +117,7 @@ _banshee_completions() {
 
 complete -F _banshee_completions banshee
 
-# --- Startup: prompt to restore last loaded session if not all running ---
+# --- Startup: prompt to restore last action if not running ---
 if [[ $- == *i* ]]; then
     banshee_init 2>/dev/null
     banshee_startup_prompt
