@@ -20,6 +20,7 @@ check_deps() {
     local missing=()
     command -v fzf &>/dev/null || missing+=("fzf")
     command -v git &>/dev/null || missing+=("git")
+    command -v jq  &>/dev/null || missing+=("jq")
     command -v curl &>/dev/null || { err "curl is required for remote install"; exit 1; }
 
     if [[ ${#missing[@]} -gt 0 ]]; then
