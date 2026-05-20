@@ -92,19 +92,21 @@ A target is a name (typically a repo basename). When `banshee <target>` runs, ba
 ### Pane layout tree
 
 `panes` is an array. **Depth alternates split direction**:
-- Top level (depth 0): rows, top → bottom.
-- One level down (depth 1): columns, side by side.
+- Top level (depth 0): columns, side by side.
+- One level down (depth 1): rows, top → bottom.
 - Deeper: alternating perpendicular splits.
 
 The `dev` window above lays out as:
 
 ```
-+----------------------+
-|  bun nx dev app      |
-+----------+-----------+
-|  server  |  worker   |
-+----------+-----------+
++---------------+--------+--------+
+|               | server |        |
+|  bun nx dev   +--------+ ...    |
+|     app       | worker |        |
++---------------+--------+--------+
 ```
+
+(The first pane is a full column on the left; the second entry is a nested array, which becomes a column whose contents stack vertically.)
 
 ## Groups
 

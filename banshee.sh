@@ -407,7 +407,7 @@ banshee_edit_session_config() {
 # Pane layout — recursive walker (UNCHANGED from 0.2.0 logic)
 # =============================================================================
 # Args: <target_pane_id> <panes_json> <base_cwd> <depth>
-# depth 0 → vertical splits (rows); depth 1 → horizontal (cols); alternating.
+# depth 0 → horizontal splits (cols, side-by-side); depth 1 → vertical (rows, stacked); alternating.
 banshee_build_panes() {
     local target_pane="$1" panes_json="$2" base_cwd="$3" depth="$4"
 
@@ -416,7 +416,7 @@ banshee_build_panes() {
     (( len == 0 )) && return 0
 
     local dir
-    if (( depth % 2 == 0 )); then dir="-v"; else dir="-h"; fi
+    if (( depth % 2 == 0 )); then dir="-h"; else dir="-v"; fi
 
     local pane_ids="$target_pane"
     local prev_pane="$target_pane"
