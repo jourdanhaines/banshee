@@ -29,7 +29,7 @@ const (
 // nonsensical (a zero-value Config must still produce a usable window).
 const (
 	defaultAccent  = "#7aa2f7"
-	defaultOpacity = 0.86
+	defaultOpacity = 0.92
 	defaultWidth   = 640
 )
 
@@ -164,9 +164,6 @@ window#banshee-window {
 
 #banshee-window list.results > row {
 	background-color: transparent;
-	/* Reserve the selection bar's width on every row so selecting one does
-	   not shift its contents sideways. */
-	border-left: 3px solid transparent;
 	border-radius: 8px;
 	padding: 6px 10px;
 	margin: 1px 0;
@@ -180,7 +177,6 @@ window#banshee-window {
 #banshee-window list.results > row:selected,
 #banshee-window list.results > row:selected:hover {
 	background-color: {{ alpha .AccentRGB 0.16 }};
-	border-left: 3px solid {{ .Accent }};
 }
 
 #banshee-window list.results > row:selected .result-title {
@@ -191,10 +187,12 @@ window#banshee-window {
 	color: rgba(242, 245, 251, 0.6);
 }
 
-/* Row contents */
+/* Row contents. The color below tints symbolic theme icons to the accent;
+   full-color app icons and pre-tinted builtin SVGs ignore it. */
 #banshee-window .result-icon {
 	-gtk-icon-size: 24px;
 	margin-right: 10px;
+	color: {{ .Accent }};
 }
 
 #banshee-window .result-title {

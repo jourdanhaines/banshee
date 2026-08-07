@@ -141,7 +141,7 @@ func TestLoadFileKeys(t *testing.T) {
 			name: "invalid numbers keep defaults",
 			body: "max_depth = deep\ncache_ttl = soon\nwindow_opacity = opaque\n",
 			check: func(t *testing.T, c Config) {
-				if c.MaxDepth != 5 || c.CacheTTL != 300 || c.WindowOpacity != 0.86 {
+				if c.MaxDepth != 5 || c.CacheTTL != 300 || c.WindowOpacity != 0.92 {
 					t.Errorf("defaults not preserved: %+v", c)
 				}
 			},

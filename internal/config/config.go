@@ -32,7 +32,7 @@ type Config struct {
 	LauncherWidth int     // default 640
 	MaxResults    int     // <= 0 (default) → unlimited; set to cap the list
 	Accent        string  // CSS color, default #7aa2f7
-	WindowOpacity float64 // panel alpha, default 0.86
+	WindowOpacity float64 // panel alpha, default 0.92
 	KeyboardMode  string  // "exclusive" (default) | "on-demand"
 }
 
@@ -47,7 +47,7 @@ func Default() Config {
 		LauncherWidth: 640,
 		MaxResults:    0,
 		Accent:        "#7aa2f7",
-		WindowOpacity: 0.86,
+		WindowOpacity: 0.92,
 		KeyboardMode:  "exclusive",
 	}
 }

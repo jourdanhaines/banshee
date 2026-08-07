@@ -29,15 +29,14 @@ func TestGeneratedCSSParses(t *testing.T) {
 		name string
 		want string
 	}{
-		{"panel glass at the configured opacity", "background-color: rgba(17,19,27,0.86)"},
+		{"panel glass at the configured opacity", "background-color: rgba(17,19,27,0.92)"},
 		{"panel width", "min-width: 640px"},
 		{"panel drop shadow", "box-shadow: 0 14px 40px rgba(0,0,0,0.5)"},
 		{"accent border", "border-top-color: rgba(122,162,247,0.35)"},
 		{"panel corner radius", "border-top-left-radius: 14px"},
 		{"accent caret in the entry", "caret-color: rgb(122,162,247)"},
-		{"selection bar width", "border-left-width: 3px"},
-		{"selection bar color", "border-left-color: rgb(122,162,247)"},
 		{"selection tint", "background-color: rgba(122,162,247,0.16)"},
+		{"accent-tinted icons", "color: rgb(122,162,247)"},
 		{"dim subtitles", "color: rgba(223,228,238,0.42)"},
 		{"badge accent", "color: rgb(122,162,247)"},
 		{"icon size", "-gtk-icon-size: 24px"},

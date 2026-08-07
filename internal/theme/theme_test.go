@@ -16,12 +16,12 @@ func TestParamsFor(t *testing.T) {
 		{
 			name: "defaults",
 			cfg:  config.Default(),
-			want: Params{Accent: "#7aa2f7", AccentRGB: "122, 162, 247", PanelRGB: "17, 19, 27", Opacity: "0.86", Width: 640},
+			want: Params{Accent: "#7aa2f7", AccentRGB: "122, 162, 247", PanelRGB: "17, 19, 27", Opacity: "0.92", Width: 640},
 		},
 		{
 			name: "zero value config falls back to defaults",
 			cfg:  config.Config{},
-			want: Params{Accent: "#7aa2f7", AccentRGB: "122, 162, 247", PanelRGB: "17, 19, 27", Opacity: "0.86", Width: 640},
+			want: Params{Accent: "#7aa2f7", AccentRGB: "122, 162, 247", PanelRGB: "17, 19, 27", Opacity: "0.92", Width: 640},
 		},
 		{
 			name: "custom accent, opacity and width",
@@ -35,13 +35,13 @@ func TestParamsFor(t *testing.T) {
 		},
 		{
 			name: "invalid accent falls back",
-			cfg:  config.Config{Accent: "not-a-color", WindowOpacity: 0.86, LauncherWidth: 640},
-			want: Params{Accent: "#7aa2f7", AccentRGB: "122, 162, 247", PanelRGB: "17, 19, 27", Opacity: "0.86", Width: 640},
+			cfg:  config.Config{Accent: "not-a-color", WindowOpacity: 0.92, LauncherWidth: 640},
+			want: Params{Accent: "#7aa2f7", AccentRGB: "122, 162, 247", PanelRGB: "17, 19, 27", Opacity: "0.92", Width: 640},
 		},
 		{
 			name: "out of range opacity and width fall back",
 			cfg:  config.Config{Accent: "#7aa2f7", WindowOpacity: 3, LauncherWidth: -10},
-			want: Params{Accent: "#7aa2f7", AccentRGB: "122, 162, 247", PanelRGB: "17, 19, 27", Opacity: "0.86", Width: 640},
+			want: Params{Accent: "#7aa2f7", AccentRGB: "122, 162, 247", PanelRGB: "17, 19, 27", Opacity: "0.92", Width: 640},
 		},
 	}
 
@@ -58,18 +58,21 @@ func TestRenderSubstitutesParams(t *testing.T) {
 	out := Render(config.Config{Accent: "#a78bfa", WindowOpacity: 0.5, LauncherWidth: 800})
 
 	wants := []string{
-		"rgba(17, 19, 27, 0.5)",          // panel glass at the configured opacity
-		"rgba(167, 139, 250, 0.35)",      // accent-derived panel border
-		"min-width: 800px",               // configured launcher width
-		"border-left: 3px solid #a78bfa", // selection bar
-		"color: #a78bfa",                 // badge uses the accent
-		"window#banshee-window",          // window is transparent, panel carries the glass
+		"rgba(17, 19, 27, 0.5)",     // panel glass at the configured opacity
+		"rgba(167, 139, 250, 0.35)", // accent-derived panel border
+		"min-width: 800px",          // configured launcher width
+		"color: #a78bfa",            // badge and icons use the accent
+		"window#banshee-window",     // window is transparent, panel carries the glass
 		"background-color: transparent",
 	}
 	for _, w := range wants {
 		if !strings.Contains(out, w) {
 			t.Errorf("Render() missing %q\n---\n%s", w, out)
 		}
+	}
+	// The selection bar is gone: selected rows are a background tint only.
+	if strings.Contains(out, "border-left") {
+		t.Errorf("Render() still emits a border-left selection bar\n---\n%s", out)
 	}
 }
 
