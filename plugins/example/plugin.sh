@@ -1,6 +1,7 @@
 #!/bin/sh
 # banshee example exec plugin — a reference implementation of the JSON Lines
-# plugin protocol (v1). See docs/PLUGINS.md for the full specification.
+# plugin protocol (v1). See internal/providers/plugins/proto.go for the full
+# specification, and the Plugins section of CLAUDE.md for the manifest layout.
 #
 # Install:
 #   cp -r plugins/example ~/.config/banshee/plugins/example
@@ -52,8 +53,8 @@ emit_results() {
 
     # 2. A url result: banshee opens it with the system handler, no callback.
     printf ',{"id":"docs","title":"Read the banshee plugin docs",'
-    printf '"subtitle":"docs/PLUGINS.md","score":80,"icon":"text-x-generic-symbolic",'
-    printf '"action":{"kind":"url","url":"https://github.com/jourdanhaines/banshee/blob/main/docs/PLUGINS.md"}}'
+    printf '"subtitle":"internal/providers/plugins/proto.go","score":80,"icon":"text-x-generic-symbolic",'
+    printf '"action":{"kind":"url","url":"https://github.com/jourdanhaines/banshee/blob/main/internal/providers/plugins/proto.go"}}'
 
     # 3. An exec-detach result: banshee runs argv detached from the daemon.
     printf ',{"id":"notify","title":"Send a test notification",'

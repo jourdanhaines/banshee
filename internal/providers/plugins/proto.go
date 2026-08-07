@@ -8,8 +8,44 @@
 //     newline-delimited JSON protocol on stdin/stdout. Each becomes its own
 //     providers.Provider.
 //
-// The exec protocol, lifecycle rules and a worked example are documented in
-// docs/PLUGINS.md.
+// # The exec protocol
+//
+// One JSON object per line, in both directions, every message stamped with
+// "v": ProtoVersion. The host sends EventQuery, EventActivate and
+// EventShutdown (see Event); the plugin answers with EventResults and the
+// optional EventActivated (see Message). Unknown events and unknown fields are
+// ignored on both sides, so new kinds can be added without breaking either.
+//
+// Every query carries a Seq, and a plugin must echo the seq it is answering:
+// the host drops any message whose seq is not the query it is still waiting
+// on. Results for one seq may be split across several messages; the host
+// merges them until one arrives with "done": true or the soft per-query
+// timeout elapses, whichever comes first. Partial results are kept, late ones
+// are discarded.
+//
+// # Process contract
+//
+// The child is started lazily, on the first query that passes the plugin's
+// prefix gate (see ExecPlugin.MatchQuery), and lives until the host shuts it
+// down. It runs in its own process group, with its working directory set to
+// the plugin directory and these variables added to its environment:
+//
+//   - BANSHEE_PLUGIN_ID — the manifest id.
+//   - BANSHEE_PLUGIN_DIR — absolute path of the plugin directory.
+//   - BANSHEE_PLUGIN_PROTO — ProtoVersion, as a decimal string.
+//
+// Stdout carries protocol messages only: the host skips any line that does not
+// start with '{', so one stray log line costs a plugin its results. Logs belong
+// on stderr, which the daemon forwards to daemon.log. Output must be flushed
+// after every message — runtimes that line-buffer only when stdout is a TTY
+// (Python, Node) otherwise appear to answer nothing at all.
+//
+// Lifecycle and timing — the soft query timeout, crash backoff, the crash
+// count that disables a plugin until the next reload, the line-length cap and
+// the shutdown grace period — are defined and documented as constants in
+// exec.go. The manifest schema for both plugin types is in
+// connectors/manifest.go. plugins/example/ is a complete, commented exec
+// plugin.
 package plugins
 
 import (

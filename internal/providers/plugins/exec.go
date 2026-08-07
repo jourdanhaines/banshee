@@ -168,7 +168,9 @@ func (p *ExecPlugin) Disabled() bool {
 
 // MatchQuery applies the plugin's prefix gate. ok is false when the plugin
 // should not see this query at all; otherwise the returned string is the query
-// with the prefix (and one separating space) removed.
+// with the prefix (and one separating space) removed. The comparison is
+// case-insensitive, and the prefix must be followed by a space or by nothing:
+// with prefix "wifi", "wifi" and "WiFi list" match, "wifikill" does not.
 func (p *ExecPlugin) MatchQuery(q string) (string, bool) {
 	q = strings.TrimSpace(q)
 	if q == "" {
