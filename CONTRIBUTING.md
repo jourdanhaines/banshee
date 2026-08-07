@@ -1,8 +1,9 @@
 # Contributing to banshee
 
-Thanks for looking. Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
-the package map and data flow, and [docs/PLUGINS.md](docs/PLUGINS.md) if you
-are extending banshee from the outside rather than changing it.
+Thanks for looking. [CLAUDE.md](CLAUDE.md) is the orientation doc — package
+map, build commands, code style and git conventions. Per-package godoc covers
+the details. This file covers the things that live outside it: getting set up,
+the manual checklist, and how to report a bug.
 
 ## Getting set up
 
@@ -20,23 +21,11 @@ make build     # → ./bin/banshee
 `CGO_ENABLED=1` is required and set by the Makefile — GTK4 and
 gtk4-layer-shell are C libraries.
 
-## Everyday commands
-
-| Command | What it does |
-|---|---|
-| `make build` | Build `./bin/banshee` |
-| `make test` | Full unit suite — no display, tmux server or network needed |
-| `make test-race` | The same suite under the race detector (minus `internal/theme` — see below) |
-| `make lint` | gofmt check, `go vet`, then golangci-lint if installed |
-| `make fmt` | `gofmt -w .` |
-| `make smoke` | GTK smoke test — needs a live Wayland/X session |
-| `make install` | Install binary, shell plugins, unit, example plugin |
-| `make uninstall` | Remove them again (configs are kept) |
-| `make help` | List the documented targets |
+Everyday commands live in [CLAUDE.md](CLAUDE.md) and `make help`.
 
 `make lint && make test` is the gate. Both must be clean before a PR;
-[.github/workflows/ci.yml](.github/workflows/ci.yml) runs exactly that on every
-push and pull request, so a red PR is a red check.
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs that plus `make
+build` on every push and pull request, so a red PR is a red check.
 
 `make test-race` skips `internal/theme`. `-race` implies `-d=checkptr`, and
 gotk4 v0.4.0's weak-reference helper trips it from GTK's toggle-notify
@@ -46,15 +35,13 @@ that does; `make test` covers it.
 
 ## House style
 
-- **Idiomatic, gofmt'd Go.** Godoc comments on every exported identifier —
-  say what it does and why it exists, not what its name already says.
-- **Table-driven tests.** One `[]struct{name string; …}` per behavior, subtests
-  via `t.Run`.
-- **Tests must be hermetic.** No live tmux server, no GTK display, no network,
-  no dependence on the developer's `$HOME`. Use `t.TempDir()`, fake procfs
-  trees, `sh -c` stub plugins, and the `tmux.Runner` interface for golden-argv
-  assertions. If a test needs a display, put it behind a build tag like the
-  `gtksmoke` one.
+Full rules are in [CLAUDE.md](CLAUDE.md). The essentials:
+
+- **Tests are table-driven and hermetic.** No live tmux server, GTK display,
+  network, or dependence on the developer's `$HOME` — use `t.TempDir()`, fake
+  procfs trees, `sh -c` stub plugins, and the `tmux.Runner` interface for
+  golden-argv assertions. Anything needing a display goes behind a build tag
+  like `gtksmoke`.
 - **Forward compatibility is not optional.** Unknown config keys and unknown
   JSON fields are ignored, everywhere. A config written for a newer banshee
   must still load on an older one.
@@ -62,20 +49,13 @@ that does; `make test` covers it.
   `Aggregator`, `Scorer` — never hardcode across a package boundary. Adding a
   result category should touch one new package plus one line in
   `internal/boot`.
-- **Respect the frozen contracts** listed in
-  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#frozen-contracts). Changing them
-  is a deliberate migration, not a drive-by.
+- **Respect the frozen contracts.** Changing one is a deliberate migration,
+  not a drive-by.
 
 ### Commit messages
 
-Conventional commits, single line, no body unless the *why* is genuinely
-non-obvious:
-
-```
-feat: add clipboard-history provider
-fix: keep entry focus after an on-demand keyboard-mode toggle
-docs: document the shared-score contract
-```
+See Git Conventions in [CLAUDE.md](CLAUDE.md) — conventional commits, single
+line, e.g. `feat: add clipboard-history provider`.
 
 ## Manual checklist
 
