@@ -45,7 +45,12 @@ func TestProviderQuery(t *testing.T) {
 		want  []string // result titles, in order
 	}{
 		{
-			name:  "empty query returns alphabetical defaults",
+			name:  "empty query returns every app alphabetically by default",
+			query: "",
+			want:  []string{"Alacritty", "Files", "Firefox", "Terminal"},
+		},
+		{
+			name:  "empty query capped",
 			query: "",
 			opts:  []Option{WithEmptyQueryLimit(3)},
 			want:  []string{"Alacritty", "Files", "Firefox"},

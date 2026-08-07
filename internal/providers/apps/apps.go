@@ -65,12 +65,6 @@ type SourceFunc func() ([]App, error)
 // Apps implements Source.
 func (f SourceFunc) Apps() ([]App, error) { return f() }
 
-// Default provider tuning.
-const (
-	// DefaultEmptyQueryLimit caps how many applications are shown for an empty
-	// query (the launcher's idle state).
-	DefaultEmptyQueryLimit = 8
-)
 
 // Option configures a Provider.
 type Option func(*Provider)
@@ -88,15 +82,11 @@ func WithMaxResults(n int) Option {
 // repo- and session-dominated result lists.
 func WithMinScore(min int) Option { return func(p *Provider) { p.minScore = min } }
 
-// WithEmptyQueryLimit sets how many applications an empty query returns.
-// Zero disables empty-query results entirely.
+// WithEmptyQueryLimit sets how many applications an empty query returns:
+// positive caps the list, zero disables empty-query results entirely, and
+// negative means unlimited (the default).
 func WithEmptyQueryLimit(n int) Option {
-	return func(p *Provider) {
-		if n < 0 {
-			n = 0
-		}
-		p.emptyLimit = n
-	}
+	return func(p *Provider) { p.emptyLimit = n }
 }
 
 // Provider is the applications result provider. It is safe for concurrent use.
@@ -121,7 +111,7 @@ func New(score Scorer, opts ...Option) *Provider {
 	p := &Provider{
 		score:      score,
 		src:        GIOSource{},
-		emptyLimit: DefaultEmptyQueryLimit,
+		emptyLimit: -1, // every application, alphabetically, on an empty query
 	}
 	for _, o := range opts {
 		o(p)
@@ -242,7 +232,7 @@ func (p *Provider) defaults(apps []App) []providers.Result {
 	sorted := make([]App, len(apps))
 	copy(sorted, apps)
 	sort.SliceStable(sorted, func(i, j int) bool { return lessName(sorted[i], sorted[j]) })
-	if len(sorted) > p.emptyLimit {
+	if p.emptyLimit > 0 && len(sorted) > p.emptyLimit {
 		sorted = sorted[:p.emptyLimit]
 	}
 	out := make([]providers.Result, 0, len(sorted))

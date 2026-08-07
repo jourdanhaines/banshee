@@ -38,10 +38,6 @@ import (
 	"github.com/jourdanhaines/banshee/internal/ui"
 )
 
-// EmptyQueryApps caps how many applications show up in the launcher's default
-// (empty query) view, below the resume row and the running sessions.
-const EmptyQueryApps = 8
-
 // Launcher owns the daemon-side object graph. Build it with New and run it
 // with Run.
 type Launcher struct {
@@ -94,10 +90,7 @@ func New(cfg config.Config) *Launcher {
 	b.conn = connectors.New(b.idx, fuzzy.Score)
 	b.conn.AddManifests(b.host.URLManifests()...)
 
-	b.apps = apps.New(fuzzy.Score,
-		apps.WithMaxResults(cfg.MaxResults),
-		apps.WithEmptyQueryLimit(EmptyQueryApps),
-	)
+	b.apps = apps.New(fuzzy.Score, apps.WithMaxResults(cfg.MaxResults))
 
 	// Registration order is documentation only — the aggregator sorts by
 	// (-Score, Category, Title). It is kept in category order so this list
