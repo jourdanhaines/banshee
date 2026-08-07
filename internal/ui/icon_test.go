@@ -37,6 +37,24 @@ func TestResolveIcon(t *testing.T) {
 			wantValue: "network-wireless-symbolic",
 		},
 		{
+			name:      "builtin",
+			icon:      providers.Icon{Builtin: "github"},
+			wantKind:  IconBuiltin,
+			wantValue: "github",
+		},
+		{
+			name:      "builtin beats theme name and path",
+			icon:      providers.Icon{Builtin: "github", ThemeName: "n", Path: "/p.svg"},
+			wantKind:  IconBuiltin,
+			wantValue: "github",
+		},
+		{
+			name:      "app id beats builtin",
+			icon:      providers.Icon{AppID: "a.desktop", Builtin: "github"},
+			wantKind:  IconApp,
+			wantValue: "a.desktop",
+		},
+		{
 			name:      "absolute path",
 			icon:      providers.Icon{Path: "/home/u/.config/banshee/plugins/railway/railway.svg"},
 			wantKind:  IconFile,

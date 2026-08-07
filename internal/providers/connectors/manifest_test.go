@@ -105,6 +105,8 @@ func TestResolveIcon(t *testing.T) {
 		want providers.Icon
 	}{
 		{"theme name", "network-wireless-symbolic", "/plugins/wifi", providers.Icon{ThemeName: "network-wireless-symbolic"}},
+		{"builtin name", "github", "", providers.Icon{Builtin: "github"}},
+		{"builtin name beats theme lookup", "railway", "/plugins/rw", providers.Icon{Builtin: "railway"}},
 		{"relative path", "railway.svg", "/plugins/rw", providers.Icon{Path: filepath.Join("/plugins/rw", "railway.svg")}},
 		{"nested relative path", "icons/logo.png", "/plugins/rw", providers.Icon{Path: filepath.Join("/plugins/rw", "icons/logo.png")}},
 		{"absolute path", "/usr/share/icons/x.svg", "/plugins/rw", providers.Icon{Path: "/usr/share/icons/x.svg"}},

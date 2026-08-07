@@ -17,6 +17,9 @@ const (
 	IconNone IconKind = iota
 	// IconApp resolves a .desktop ID through gio and uses the app's GIcon.
 	IconApp
+	// IconBuiltin renders a compiled-in SVG (internal/icons) tinted with the
+	// theme accent.
+	IconBuiltin
 	// IconTheme looks the name up in the current icon theme.
 	IconTheme
 	// IconFile loads an image file from an absolute path.
@@ -28,6 +31,8 @@ func (k IconKind) String() string {
 	switch k {
 	case IconApp:
 		return "app"
+	case IconBuiltin:
+		return "builtin"
 	case IconTheme:
 		return "theme"
 	case IconFile:
@@ -43,12 +48,16 @@ func (k IconKind) String() string {
 // providers.Icon documents that exactly one field should be set, but providers
 // are third-party code (exec plugins fill this struct from JSON), so the
 // precedence is fixed and documented rather than left to chance: AppID, then
-// ThemeName, then Path. Whitespace-only fields count as unset, and a Path that
-// is not absolute is rejected — a relative path would resolve against the
-// daemon's working directory, which is meaningless to a plugin author.
+// Builtin, then ThemeName, then Path. Whitespace-only fields count as unset,
+// and a Path that is not absolute is rejected — a relative path would resolve
+// against the daemon's working directory, which is meaningless to a plugin
+// author.
 func ResolveIcon(ic providers.Icon) (IconKind, string) {
 	if v := strings.TrimSpace(ic.AppID); v != "" {
 		return IconApp, v
+	}
+	if v := strings.TrimSpace(ic.Builtin); v != "" {
+		return IconBuiltin, v
 	}
 	if v := strings.TrimSpace(ic.ThemeName); v != "" {
 		return IconTheme, v

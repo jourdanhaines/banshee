@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/jourdanhaines/banshee/internal/config"
+	"github.com/jourdanhaines/banshee/internal/icons"
 	"github.com/jourdanhaines/banshee/internal/providers"
 )
 
@@ -174,14 +175,18 @@ func (m Manifest) Validate() error {
 }
 
 // ResolveIcon maps a manifest or plugin-result icon string to a providers.Icon.
-// A value containing '/' or '.' is a file path (relative values resolve
-// against dir); anything else is an icon-theme name.
+// A name matching an icon compiled into the binary (internal/icons) wins; a
+// value containing '/' or '.' is a file path (relative values resolve against
+// dir); anything else is an icon-theme name.
 func ResolveIcon(icon, dir string) providers.Icon {
 	icon = strings.TrimSpace(icon)
 	if icon == "" {
 		return providers.Icon{}
 	}
 	if !strings.ContainsAny(icon, "/.") {
+		if icons.Has(icon) {
+			return providers.Icon{Builtin: icon}
+		}
 		return providers.Icon{ThemeName: icon}
 	}
 	p := config.ExpandPath(icon)

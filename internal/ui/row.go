@@ -1,13 +1,18 @@
 package ui
 
 import (
+	"log"
 	"strings"
 
+	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
+	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
 
+	"github.com/jourdanhaines/banshee/internal/icons"
 	"github.com/jourdanhaines/banshee/internal/providers"
+	"github.com/jourdanhaines/banshee/internal/theme"
 )
 
 // newRow builds one result row:
@@ -89,6 +94,10 @@ func (l *Launcher) newIconWidget(ic providers.Icon) gtk.Widgetter {
 			// try that before giving up.
 			img = gtk.NewImageFromIconName(strings.TrimSuffix(desktopID(value), ".desktop"))
 		}
+	case IconBuiltin:
+		if tex := l.builtinTexture(value); tex != nil {
+			img = gtk.NewImageFromPaintable(tex)
+		}
 	case IconTheme:
 		img = gtk.NewImageFromIconName(value)
 	case IconFile:
@@ -102,6 +111,31 @@ func (l *Launcher) newIconWidget(ic providers.Icon) gtk.Widgetter {
 	img.SetVAlign(gtk.AlignCenter)
 	img.AddCSSClass("result-icon")
 	return img
+}
+
+// builtinTexture renders a compiled-in SVG icon tinted with the theme accent.
+// Decoding an SVG per row per keystroke would be visible, so textures are
+// cached; the accent is baked into the pixels, and Reload drops the cache
+// when the theme may have changed. Returns nil when the icon is unknown or
+// the pixbuf loader cannot decode SVG — the caller falls back to blank.
+func (l *Launcher) builtinTexture(name string) *gdk.Texture {
+	if tex, ok := l.builtins[name]; ok {
+		return tex
+	}
+	var tex *gdk.Texture
+	if data, ok := icons.SVG(name, theme.ParamsFor(l.cfg).Accent); ok {
+		t, err := gdk.NewTextureFromBytes(glib.NewBytesWithGo(data))
+		if err != nil {
+			log.Printf("ui: builtin icon %q failed to decode: %v", name, err)
+		} else {
+			tex = t
+		}
+	}
+	if l.builtins == nil {
+		l.builtins = make(map[string]*gdk.Texture)
+	}
+	l.builtins[name] = tex // negative results cached too — no retry per row
+	return tex
 }
 
 // appInfo looks a .desktop ID up in gio's application list. The list is built

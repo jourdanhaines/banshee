@@ -89,6 +89,10 @@ type Launcher struct {
 	// apps caches gio's application list for AppID icon lookups. Nil means
 	// "not built yet"; Reload drops it so newly installed apps are picked up.
 	apps map[string]*gio.AppInfo
+
+	// builtins caches accent-tinted textures for compiled-in SVG icons. The
+	// tint bakes the accent in, so Reload drops the cache alongside the theme.
+	builtins map[string]*gdk.Texture
 }
 
 // NewLauncher builds the launcher window for app and wires the query pipeline
@@ -254,6 +258,7 @@ func (l *Launcher) Visible() bool { return l.visible }
 // results. Call SetConfig first when banshee.conf itself changed.
 func (l *Launcher) Reload() {
 	l.apps = nil
+	l.builtins = nil
 	l.applyTheme()
 	if l.visible {
 		l.debounce.Fire(func() { l.runQuery(l.entry.Text()) })
