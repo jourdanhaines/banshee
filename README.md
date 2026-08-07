@@ -137,9 +137,17 @@ panel is opaque but perfectly usable.
 | `↓` / `Ctrl-J` / `Ctrl-N` | Next result |
 | `↑` / `Ctrl-K` / `Ctrl-P` | Previous result |
 | `Enter` | Primary action |
-| `Tab` / `Shift-Enter` | Alternate action (e.g. SIGKILL instead of SIGTERM) |
+| `Tab` / `Shift-Enter` | Alternate action (see below) |
+| `Ctrl-W` | Delete the word before the cursor |
 
 Typing always goes to the search box — the selection keys never steal it.
+
+Session rows attach in the **last active terminal**: if a tmux client is
+attached anywhere, that client switches to the session and (under Hyprland)
+its terminal window is focused; otherwise a new terminal opens. The alternate
+action (`Tab`, `Shift-Enter`, or shift-click) always opens a new terminal
+instead. On `Kill <process>` rows the alternate action is SIGKILL instead of
+SIGTERM.
 
 ## Configuration
 
@@ -158,9 +166,9 @@ newer banshee still loads on an older one. The shipped example is
 | `startup_prompt` | `true` | Offer to restore the last action when an interactive shell starts. |
 | `terminal` | *(auto)* | Terminal used for launcher session rows. Empty auto-detects: `$TERMINAL`, then ghostty, kitty, alacritty, foot. |
 | `launcher_width` | `640` | Panel width in pixels. |
-| `max_results` | `30` | Maximum rows shown at once. |
-| `accent` | `#7aa2f7` | Accent color (border, caret, selection bar, badges). |
-| `window_opacity` | `0.86` | Panel alpha. The window itself is always transparent. |
+| `max_results` | `0` | Maximum rows shown at once. `0` means unlimited — the list scrolls. |
+| `accent` | `#7aa2f7` | Accent color (border, caret, icons, selection, badges). |
+| `window_opacity` | `0.92` | Panel alpha. The window itself is always transparent. |
 | `keyboard_mode` | `exclusive` | `exclusive` or `on-demand` — escape hatch for compositors that mishandle exclusive keyboard focus. |
 
 `banshee reload` applies changes to a running daemon without restarting it.

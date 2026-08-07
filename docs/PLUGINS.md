@@ -42,11 +42,14 @@ Common fields:
 | `url`    | object | if `type` is `url`  | See below.                                        |
 | `exec`   | object | if `type` is `exec` | See below.                                        |
 
-**Icon resolution.** A value containing `/` or `.` is a file path (relative
-paths resolve against the plugin directory, `~` is expanded); anything else is
-an icon-theme name.
+**Icon resolution.** A name matching an icon compiled into banshee
+(`internal/icons/data/*.svg` — currently `github` and `railway`, rendered
+tinted with the theme accent) wins; a value containing `/` or `.` is a file
+path (relative paths resolve against the plugin directory, `~` is expanded);
+anything else is an icon-theme name.
 
 ```json
+"icon": "github"                      → bundled SVG, accent-tinted
 "icon": "network-wireless-symbolic"   → icon theme lookup
 "icon": "railway.svg"                 → <plugin dir>/railway.svg
 "icon": "assets/logo.png"             → <plugin dir>/assets/logo.png
