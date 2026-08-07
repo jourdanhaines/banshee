@@ -1,0 +1,21 @@
+[Unit]
+Description=banshee launcher daemon
+Documentation=https://github.com/jourdanhaines/banshee
+# Optional: banshee auto-spawns itself from `banshee toggle`, so this unit is
+# only for users who prefer the daemon started with their graphical session.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/banshee daemon
+ExecReload=%h/.local/bin/banshee reload
+# The daemon is single-instance (flock on $XDG_RUNTIME_DIR/banshee/banshee.lock);
+# a second start exits immediately with "daemon already running".
+Restart=on-failure
+RestartSec=1
+TimeoutStopSec=5
+Slice=session.slice
+
+[Install]
+WantedBy=graphical-session.target
