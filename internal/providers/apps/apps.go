@@ -67,8 +67,6 @@ func (f SourceFunc) Apps() ([]App, error) { return f() }
 
 // Default provider tuning.
 const (
-	// DefaultMaxResults caps how many application rows a query yields.
-	DefaultMaxResults = 20
 	// DefaultEmptyQueryLimit caps how many applications are shown for an empty
 	// query (the launcher's idle state).
 	DefaultEmptyQueryLimit = 8
@@ -81,14 +79,9 @@ type Option func(*Provider)
 func WithSource(s Source) Option { return func(p *Provider) { p.src = s } }
 
 // WithMaxResults caps the number of results a non-empty query returns.
-// Values <= 0 restore the default.
+// Values <= 0 mean unlimited (the default).
 func WithMaxResults(n int) Option {
-	return func(p *Provider) {
-		if n <= 0 {
-			n = DefaultMaxResults
-		}
-		p.maxResults = n
-	}
+	return func(p *Provider) { p.maxResults = n }
 }
 
 // WithMinScore drops matches scoring below min, keeping weak app noise out of
@@ -128,7 +121,6 @@ func New(score Scorer, opts ...Option) *Provider {
 	p := &Provider{
 		score:      score,
 		src:        GIOSource{},
-		maxResults: DefaultMaxResults,
 		emptyLimit: DefaultEmptyQueryLimit,
 	}
 	for _, o := range opts {
@@ -210,7 +202,7 @@ func (p *Provider) Query(ctx context.Context, q string) ([]providers.Result, err
 		}
 		return lessName(matches[i].app, matches[j].app)
 	})
-	if len(matches) > p.maxResults {
+	if p.maxResults > 0 && len(matches) > p.maxResults {
 		matches = matches[:p.maxResults]
 	}
 	out := make([]providers.Result, 0, len(matches))

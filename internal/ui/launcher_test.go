@@ -81,20 +81,16 @@ func TestLauncherFallbacks(t *testing.T) {
 	tests := []struct {
 		name      string
 		cfg       config.Config
-		wantMax   int
 		wantWidth int
 	}{
-		{"zero value config", config.Config{}, defaultMaxResults, config.Default().LauncherWidth},
-		{"defaults", config.Default(), 30, 640},
-		{"custom", config.Config{MaxResults: 12, LauncherWidth: 900}, 12, 900},
-		{"negative values fall back", config.Config{MaxResults: -1, LauncherWidth: -1}, defaultMaxResults, config.Default().LauncherWidth},
+		{"zero value config", config.Config{}, config.Default().LauncherWidth},
+		{"defaults", config.Default(), 640},
+		{"custom", config.Config{MaxResults: 12, LauncherWidth: 900}, 900},
+		{"negative values fall back", config.Config{MaxResults: -1, LauncherWidth: -1}, config.Default().LauncherWidth},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			l := &Launcher{cfg: tt.cfg}
-			if got := l.maxResults(); got != tt.wantMax {
-				t.Errorf("maxResults() = %d, want %d", got, tt.wantMax)
-			}
 			if got := l.launcherWidth(); got != tt.wantWidth {
 				t.Errorf("launcherWidth() = %d, want %d", got, tt.wantWidth)
 			}

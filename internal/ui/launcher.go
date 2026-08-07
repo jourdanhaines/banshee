@@ -45,10 +45,6 @@ const (
 	// fallbackTopMargin positions the window when monitor geometry is
 	// unavailable (≈ a quarter of a 1080p screen).
 	fallbackTopMargin = 270
-
-	// defaultMaxResults mirrors config.Default().MaxResults for zero-value
-	// configs.
-	defaultMaxResults = 30
 )
 
 // Launcher owns the launcher window and its query pipeline. It satisfies the
@@ -369,10 +365,11 @@ func (l *Launcher) cancelQuery() {
 	}
 }
 
-// setResults caps, stores and renders a query generation's results, then
-// selects the top hit.
+// setResults stores and renders a query generation's results, then selects
+// the top hit. max_results is an opt-in cap; the default (0) shows everything
+// the aggregator returned.
 func (l *Launcher) setResults(res []providers.Result) {
-	if max := l.maxResults(); len(res) > max {
+	if max := l.cfg.MaxResults; max > 0 && len(res) > max {
 		res = res[:max]
 	}
 	l.results = res
@@ -471,13 +468,6 @@ func (l *Launcher) applyTheme() {
 	if err := theme.Load(d, l.cfg); err != nil {
 		log.Printf("ui: theme load failed: %v", err)
 	}
-}
-
-func (l *Launcher) maxResults() int {
-	if l.cfg.MaxResults > 0 {
-		return l.cfg.MaxResults
-	}
-	return defaultMaxResults
 }
 
 func (l *Launcher) launcherWidth() int {

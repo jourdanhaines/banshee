@@ -261,10 +261,21 @@ func TestQueryCap(t *testing.T) {
 	}
 }
 
-func TestNewAggregatorDefaultsMax(t *testing.T) {
+func TestQueryUnlimitedByDefault(t *testing.T) {
+	var results []Result
+	for i := 0; i < 50; i++ {
+		results = append(results, res(string(rune('a'+i%26))+"-item", CatApp, 100-i))
+	}
+	a, _ := newAgg(t, 0, &fakeProvider{name: "f", results: results})
+	if got := a.Query(context.Background(), "q"); len(got) != 50 {
+		t.Fatalf("len = %d, want 50 (non-positive max means unlimited)", len(got))
+	}
+}
+
+func TestNewAggregatorDefaults(t *testing.T) {
 	a := NewAggregator(NewRegistry(), 0)
-	if a.MaxResults != DefaultMaxResults {
-		t.Fatalf("MaxResults = %d, want %d", a.MaxResults, DefaultMaxResults)
+	if a.MaxResults != 0 {
+		t.Fatalf("MaxResults = %d, want 0 (unlimited)", a.MaxResults)
 	}
 	if a.MinScore != DefaultMinScore {
 		t.Fatalf("MinScore = %d, want %d", a.MinScore, DefaultMinScore)

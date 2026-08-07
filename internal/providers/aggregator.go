@@ -11,11 +11,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Defaults for ConcurrentAggregator. Both are overridable per instance.
+// Defaults for ConcurrentAggregator, overridable per instance.
 const (
-	// DefaultMaxResults caps the merged result list when the constructor is
-	// given a non-positive maximum. Mirrors config.Config.MaxResults.
-	DefaultMaxResults = 30
 	// DefaultMinScore is the score a low-priority result (Category >= CatApp)
 	// must reach to survive a non-empty query. It is deliberately small: the
 	// fuzzy weights make any match anchored at a word start comfortably
@@ -24,8 +21,11 @@ const (
 )
 
 // ConcurrentAggregator is the production Aggregator: it fans a query out to
-// every registered provider in parallel, merges what comes back, ranks it and
-// caps the list.
+// every registered provider in parallel, merges what comes back and ranks it.
+// The list is unlimited by default (the UI viewport is fixed-height, so paint
+// cost stays bounded regardless of row count); max_results is an opt-in cap.
+// If per-keystroke row building ever becomes measurable, the fix is a
+// gtk.ListView over a model in internal/ui — not a cap here.
 //
 // # Ranking contract
 //
@@ -110,11 +110,8 @@ func (a *ConcurrentAggregator) limits() (maxResults, minScore int) {
 }
 
 // NewAggregator returns a ConcurrentAggregator over reg, capping merged
-// results at maxResults (non-positive → DefaultMaxResults).
+// results at maxResults (non-positive → unlimited).
 func NewAggregator(reg *Registry, maxResults int) *ConcurrentAggregator {
-	if maxResults <= 0 {
-		maxResults = DefaultMaxResults
-	}
 	return &ConcurrentAggregator{
 		registry:   reg,
 		MaxResults: maxResults,

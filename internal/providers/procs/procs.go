@@ -36,8 +36,6 @@ type Scorer func(query, candidate string) (int, bool)
 const (
 	// DefaultRoot is the procfs mount point.
 	DefaultRoot = "/proc"
-	// DefaultMaxResults caps how many kill rows a query yields.
-	DefaultMaxResults = 10
 	// DefaultMaxPIDsShown caps how many PIDs are spelled out in a subtitle;
 	// the action still carries every PID.
 	DefaultMaxPIDsShown = 6
@@ -61,14 +59,9 @@ func WithRoot(root string) Option {
 func WithSelfPID(pid int) Option { return func(p *Provider) { p.self = pid } }
 
 // WithMaxResults caps the number of results a query returns. Values <= 0
-// restore the default.
+// mean unlimited (the default).
 func WithMaxResults(n int) Option {
-	return func(p *Provider) {
-		if n <= 0 {
-			n = DefaultMaxResults
-		}
-		p.maxResults = n
-	}
+	return func(p *Provider) { p.maxResults = n }
 }
 
 // WithMinScore drops matches scoring below min, keeping weak process matches
@@ -90,10 +83,9 @@ var _ providers.Provider = (*Provider)(nil)
 // New builds a process provider. score must not be nil.
 func New(score Scorer, opts ...Option) *Provider {
 	p := &Provider{
-		score:      score,
-		root:       DefaultRoot,
-		self:       os.Getpid(),
-		maxResults: DefaultMaxResults,
+		score: score,
+		root:  DefaultRoot,
+		self:  os.Getpid(),
 	}
 	for _, o := range opts {
 		o(p)
@@ -143,7 +135,7 @@ func (p *Provider) Query(ctx context.Context, q string) ([]providers.Result, err
 		}
 		return matches[i].g.Name < matches[j].g.Name
 	})
-	if len(matches) > p.maxResults {
+	if p.maxResults > 0 && len(matches) > p.maxResults {
 		matches = matches[:p.maxResults]
 	}
 	out := make([]providers.Result, 0, len(matches))
