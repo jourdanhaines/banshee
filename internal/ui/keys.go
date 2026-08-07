@@ -24,6 +24,9 @@ const (
 	KeyActivate
 	// KeyActivateAlt runs the selected result's AltAction (Tab, Shift+Enter).
 	KeyActivateAlt
+	// KeyDeleteWord deletes the word before the cursor in the query entry
+	// (Ctrl-W, readline/vim style).
+	KeyDeleteWord
 )
 
 // String implements fmt.Stringer for readable test failures.
@@ -39,6 +42,8 @@ func (a KeyAction) String() string {
 		return "activate"
 	case KeyActivateAlt:
 		return "activate-alt"
+	case KeyDeleteWord:
+		return "delete-word"
 	default:
 		return "pass"
 	}
@@ -85,6 +90,10 @@ func KeyFor(keyval uint, state gdk.ModifierType) KeyAction {
 		if ctrl {
 			return KeyPrev
 		}
+	case gdk.KEY_w, gdk.KEY_W:
+		if ctrl {
+			return KeyDeleteWord
+		}
 	}
 	return KeyPass
 }
@@ -108,6 +117,8 @@ func (l *Launcher) newKeyController() *gtk.EventControllerKey {
 			l.Activate(false)
 		case KeyActivateAlt:
 			l.Activate(true)
+		case KeyDeleteWord:
+			l.deleteWordBeforeCursor()
 		default:
 			return false // not ours: let the entry have it
 		}

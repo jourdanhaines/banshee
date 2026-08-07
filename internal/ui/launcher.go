@@ -325,6 +325,20 @@ func (l *Launcher) Activate(alt bool) {
 	}
 }
 
+// deleteWordBeforeCursor implements Ctrl-W in the query entry: delete from
+// the cursor back over one whitespace-delimited word. DeleteText fires
+// ::changed, so the debounced requery happens exactly as if the user had
+// backspaced.
+func (l *Launcher) deleteWordBeforeCursor() {
+	if l.entry == nil {
+		return
+	}
+	pos := l.entry.Position()
+	if start := DeleteWordStart(l.entry.Text(), pos); start < pos {
+		l.entry.DeleteText(start, pos)
+	}
+}
+
 // runQuery starts a new query generation: the previous one is cancelled, the
 // aggregator runs off the main thread, and the results are marshalled back
 // through glib.IdleAdd. Late results from a superseded generation are dropped.

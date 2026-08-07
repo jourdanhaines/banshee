@@ -25,6 +25,9 @@ func TestKeyFor(t *testing.T) {
 		{"ctrl-shift-K moves prev", gdk.KEY_K, gdk.ControlMask | gdk.ShiftMask, KeyPrev},
 		{"ctrl-n moves next", gdk.KEY_n, gdk.ControlMask, KeyNext},
 		{"ctrl-p moves prev", gdk.KEY_p, gdk.ControlMask, KeyPrev},
+		{"ctrl-w deletes word", gdk.KEY_w, gdk.ControlMask, KeyDeleteWord},
+		{"ctrl-shift-W deletes word", gdk.KEY_W, gdk.ControlMask | gdk.ShiftMask, KeyDeleteWord},
+		{"plain w types", gdk.KEY_w, 0, KeyPass},
 
 		{"plain j types", gdk.KEY_j, 0, KeyPass},
 		{"plain k types", gdk.KEY_k, 0, KeyPass},
