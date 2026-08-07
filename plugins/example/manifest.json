@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "id": "example",
+  "name": "Example",
+  "icon": "utilities-terminal-symbolic",
+  "accent": "#7aa2f7",
+  "type": "exec",
+  "exec": {
+    "bin": "./plugin.sh",
+    "prefix": "demo",
+    "timeout_ms": 150
+  }
+}
