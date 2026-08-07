@@ -2,6 +2,7 @@ package ui
 
 import (
 	"log"
+	"os"
 	"strings"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
@@ -76,41 +77,81 @@ func newEllipsizedLabel(s string) *gtk.Label {
 	return lbl
 }
 
-// newIconWidget resolves a result's icon to a 24px image. Every branch falls
-// back to a blank image of the same size rather than to nothing, so titles
-// stay aligned in a list that mixes iconed and icon-less results.
+// fallbackIconName is shown when a result's icon cannot be resolved — a
+// themed generic instead of GTK's white "image-missing" sheet, and symbolic
+// so the accent tint applies like every other themed icon.
+const fallbackIconName = "application-x-executable-symbolic"
+
+// newIconWidget resolves a result's icon to a 24px image. Every branch that
+// cannot produce a real icon falls through to fallbackIconName, so rows never
+// show the broken-image placeholder and titles stay aligned.
 func (l *Launcher) newIconWidget(ic providers.Icon) gtk.Widgetter {
 	var img *gtk.Image
 
 	switch kind, value := ResolveIcon(ic); kind {
 	case IconApp:
 		if info := l.appInfo(value); info != nil {
-			if gicon := info.Icon(); gicon != nil {
+			if gicon := info.Icon(); gicon != nil && giconRenderable(gicon) {
 				img = gtk.NewImageFromGIcon(gicon)
 			}
 		}
 		if img == nil {
 			// Most desktop IDs double as icon names ("org.gnome.Nautilus");
 			// try that before giving up.
-			img = gtk.NewImageFromIconName(strings.TrimSuffix(desktopID(value), ".desktop"))
+			if name := strings.TrimSuffix(desktopID(value), ".desktop"); themeHasIcon(name) {
+				img = gtk.NewImageFromIconName(name)
+			}
 		}
 	case IconBuiltin:
 		if tex := l.builtinTexture(value); tex != nil {
 			img = gtk.NewImageFromPaintable(tex)
 		}
 	case IconTheme:
-		img = gtk.NewImageFromIconName(value)
+		if themeHasIcon(value) {
+			img = gtk.NewImageFromIconName(value)
+		}
 	case IconFile:
-		img = gtk.NewImageFromFile(value)
+		if _, err := os.Stat(value); err == nil {
+			img = gtk.NewImageFromFile(value)
+		}
 	}
 
 	if img == nil {
-		img = gtk.NewImage()
+		img = gtk.NewImageFromIconName(fallbackIconName)
 	}
 	img.SetPixelSize(iconPixelSize)
 	img.SetVAlign(gtk.AlignCenter)
 	img.AddCSSClass("result-icon")
 	return img
+}
+
+// iconTheme returns the display's icon theme, nil when headless.
+func iconTheme() *gtk.IconTheme {
+	d := gdk.DisplayGetDefault()
+	if d == nil {
+		return nil
+	}
+	return gtk.IconThemeGetForDisplay(d)
+}
+
+// themeHasIcon reports whether the icon theme can render name. With no
+// display (tests) it optimistically says yes — there is nothing to render
+// anyway.
+func themeHasIcon(name string) bool {
+	th := iconTheme()
+	return th == nil || th.HasIcon(name)
+}
+
+// giconRenderable reports whether a .desktop file's GIcon will actually
+// render. Themed icons are checked against the icon theme (a missing name is
+// exactly the white broken-image case); file-backed and other icon types are
+// trusted — the theme knows nothing about them.
+func giconRenderable(gicon *gio.Icon) bool {
+	if _, themed := gicon.Cast().(*gio.ThemedIcon); !themed {
+		return true
+	}
+	th := iconTheme()
+	return th == nil || th.HasGIcon(gicon)
 }
 
 // builtinTexture renders a compiled-in SVG icon tinted with the theme accent.
