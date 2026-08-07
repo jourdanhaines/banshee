@@ -26,6 +26,7 @@ import (
 	"github.com/jourdanhaines/banshee/internal/launch"
 	"github.com/jourdanhaines/banshee/internal/providers"
 	"github.com/jourdanhaines/banshee/internal/providers/apps"
+	"github.com/jourdanhaines/banshee/internal/providers/calc"
 	"github.com/jourdanhaines/banshee/internal/providers/connectors"
 	"github.com/jourdanhaines/banshee/internal/providers/lastaction"
 	"github.com/jourdanhaines/banshee/internal/providers/plugins"
@@ -99,6 +100,7 @@ func New(cfg config.Config) *Launcher {
 	b.reg.Register(sessions.New(b.idx, tmux.ExecRunner{}, config.SessionsDir()))
 	b.reg.Register(b.conn)
 	b.reg.Register(repos.New(b.idx))
+	b.reg.Register(calc.New())
 	b.reg.Register(b.apps)
 	b.reg.Register(procs.New(fuzzy.Score, procs.WithMaxResults(cfg.MaxResults)))
 	// Exec plugins go through an indirection so `banshee reload` can swap the
