@@ -41,6 +41,9 @@ the fuzzy repo picker and builds your JSON-described tmux session.
 - **Applications and processes** — `.desktop` apps via GIO (so `NoDisplay`,
   `OnlyShowIn` and `Exec` field codes are handled correctly), plus
   `Kill <process>` rows with SIGTERM by default and SIGKILL on Tab.
+- **Calculator** — type `2+2` (or force with `= ` / `calc `); Enter copies the
+  result to the clipboard, Tab copies the whole equation. Needs `wl-clipboard`
+  (or `xclip`/`xsel` on X11).
 - **Connectors and plugins** — GitHub and Railway are built in; add your own
   declarative URL connectors or long-running exec plugins with a
   `manifest.json`. See [docs/PLUGINS.md](docs/PLUGINS.md).
@@ -52,7 +55,7 @@ the fuzzy repo picker and builds your JSON-described tmux session.
 |---|---|
 | **Required** | Go 1.23+, `gtk4`, `gtk4-layer-shell`, `pkgconf`, `make` |
 | **Compositor** | Hyprland (or any `wlr-layer-shell` compositor; banshee falls back to a normal window elsewhere) |
-| **Recommended** | `tmux` (session features), `fzf` (nicer CLI picker), `git` (GitHub connector) |
+| **Recommended** | `tmux` (session features), `fzf` (nicer CLI picker), `git` (GitHub connector), `wl-clipboard` (calculator copy; `xclip`/`xsel` on X11) |
 
 On Arch:
 
@@ -279,7 +282,9 @@ Two kinds, both a directory under `~/.config/banshee/plugins/<id>/` with a
   GitHub (binding derived from `git remote get-url origin`) and Railway ship
   built in.
 - **`exec` plugins** are long-running child processes speaking newline-delimited
-  JSON, optionally gated behind a query prefix.
+  JSON, optionally gated behind a query prefix. Result actions can open URLs,
+  run detached commands, copy text to the clipboard, or call back into the
+  plugin.
 
 Full specification, protocol tables and a worked example:
 **[docs/PLUGINS.md](docs/PLUGINS.md)**. A runnable sample lives in

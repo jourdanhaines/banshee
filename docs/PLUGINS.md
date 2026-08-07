@@ -280,11 +280,14 @@ You may stream: send several `results` messages for one `seq` and set
 | --------------- | ------------ | ------------------------------------------------------- |
 | `"url"`         | `url`        | Opened with the system handler.                          |
 | `"exec-detach"` | `argv`       | Run detached from the daemon (survives it).              |
+| `"clipboard"`   | `text`       | Copied to the system clipboard (wl-copy/xclip/xsel).     |
 | `"callback"`    | —            | Sends an `activate` event back to your plugin.           |
 
 `callback` is the default: a result with no `action`, an unknown `kind`, a
-`url` action with no `url`, or an `exec-detach` action with an empty `argv` all
-become callbacks. The launcher hides itself before dispatching, so a callback
+`url` action with no `url`, an `exec-detach` action with an empty `argv`, or a
+`clipboard` action with no `text` all become callbacks — which also means a
+banshee older than the `clipboard` kind degrades it to a callback instead of
+erroring. The launcher hides itself before dispatching, so a callback
 plugin is free to take its time.
 
 ---

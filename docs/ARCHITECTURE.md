@@ -24,6 +24,7 @@ internal/providers/       frozen Provider/Result contract + the aggregator
   ├── lastaction/         "Resume <target>"              (CatSession)
   ├── connectors/         GitHub, Railway, url plugins   (CatGitHub/CatConnector)
   ├── repos/              "Open <repo> directory"        (CatDirectory)
+  ├── calc/               inline calculator              (CatCalc)
   ├── apps/               .desktop applications          (CatApp)
   ├── procs/              "Kill <process>"               (CatKill)
   └── plugins/            exec-plugin host, protocol v1  (CatPlugin)
@@ -78,6 +79,7 @@ Enter
               ├─ url           → xdg-open
               ├─ app-launch    → gio AppInfo.Launch
               ├─ kill-procs    → syscall.Kill (SIGTERM; SIGKILL on Tab)
+              ├─ clipboard-copy → wl-copy | xclip | xsel (text on stdin)
               └─ plugin-callback → activate event to the owning exec plugin
 ```
 

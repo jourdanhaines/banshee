@@ -110,6 +110,9 @@ but not the widgets. Walk this before releasing anything that touches
 - [ ] A directory row opens the file manager.
 - [ ] A GitHub row opens the right URL.
 - [ ] `Tab` on a kill row escalates SIGTERM → SIGKILL.
+- [ ] `= 2+2` shows a calculator row; Enter puts `4` on the clipboard, `Tab`
+      puts `2+2 = 4`.
+- [ ] `2025-01-01` shows no calculator row.
 - [ ] An unregistered action kind surfaces as a notification, not a silent
       no-op.
 
