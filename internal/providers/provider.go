@@ -38,6 +38,9 @@ type Icon struct {
 	// AppID is a .desktop application ID whose GIcon should be used,
 	// e.g. "org.mozilla.firefox.desktop". Resolved by the UI via gio.
 	AppID string
+	// Builtin names an icon compiled into the binary (internal/icons),
+	// e.g. "github". Rendered tinted with the theme accent.
+	Builtin string
 }
 
 // Action kinds understood by the launch dispatcher. New kinds are added by
@@ -48,6 +51,7 @@ const (
 	ActURL            = "url"             // URL opened with default handler
 	ActSignal         = "signal"          // Sig sent to Pid
 	ActPluginCallback = "plugin-callback" // activate event sent to PluginID/ResultID
+	ActSession        = "session"         // Target attached in the last active terminal, or a new one
 )
 
 // Action describes what happens when a result is activated. Kind selects the
@@ -62,6 +66,9 @@ type Action struct {
 
 	PluginID string // plugin-callback
 	ResultID string // plugin-callback
+
+	Target   string // session: banshee target / tmux session name
+	ForceNew bool   // session: always spawn a new terminal instead of reusing a client
 }
 
 // Result is a single launcher row.
