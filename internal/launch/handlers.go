@@ -3,6 +3,7 @@ package launch
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
@@ -29,6 +30,9 @@ type Options struct {
 	LookPath func(file string) (string, error)
 	// Getenv reads the environment. nil uses os.Getenv.
 	Getenv func(key string) string
+	// RunStdin runs argv to completion with stdin fed from r. nil uses a
+	// real command run bounded by clipboardTimeout. Used by clipboard-copy.
+	RunStdin func(argv []string, stdin io.Reader) error
 }
 
 func (o Options) lookPath(file string) (string, error) {
@@ -52,6 +56,13 @@ func (o Options) detach(argv []string) error {
 	return Detach(argv)
 }
 
+func (o Options) runStdin(argv []string, stdin io.Reader) error {
+	if o.RunStdin != nil {
+		return o.RunStdin(argv, stdin)
+	}
+	return runStdinCmd(argv, stdin)
+}
+
 func (o Options) kill(pid int, sig syscall.Signal) error {
 	if o.Kill != nil {
 		return o.Kill(pid, sig)
@@ -60,8 +71,8 @@ func (o Options) kill(pid int, sig syscall.Signal) error {
 }
 
 // RegisterBuiltins registers the handlers for every action kind banshee ships
-// with: exec-detach, terminal, url and signal. Plugin-callback actions are
-// registered by the plugin host.
+// with: exec-detach, terminal, url, signal and clipboard-copy. Plugin-callback
+// actions are registered by the plugin host.
 func RegisterBuiltins(d *Dispatcher, opts Options) {
 	d.Register(providers.ActExecDetach, func(a providers.Action) error {
 		if len(a.Argv) == 0 {
@@ -87,6 +98,13 @@ func RegisterBuiltins(d *Dispatcher, opts Options) {
 			return errors.New("url: empty URL")
 		}
 		return opts.detach([]string{"xdg-open", a.URL})
+	})
+
+	d.Register(providers.ActClipboardCopy, func(a providers.Action) error {
+		if a.Text == "" {
+			return errors.New("clipboard-copy: empty text")
+		}
+		return CopyToClipboard(opts, a.Text)
 	})
 
 	d.Register(providers.ActSignal, func(a providers.Action) error {

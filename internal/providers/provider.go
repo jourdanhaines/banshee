@@ -23,6 +23,7 @@ const (
 	CatGitHub    Category = 10 // "Open <repo> on GitHub"
 	CatConnector Category = 20 // "Open <repo> on <Connector>"
 	CatDirectory Category = 30 // "Open <repo> directory"
+	CatCalc      Category = 35 // inline calculator answer
 	CatApp       Category = 40 // installed applications
 	CatKill      Category = 50 // "Kill <proc>"
 	CatPlugin    Category = 60 // exec-plugin results
@@ -52,6 +53,7 @@ const (
 	ActSignal         = "signal"          // Sig sent to Pid
 	ActPluginCallback = "plugin-callback" // activate event sent to PluginID/ResultID
 	ActSession        = "session"         // Target attached in the last active terminal, or a new one
+	ActClipboardCopy  = "clipboard-copy"  // Text written to the system clipboard
 )
 
 // Action describes what happens when a result is activated. Kind selects the
@@ -69,6 +71,8 @@ type Action struct {
 
 	Target   string // session: banshee target / tmux session name
 	ForceNew bool   // session: always spawn a new terminal instead of reusing a client
+
+	Text string // clipboard-copy: the text to copy
 }
 
 // Result is a single launcher row.
