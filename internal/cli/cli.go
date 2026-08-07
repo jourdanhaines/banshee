@@ -219,6 +219,11 @@ func (a *App) open(query string) error {
 			target = query
 		} else if _, ok := a.Index.Exact(query); ok {
 			target = query
+		} else if a.Builder != nil && a.Builder.Available() &&
+			a.Builder.HasSession(a.Builder.SessionName(query)) {
+			// A running tmux session that is neither a config target nor a
+			// repo (e.g. a bare `tmux new` session) — attach to it directly.
+			target = query
 		}
 	}
 	if target == "" {

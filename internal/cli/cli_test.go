@@ -332,6 +332,24 @@ func TestDaemonHooks(t *testing.T) {
 	}
 }
 
+func TestOpenRunningSession(t *testing.T) {
+	// A running tmux session that is neither a config target nor a repo
+	// (e.g. bare `tmux new` → "0") must attach directly, not open the picker.
+	ta := newTestApp(t)
+	ta.runner.live["0"] = true
+	if code := ta.Run([]string{"0"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, ta.err.String())
+	}
+	if got := strings.Join(ta.runner.calls[len(ta.runner.calls)-1], " "); got != "attach-session -t =0" {
+		t.Errorf("last call = %q", got)
+	}
+	for _, c := range ta.runner.calls {
+		if c[0] == "new-session" {
+			t.Errorf("must not create a session: %v", c)
+		}
+	}
+}
+
 func TestStartupPrompt(t *testing.T) {
 	t.Setenv("TMUX", "")
 	t.Setenv("BANSHEE_STARTUP_CHECKED", "")

@@ -14,16 +14,18 @@ import (
 // fakeBuilder records what the resolver asked tmux to do.
 type fakeBuilder struct {
 	available bool
+	running   map[string]bool
 	log       []string
 	buildErr  error
 	built     map[string]Session
 }
 
 func newFakeBuilder() *fakeBuilder {
-	return &fakeBuilder{available: true, built: map[string]Session{}}
+	return &fakeBuilder{available: true, running: map[string]bool{}, built: map[string]Session{}}
 }
 
-func (f *fakeBuilder) Available() bool { return f.available }
+func (f *fakeBuilder) Available() bool            { return f.available }
+func (f *fakeBuilder) HasSession(name string) bool { return f.running[name] }
 func (f *fakeBuilder) SessionName(target string) string {
 	return strings.NewReplacer(".", "_", ":", "_").Replace(filepath.Base(target))
 }
@@ -165,6 +167,20 @@ func TestResolve(t *testing.T) {
 		}
 		if len(h.recorder.entries) != 0 {
 			t.Errorf("failed resolve must not record: %v", h.recorder.entries)
+		}
+	})
+
+	t.Run("no config no repo but running session attaches", func(t *testing.T) {
+		h := newHarness(t)
+		h.builder.running["0"] = true
+		if err := h.res.Resolve("0", ModeDefault, true); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(h.builder.log, []string{"attach 0"}) {
+			t.Errorf("log = %v", h.builder.log)
+		}
+		if !reflect.DeepEqual(h.recorder.entries, []string{"target:0"}) {
+			t.Errorf("recorded %v", h.recorder.entries)
 		}
 	})
 

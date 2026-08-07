@@ -29,6 +29,8 @@ type Builder interface {
 	Available() bool
 	// SessionName derives the tmux session name from a target name.
 	SessionName(target string) string
+	// HasSession reports whether a session with that exact name is running.
+	HasSession(name string) bool
 	// BuildSession creates the windows and panes described by s. It must be
 	// idempotent: an already-running session is left untouched.
 	BuildSession(target string, s Session, defaultCwd string) error
@@ -110,7 +112,12 @@ func (r *Resolver) Resolve(target string, mode Mode, attach bool) error {
 		// The editor flow loads the target itself once the config is valid.
 		return r.EditSession(target)
 	case repoPath == "":
-		return fmt.Errorf("no config or matching repo for %q", target)
+		// No config and no repo — but a session by that name may already be
+		// running (e.g. a bare `tmux new` session picked from the launcher).
+		// Attaching to it is the only sensible meaning of the target then.
+		if !r.Builder.HasSession(r.Builder.SessionName(target)) {
+			return fmt.Errorf("no config or matching repo for %q", target)
+		}
 	default:
 		if err := r.Builder.CreatePlainSession(r.Builder.SessionName(target), repoPath); err != nil {
 			return err
