@@ -65,7 +65,6 @@ type SourceFunc func() ([]App, error)
 // Apps implements Source.
 func (f SourceFunc) Apps() ([]App, error) { return f() }
 
-
 // Option configures a Provider.
 type Option func(*Provider)
 

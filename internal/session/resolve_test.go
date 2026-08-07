@@ -24,7 +24,7 @@ func newFakeBuilder() *fakeBuilder {
 	return &fakeBuilder{available: true, running: map[string]bool{}, built: map[string]Session{}}
 }
 
-func (f *fakeBuilder) Available() bool            { return f.available }
+func (f *fakeBuilder) Available() bool             { return f.available }
 func (f *fakeBuilder) HasSession(name string) bool { return f.running[name] }
 func (f *fakeBuilder) SessionName(target string) string {
 	return strings.NewReplacer(".", "_", ":", "_").Replace(filepath.Base(target))
