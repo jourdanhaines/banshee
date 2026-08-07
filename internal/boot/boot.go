@@ -21,6 +21,7 @@ import (
 	"github.com/jourdanhaines/banshee/internal/config"
 	"github.com/jourdanhaines/banshee/internal/daemon"
 	"github.com/jourdanhaines/banshee/internal/fuzzy"
+	"github.com/jourdanhaines/banshee/internal/hypr"
 	"github.com/jourdanhaines/banshee/internal/index"
 	"github.com/jourdanhaines/banshee/internal/launch"
 	"github.com/jourdanhaines/banshee/internal/providers"
@@ -31,6 +32,7 @@ import (
 	"github.com/jourdanhaines/banshee/internal/providers/procs"
 	"github.com/jourdanhaines/banshee/internal/providers/repos"
 	"github.com/jourdanhaines/banshee/internal/providers/sessions"
+	"github.com/jourdanhaines/banshee/internal/session"
 	"github.com/jourdanhaines/banshee/internal/state"
 	"github.com/jourdanhaines/banshee/internal/tmux"
 	"github.com/jourdanhaines/banshee/internal/ui"
@@ -125,6 +127,33 @@ func (b *Launcher) registerHandlers() {
 	apps.RegisterAppLaunchHandler(b.disp)
 	procs.RegisterKillHandler(b.disp)
 	plugins.RegisterCallbackHandler(b.disp, b.host)
+
+	// ActSession: attach in the most recently active tmux client (raising its
+	// terminal via Hyprland when possible), else spawn a terminal running the
+	// CLI. Ensure resolves with attach=false — the daemon has no TTY.
+	runner := tmux.ExecRunner{}
+	res := &session.Resolver{
+		SessionsDir: config.SessionsDir(),
+		GroupsDir:   config.GroupsDir(),
+		Index:       b.idx,
+		Builder:     tmux.NewBuilder(runner),
+		Recorder:    state.Default(),
+		Log:         b.log.Printf,
+	}
+	sessions.RegisterAttachHandler(b.disp, sessions.AttachOptions{
+		Runner: runner,
+		Ensure: func(target string) error {
+			return res.Resolve(target, session.ModeDefault, false)
+		},
+		SpawnTerminal: func(target string) error {
+			return b.disp.Dispatch(providers.Action{
+				Kind: providers.ActTerminal,
+				Argv: []string{sessions.SelfBinary(), target},
+			})
+		},
+		Focus: (&hypr.Ctl{}).FocusTerminalOf,
+		Log:   b.log.Printf,
+	})
 }
 
 // Aggregator exposes the assembled aggregator (useful for an alternate

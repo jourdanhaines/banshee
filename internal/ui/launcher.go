@@ -93,6 +93,11 @@ type Launcher struct {
 	// builtins caches accent-tinted textures for compiled-in SVG icons. The
 	// tint bakes the accent in, so Reload drops the cache alongside the theme.
 	builtins map[string]*gdk.Texture
+
+	// shiftClick mirrors the Shift modifier of the most recent list click, so
+	// row-activated (which GTK fires without event state) can honor
+	// shift-click as the alternate action the way Shift+Enter does.
+	shiftClick bool
 }
 
 // NewLauncher builds the launcher window for app and wires the query pipeline
@@ -199,11 +204,23 @@ func (l *Launcher) connectSignals() {
 		l.sel.Set(row.Index())
 	})
 
+	// row-activated carries no event state, so a click gesture (capture
+	// phase, before the ListBox handles the press) records whether Shift was
+	// held for the activation that follows.
+	click := gtk.NewGestureClick()
+	click.SetPropagationPhase(gtk.PhaseCapture)
+	click.ConnectPressed(func(nPress int, x, y float64) {
+		l.shiftClick = click.CurrentEventState()&gdk.ShiftMask != 0
+	})
+	l.list.AddController(click)
+
 	l.list.ConnectRowActivated(func(row *gtk.ListBoxRow) {
 		if row != nil {
 			l.sel.Set(row.Index())
 		}
-		l.Activate(false)
+		alt := l.shiftClick
+		l.shiftClick = false
+		l.Activate(alt)
 	})
 
 	l.win.AddController(l.newKeyController())

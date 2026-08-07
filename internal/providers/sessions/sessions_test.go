@@ -69,9 +69,7 @@ func titles(rs []providers.Result) []string {
 
 func newProvider(t *testing.T, i index.Index, r *fakeRunner, dir string) *Provider {
 	t.Helper()
-	p := New(i, r, dir)
-	p.Binary = "banshee"
-	return p
+	return New(i, r, dir)
 }
 
 func TestQueryMatches(t *testing.T) {
@@ -189,12 +187,15 @@ func TestQueryResultShape(t *testing.T) {
 	if r.ID != "sessions:blacksheep" {
 		t.Errorf("ID = %q", r.ID)
 	}
-	if r.Action.Kind != providers.ActTerminal {
-		t.Errorf("Action.Kind = %q, want %q", r.Action.Kind, providers.ActTerminal)
+	if r.Action.Kind != providers.ActSession {
+		t.Errorf("Action.Kind = %q, want %q", r.Action.Kind, providers.ActSession)
 	}
-	wantArgv := []string{"banshee", "blacksheep"}
-	if len(r.Action.Argv) != 2 || r.Action.Argv[0] != wantArgv[0] || r.Action.Argv[1] != wantArgv[1] {
-		t.Errorf("Argv = %v, want %v", r.Action.Argv, wantArgv)
+	if r.Action.Target != "blacksheep" || r.Action.ForceNew {
+		t.Errorf("Action = %+v, want Target=blacksheep ForceNew=false", r.Action)
+	}
+	if r.AltAction == nil || r.AltAction.Kind != providers.ActSession ||
+		r.AltAction.Target != "blacksheep" || !r.AltAction.ForceNew {
+		t.Errorf("AltAction = %+v, want ActSession Target=blacksheep ForceNew=true", r.AltAction)
 	}
 	if r.Score <= 0 {
 		t.Errorf("Score = %d, want positive for a prefix match", r.Score)
@@ -363,18 +364,6 @@ func TestQueryDeadlineExceeded(t *testing.T) {
 func TestName(t *testing.T) {
 	if got := New(nil, nil, "").Name(); got != "sessions" {
 		t.Fatalf("Name = %q", got)
-	}
-}
-
-func TestBinaryFallback(t *testing.T) {
-	p := New(idx(repo("a", "/a")), nil, "")
-	p.Binary = ""
-	got, err := p.Query(context.Background(), "a")
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	if got[0].Action.Argv[0] != "banshee" {
-		t.Fatalf("Argv[0] = %q, want banshee", got[0].Action.Argv[0])
 	}
 }
 

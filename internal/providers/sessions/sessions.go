@@ -6,11 +6,11 @@
 // ~/.config/banshee/sessions/<target>.json. Both are offered here, exactly as
 // banshee_target_pool did in the v0.3 shell implementation.
 //
-// Activating a row runs `banshee <target>` inside the user's terminal
-// (Action.Kind == providers.ActTerminal); the terminal emulator is prepended
-// by internal/launch, not here. That routes through the same resolve-and-load
-// path as the CLI, so behavior is identical whether the session was started
-// from the launcher or the shell.
+// Activating a row emits providers.ActSession, handled by
+// RegisterAttachHandler (attach.go): the session is brought up if needed and
+// attached in the most recently active tmux client — whose terminal window is
+// raised — falling back to a fresh terminal running `banshee <target>`. The
+// AltAction (Tab / Shift+Enter / shift-click) always opens a fresh terminal.
 package sessions
 
 import (
@@ -47,9 +47,6 @@ type Provider struct {
 	// Providers that contribute to a repo's result block must all score the
 	// repo name with the same Scorer — see providers.ConcurrentAggregator.
 	Score fuzzy.Scorer
-	// Binary is the banshee executable placed in the terminal argv. Defaults
-	// to os.Executable(), falling back to "banshee".
-	Binary string
 	// Icon is applied to every emitted result.
 	Icon providers.Icon
 }
@@ -63,7 +60,6 @@ func New(idx index.Index, runner tmux.Runner, sessionsDir string) *Provider {
 		runner:      runner,
 		sessionsDir: sessionsDir,
 		Score:       fuzzy.Score,
-		Binary:      selfBinary(),
 		Icon:        providers.Icon{ThemeName: "utilities-terminal-symbolic"},
 	}
 }
@@ -168,7 +164,8 @@ func (p *Provider) defaults(ctx context.Context) ([]providers.Result, error) {
 	return res, nil
 }
 
-// result builds one CatSession row for target.
+// result builds one CatSession row for target: attach in the last active
+// terminal by default, always-a-new-terminal as the alternate action.
 func (p *Provider) result(target, subtitle string, score int) providers.Result {
 	return providers.Result{
 		ID:       "sessions:" + target,
@@ -178,8 +175,13 @@ func (p *Provider) result(target, subtitle string, score int) providers.Result {
 		Category: providers.CatSession,
 		Score:    score,
 		Action: providers.Action{
-			Kind: providers.ActTerminal,
-			Argv: []string{p.binary(), target},
+			Kind:   providers.ActSession,
+			Target: target,
+		},
+		AltAction: &providers.Action{
+			Kind:     providers.ActSession,
+			Target:   target,
+			ForceNew: true,
 		},
 	}
 }
@@ -214,16 +216,10 @@ func (p *Provider) scorer() fuzzy.Scorer {
 	return fuzzy.Score
 }
 
-func (p *Provider) binary() string {
-	if p.Binary != "" {
-		return p.Binary
-	}
-	return "banshee"
-}
-
-// selfBinary resolves the running banshee executable, falling back to the bare
-// name so a PATH lookup still works when /proc is unavailable.
-func selfBinary() string {
+// SelfBinary resolves the running banshee executable, falling back to the
+// bare name so a PATH lookup still works when /proc is unavailable. Boot uses
+// it to build the `<terminal> -e banshee <target>` fallback argv.
+func SelfBinary() string {
 	exe, err := os.Executable()
 	if err != nil || exe == "" {
 		return "banshee"

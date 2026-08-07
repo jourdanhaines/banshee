@@ -99,7 +99,6 @@ func TestBlackshBlockOrderEndToEnd(t *testing.T) {
 	}}
 
 	sessionsP := sessions.New(idx, nil, t.TempDir())
-	sessionsP.Binary = "banshee"
 	githubP := &repoScoped{
 		name: "github", idx: idx, cat: providers.CatGitHub,
 		titleFmt: func(n string) string { return "Open " + n + " on GitHub" },
