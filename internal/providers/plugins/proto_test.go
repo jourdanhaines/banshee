@@ -70,6 +70,24 @@ func TestWireResultToResult(t *testing.T) {
 			},
 		},
 		{
+			name: "clipboard action",
+			in:   WireResult{ID: "h", Title: "H", Action: &WireAction{Kind: KindClipboard, Text: "42"}},
+			want: providers.Result{
+				ID: "plugin:wifi:h", Title: "H", Score: DefaultScore, Accent: "#aaa",
+				Icon: providers.Icon{ThemeName: "network-wireless-symbolic"}, Category: providers.CatPlugin,
+				Action: providers.Action{Kind: providers.ActClipboardCopy, Text: "42"},
+			},
+		},
+		{
+			name: "clipboard action without text falls back to callback",
+			in:   WireResult{ID: "i", Title: "I", Action: &WireAction{Kind: KindClipboard}},
+			want: providers.Result{
+				ID: "plugin:wifi:i", Title: "I", Score: DefaultScore, Accent: "#aaa",
+				Icon: providers.Icon{ThemeName: "network-wireless-symbolic"}, Category: providers.CatPlugin,
+				Action: providers.Action{Kind: providers.ActPluginCallback, PluginID: "wifi", ResultID: "i"},
+			},
+		},
+		{
 			name: "unknown action kind falls back to callback",
 			in:   WireResult{ID: "g", Title: "G", Action: &WireAction{Kind: "teleport"}},
 			want: providers.Result{
@@ -86,7 +104,7 @@ func TestWireResultToResult(t *testing.T) {
 				got.Score != tt.want.Score || got.Accent != tt.want.Accent || got.Icon != tt.want.Icon ||
 				got.Category != tt.want.Category || got.Action.Kind != tt.want.Action.Kind ||
 				got.Action.URL != tt.want.Action.URL || got.Action.PluginID != tt.want.Action.PluginID ||
-				got.Action.ResultID != tt.want.Action.ResultID {
+				got.Action.ResultID != tt.want.Action.ResultID || got.Action.Text != tt.want.Action.Text {
 				t.Fatalf("toResult = %+v, want %+v", got, tt.want)
 			}
 			if len(got.Action.Argv) != len(tt.want.Action.Argv) {

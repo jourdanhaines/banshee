@@ -49,6 +49,8 @@ const (
 	KindExecDetach = "exec-detach"
 	// KindCallback (the default) sends an activate event back to the plugin.
 	KindCallback = "callback"
+	// KindClipboard copies Action.Text to the system clipboard.
+	KindClipboard = "clipboard"
 )
 
 // DefaultScore is used for plugin results that omit "score".
@@ -99,6 +101,7 @@ type WireAction struct {
 	Kind string   `json:"kind"`
 	URL  string   `json:"url"`
 	Argv []string `json:"argv"`
+	Text string   `json:"text"`
 }
 
 // toResult converts a wire result into a launcher result, filling icon and
@@ -148,6 +151,11 @@ func wireActionTo(a *WireAction, pluginID, resultID string) providers.Action {
 			return callback
 		}
 		return providers.Action{Kind: providers.ActExecDetach, Argv: a.Argv}
+	case KindClipboard:
+		if a.Text == "" {
+			return callback
+		}
+		return providers.Action{Kind: providers.ActClipboardCopy, Text: a.Text}
 	default:
 		return callback
 	}
