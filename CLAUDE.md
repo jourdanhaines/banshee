@@ -55,6 +55,7 @@ banshee is a single Go binary with two front-ends over one core: a GTK4 layer-sh
 - `internal/providers/connectors/` — GitHub, Railway, url plugins (`CatGitHub`/`CatConnector`); also the "Link \<Connector\> project to \<repo\>" form row for the current tmux pane's unbound repo, the `connector-link` action, and the `.banshee/config.json` save path.
 - `internal/providers/repos/` — "Open \<repo\> directory" (`CatDirectory`).
 - `internal/providers/calc/` — inline calculator (`CatCalc`).
+- `internal/providers/totp/` — TOTP codes with a live countdown (`CatTOTP`): RFC 6238 + `otpauth://` parsing, the non-secret `totp.json` index, the `totp`/`otp` trigger, and the `totp-copy` / `totp-add` / `totp-setup` actions. Seeds live in `internal/secrets`, never in the index. A backend-unusable failure arms the shared `SetupState` and boot's `Reopen` hook re-shows the launcher with the setup wizard's guidance/retry rows ("wizard-as-results-rows", `wizard.go`) instead of a dead-end toast; which errors route there lives on `backendUnusable` in `handlers.go`.
 - `internal/providers/apps/` — `.desktop` applications (`CatApp`).
 - `internal/providers/procs/` — "Kill \<process\>" (`CatKill`).
 - `internal/providers/plugins/` — exec-plugin host, protocol v1 (`CatPlugin`).
@@ -64,6 +65,7 @@ banshee is a single Go binary with two front-ends over one core: a GTK4 layer-sh
 - `internal/session/` — session/group JSON schema, validation, resolution.
 - `internal/tmux/` — `Runner` interface plus session builder.
 - `internal/state/` — `last_action` store.
+- `internal/secrets/` — `Store` seam over secret backends (`plaintext`, `keyring`, `nimbus` stub) plus `Open(name)`; keys are namespaced by their owner (`totp/<name>`) and the package never enumerates them. `Store.Blocking()` marks a backend whose calls can wait on an unlock prompt or a network round trip — those must be detached off the GTK main loop, never keyed off `AuthPerAccess()`.
 - `internal/config/` — `banshee.conf` parser, XDG paths, per-repo config.
 
 ### Boot flow
@@ -88,10 +90,10 @@ Results at `CatApp` or lower priority (apps, procs, plugins) are dropped below `
 
 These files define cross-package boundaries and change **only** by a deliberate migration that touches every consumer — never a drive-by edit.
 
-- `internal/providers/provider.go` — `Result`, `Action`, `Icon`, `Category`, `Form`, `FormField`, `Provider`, `Registry`. (Migration 2026-08: `Result.Form` and `Action.Values` added for in-launcher forms — additive, zero value inert.)
+- `internal/providers/provider.go` — `Result`, `Action`, `Icon`, `Category`, `Form`, `FormField`, `Provider`, `Registry`. (Migration 2026-08: `Result.Form` and `Action.Values` added for in-launcher forms — additive, zero value inert. Migration 2026-08b: `FormField.Secret`, `Result.Expiry` and `CatTOTP` added for the TOTP tool — additive, zero value inert.)
 - `internal/providers/aggregate.go` — `Aggregator`.
 - `internal/ipc/proto.go` — protocol v1, socket and lock paths.
-- `internal/config/config.go` — `Config`, defaults, XDG paths.
+- `internal/config/config.go` — `Config`, defaults, XDG paths. (Migration 2026-08b: additive path funcs `TOTPIndexPath()`, `SecretsDir()`, `PlaintextSecretsPath()` — new well-known locations, no schema change.)
 - `internal/config/repoconf.go` — per-repo `.banshee/config.json`.
 - `internal/session/schema.go` — `Session`, `Window`, `Pane`, `Group`.
 - `internal/tmux/runner.go` — `Runner`, `ExecRunner`, `SessionName`.
@@ -109,4 +111,5 @@ These files define cross-package boundaries and change **only** by a deliberate 
 
 - **Never connect `gtk.CSSProvider`'s `parsing-error` signal** — under gotk4 `pkg/v0.4.0` the generated marshaller double-frees the `GError` and aborts the process when it fires. GTK already logs parse errors through GLib. `internal/theme/load_test.go` validates the generated stylesheet instead by parsing it with GTK's own engine and asserting every selector and declaration survives the round trip.
 - **Test the launcher from a fresh shell** — stale shell state (an old `banshee` on `$PATH`, a running daemon from a previous build, a sourced shell plugin) produces errors that look like code bugs. A new session, after `make install`, is the only reliable check.
+- **Secret material never reaches argv or a log** — TOTP seeds, computed codes and form credentials transit daemon memory and `Action.Values`, so **never log `Action.Values`** (a `Secret: true` field's value rides in it) and never place secret material on a command line. Clipboard writes and secret-store writes go through stdin (`launch.CopyToClipboard`, the `internal/secrets` backends); errors name the key or the backend, never the value.
 - **GTK is single-threaded** — everything in `internal/ui` runs on the GTK main loop, and the daemon's socket goroutine marshals every op through `glib.IdleAdd` (5 s timeout). Providers run off the main loop concurrently; action handlers run on it, after the window is hidden, and must spawn and return rather than block.

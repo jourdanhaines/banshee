@@ -38,6 +38,8 @@ JSON-described tmux session, exactly as it always has.
   `Kill <process>` rows with SIGTERM by default and SIGKILL on Tab.
 - **Calculator** — type `2+2` (or force with `= ` / `calc `); Enter copies the
   result to the clipboard, Tab copies the whole equation.
+- **TOTP codes** — type `totp` for your two-factor codes with a live countdown;
+  Enter copies a freshly computed one. Seeds go to the OS keyring.
 - **Connectors and plugins** — GitHub and Railway are built in; add your own
   declarative URL connectors or long-running exec plugins.
 
@@ -132,10 +134,62 @@ place. `banshee reload` applies changes to a running daemon.
 | `~/.config/banshee/sessions/<target>.json` | Per-target session layout |
 | `~/.config/banshee/groups/<name>.json` | Named groups of targets |
 | `~/.config/banshee/plugins/<id>/manifest.json` | Plugins and connectors |
+| `~/.config/banshee/totp.json` | TOTP entry names and backend choice — no secrets |
+| `~/.local/share/banshee/secrets/plaintext.json` | TOTP seeds, plaintext backend only |
 | `~/.local/share/banshee/repo_cache` | Cached repo list |
 | `~/.local/share/banshee/last_action` | What `banshee -r` replays |
 | `~/.local/state/banshee/daemon.log` | Daemon log |
 | `$XDG_RUNTIME_DIR/banshee/banshee.sock` | Control socket (+ `.lock`) |
+
+## TOTP codes
+
+Type `totp` (or `otp`) to list every two-factor code you have stored, each row
+showing the current code and the seconds left before it rotates:
+
+```
+┌──────────────────────────────────────────────┐
+│  totp                                        │
+├──────────────────────────────────────────────┤
+│  ▎ github                       418 902 · 24s│
+│    aws-root                     735 118 · 24s│
+│    Add TOTP code                Paste a base…│
+└──────────────────────────────────────────────┘
+```
+
+The countdown ticks in place, and the codes refresh themselves the moment they
+expire — no retyping. **Enter copies the code**, recomputed at that instant, so
+a row you have been staring at for half a minute still copies something valid.
+Add a filter after the trigger (`totp git`) to narrow the list, or just type an
+entry's name with no trigger at all to see it alongside your other results.
+
+**First run** asks where to keep your seeds; the trigger shows the choice
+instead of a list until you pick one:
+
+| Row | What it does |
+|---|---|
+| **Use OS keyring (local)** | Stores seeds in the system Secret Service (GNOME Keyring, KWallet, …). Recommended. banshee writes and deletes a throwaway test secret before committing to it, so a keyring that quietly refuses writes is caught now rather than after you have added a code. |
+| **Use plaintext file (local, not recommended)** | Stores seeds unencrypted in `~/.local/share/banshee/secrets/plaintext.json` (0600, in a 0700 directory). Anything running as you can read them. |
+| **Nimbus (cloud — coming soon)** | Not available yet; picking it says so and changes nothing. |
+
+The choice is recorded in `~/.config/banshee/totp.json` alongside your entry
+names, issuers and code parameters. That file holds **no secret material** —
+seeds only ever live in the backend you chose. banshee never edits
+`banshee.conf` on your behalf, which is why the choice lives here.
+
+**Adding a code** — pick `Add TOTP code` from the triggered list and fill the
+in-launcher form:
+
+- **Name** — what you will type to find it later (`github`, `aws-root`).
+- **Secret** — either the base32 seed a site shows you next to its QR code
+  (spaces and `=` padding are fine) or the whole `otpauth://totp/...` URI, which
+  also carries the issuer, digit count, period and algorithm. The field is
+  masked as you type. Non-default parameters (8 digits, 60-second periods,
+  SHA-256/512) are honored; the RFC defaults are 6 digits, 30 seconds, SHA-1.
+
+The seed is written to the secrets backend first and the index entry second, so
+a failed write never leaves you with an entry that has no seed behind it. There
+is no delete row — remove an entry by editing `totp.json` and clearing its key
+from your keyring.
 
 ## Sessions
 
