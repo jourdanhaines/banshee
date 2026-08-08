@@ -174,6 +174,10 @@ func (a *App) Run(args []string) int {
 	case "doctor":
 		return a.code(a.doctor())
 
+	// Note: like `doctor`, this shadows the bare query "link".
+	case "link":
+		return a.code(a.link(args[1:]))
+
 	case "_complete":
 		return a.code(a.complete(args[1:]))
 
@@ -390,6 +394,9 @@ Usage:
   banshee -r              Re-run last action (target or group)
   banshee -l              List session configs and groups
   banshee -c              Clear repository cache
+  banshee link <id> [path] [binding]
+                          Bind a connector (e.g. railway) for a repo; prompts
+                          for the binding when omitted
   banshee -v              Show version
   banshee -h              Show this help
 
