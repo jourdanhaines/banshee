@@ -29,7 +29,7 @@ make help        # list documented targets
 
 - **Provider shape** — a result source is `type Provider struct{…}` in its own package under `internal/providers/<name>/`, built by a `New(...) *Provider` constructor, exposing exactly `Name() string` and `Query(ctx context.Context, q string) ([]providers.Result, error)`. Optional knobs are variadic `Option` funcs (`apps.WithMaxResults`), never extra constructor params. `Query` must honor `ctx` cancellation — the aggregator cancels the previous query on every keystroke.
 - **Extension seams only at declared boundaries** — interfaces: `providers.Provider`, `providers.Aggregator`, `tmux.Runner`, `index.Index`, `daemon.UI`; registration structs: `providers.Registry`, `launch.Dispatcher`; func type: `fuzzy.Scorer`. Everything else is a concrete struct. Never introduce an interface to make a single implementation mockable; use the seam above it.
-- **Action handlers register per-package** — a provider package that emits a new `Action.Kind` ships `Register<Name>Handler(d *launch.Dispatcher)` and `boot.registerHandlers` calls it (`apps.RegisterAppLaunchHandler`, `procs.RegisterKillHandler`, `plugins.RegisterCallbackHandler`, `sessions.RegisterAttachHandler`). **No** switch on `Kind` outside `Dispatcher.Dispatch`.
+- **Action handlers register per-package** — a provider package that emits a new `Action.Kind` ships `Register<Name>Handler(d *launch.Dispatcher)` and `boot.registerHandlers` calls it (`apps.RegisterAppLaunchHandler`, `procs.RegisterKillHandler`, `plugins.RegisterCallbackHandler`, `sessions.RegisterAttachHandler`, `connectors.RegisterLinkHandler`). **No** switch on `Kind` outside `Dispatcher.Dispatch`.
 - **Tests are table-driven** — one `[]struct{name string; …}` per behavior, subtests via `t.Run`. Exceptions: end-to-end flow and process-lifecycle tests (`providers/aggregator_block_test.go`, `plugins/lifecycle_test.go`, `cli/editor_test.go`), which assert one sequence rather than a matrix.
 - **Tests are hermetic** — **no** live tmux server, GTK display, network, or dependence on the developer's `$HOME`. Use `t.TempDir()`, fake procfs trees, `sh -c` stub plugins, and `tmux.Runner` fakes for golden-argv assertions. A test that needs a display goes behind a build tag like `gtksmoke`.
 - **Comments** — godoc on every exported identifier saying what it does and why it exists, never restating its name; plus a rationale comment on any code whose correctness depends on an external constraint (upstream bug, GTK threading, wire compatibility), see `boot.reload` on why the rescan is backgrounded.
@@ -41,10 +41,10 @@ banshee is a single Go binary with two front-ends over one core: a GTK4 layer-sh
 
 - `cmd/banshee/` — dispatch only.
 - `internal/boot/` — assembles registry, aggregator, dispatcher, plugin host, UI constructor.
-- `internal/cli/` — flag parsing, pickers, editor loop, `doctor`, hidden `_complete` / `_startup-prompt`.
+- `internal/cli/` — flag parsing, pickers, editor loop, `doctor`, `link`, hidden `_complete` / `_startup-prompt`.
 - `internal/daemon/` — single-instance lock, GTK hosting, IPC op dispatch.
 - `internal/ipc/` — control-socket protocol v1, client and server.
-- `internal/ui/` — GTK4 window, list, rows, keymap, debounce.
+- `internal/ui/` — GTK4 window, list, rows, mode-aware keymap, debounce, form view (form logic in `formstate.go`, GTK plumbing in `form.go`; a `Result.Form` activation slides the form page in instead of dispatching).
 - `internal/theme/` — CSS generation from accent/opacity/width.
 - `internal/layershell/` — wrapper over the gtk4-layer-shell binding.
 - `internal/hypr/` — minimal Hyprland IPC client (focus the terminal holding a pid).
@@ -52,7 +52,7 @@ banshee is a single Go binary with two front-ends over one core: a GTK4 layer-sh
 - `internal/providers/` — frozen `Provider`/`Result` contract plus the aggregator.
 - `internal/providers/sessions/` — "Open \<repo\> session" (`CatSession`).
 - `internal/providers/lastaction/` — "Resume \<target\>" (`CatSession`).
-- `internal/providers/connectors/` — GitHub, Railway, url plugins (`CatGitHub`/`CatConnector`).
+- `internal/providers/connectors/` — GitHub, Railway, url plugins (`CatGitHub`/`CatConnector`); also the "Link \<Connector\> project to \<repo\>" form row for the current tmux pane's unbound repo, the `connector-link` action, and the `.banshee/config.json` save path.
 - `internal/providers/repos/` — "Open \<repo\> directory" (`CatDirectory`).
 - `internal/providers/calc/` — inline calculator (`CatCalc`).
 - `internal/providers/apps/` — `.desktop` applications (`CatApp`).
@@ -80,7 +80,7 @@ banshee is a single Go binary with two front-ends over one core: a GTK4 layer-sh
 
 ### Shared-score contract
 
-Every repo-derived provider (sessions, GitHub, connectors, repos) scores the **repo basename** — `fuzzy.Score(query, repo.Name)` — with the same `Scorer`, never its own rendered title. Identical scores let the `Category` tiebreak in the `(-Score, Category, Title)` sort collapse one repo's rows into a fixed-order block; scoring `"Open blacksheep on GitHub"` would scatter it. Asserted end-to-end in `internal/providers/aggregator_block_test.go`; full contract in the `internal/providers/aggregator.go` doc comment.
+Every repo-derived provider (sessions, GitHub, connectors, repos) scores the **repo basename** — `fuzzy.Score(query, repo.Name)` — with the same `Scorer`, never its own rendered title. Identical scores let the `Category` tiebreak in the `(-Score, Category, Title)` sort collapse one repo's rows into a fixed-order block; scoring `"Open blacksheep on GitHub"` would scatter it. Asserted end-to-end in `internal/providers/aggregator_block_test.go`; full contract in the `internal/providers/aggregator.go` doc comment. One deliberate exception: the connectors provider's link row is connector-derived and scores the connector name/id (rationale on `linkResults`).
 
 Results at `CatApp` or lower priority (apps, procs, plugins) are dropped below `MinScore` on non-empty queries so weak matches cannot outrank a repo block. Empty queries are never thresholded.
 
@@ -88,7 +88,7 @@ Results at `CatApp` or lower priority (apps, procs, plugins) are dropped below `
 
 These files define cross-package boundaries and change **only** by a deliberate migration that touches every consumer — never a drive-by edit.
 
-- `internal/providers/provider.go` — `Result`, `Action`, `Icon`, `Category`, `Provider`, `Registry`.
+- `internal/providers/provider.go` — `Result`, `Action`, `Icon`, `Category`, `Form`, `FormField`, `Provider`, `Registry`. (Migration 2026-08: `Result.Form` and `Action.Values` added for in-launcher forms — additive, zero value inert.)
 - `internal/providers/aggregate.go` — `Aggregator`.
 - `internal/ipc/proto.go` — protocol v1, socket and lock paths.
 - `internal/config/config.go` — `Config`, defaults, XDG paths.

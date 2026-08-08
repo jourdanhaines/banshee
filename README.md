@@ -189,10 +189,16 @@ its parent's working directory.
 A plugin is a directory under `~/.config/banshee/plugins/<id>/` with a
 `manifest.json`. **`url` connectors** are declarative: bind one to a repo with
 `<repo>/.banshee/config.json` and it contributes a row to that repo's block
-(GitHub and Railway ship built in). **`exec` plugins** are long-running child
-processes speaking newline-delimited JSON, optionally gated behind a query
-prefix; their actions can open URLs, run detached commands, copy text to the
-clipboard, or call back into the plugin. Start from the runnable sample in
+(GitHub and Railway ship built in). Binding never requires editing the file by
+hand: with the launcher open inside an unlinked repo's tmux pane, typing the
+connector's name (e.g. "railway") offers "Link Railway project to \<repo\>",
+which opens an in-launcher form for the project URL or ID; the same works from
+any shell with `banshee link <id> [path] [binding]`. **`exec` plugins** are
+long-running child processes speaking newline-delimited JSON, optionally gated
+behind a query prefix; their actions can open URLs, run detached commands,
+copy text to the clipboard, call back into the plugin, or declare an input
+form whose submitted values come back to the plugin. Start from the runnable
+sample in
 [plugins/example/](plugins/example/); the wire protocol is defined in
 [internal/providers/plugins/proto.go](internal/providers/plugins/proto.go),
 and the manifest schema, URL placeholders and binding rule in
