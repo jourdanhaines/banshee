@@ -23,9 +23,10 @@ import (
 //	└─ Box (horizontal)
 //	   ├─ Image .result-icon        24px
 //	   ├─ Box (vertical, hexpand)
-//	   │  ├─ Label .result-title    ellipsized
-//	   │  └─ Label .result-subtitle ellipsized, optional
-//	   └─ Label .result-badge       right-aligned, optional
+//	   │  ├─ Label .result-title             ellipsized
+//	   │  ├─ Label .result-subtitle          ellipsized, optional
+//	   │  └─ ProgressBar .code-timer.row-timer  optional, non-standard periods
+//	   └─ Label .result-badge                right-aligned, optional
 func (l *Launcher) newRow(r providers.Result) *gtk.ListBoxRow {
 	row := gtk.NewListBoxRow()
 
@@ -40,17 +41,22 @@ func (l *Launcher) newRow(r providers.Result) *gtk.ListBoxRow {
 	title.AddCSSClass("result-title")
 	text.Append(title)
 
-	// A live row always gets a subtitle label even with an empty Subtitle:
-	// the countdown lives there, and the ticker can only rewrite a label that
-	// already exists — adding one mid-tick would resize the row under the
-	// user's cursor.
-	if r.Subtitle != "" || !r.Expiry.IsZero() {
-		sub := newEllipsizedLabel(LiveSubtitle(r.Subtitle, r.Expiry, time.Now()))
+	if r.Subtitle != "" {
+		sub := newEllipsizedLabel(r.Subtitle)
 		sub.AddCSSClass("result-subtitle")
-		if !r.Expiry.IsZero() {
-			l.liveRows = append(l.liveRows, liveRow{label: sub, base: r.Subtitle, expiry: r.Expiry})
-		}
 		text.Append(sub)
+	}
+
+	// A live row on a non-standard window drains a bar of its own: the shared
+	// bar under the query speaks only for the standard unix%30 window, and a
+	// 60-second entry would be misrepresented by it.
+	if !r.Expiry.IsZero() && !IsStandard(r.Period) {
+		bar := gtk.NewProgressBar()
+		bar.AddCSSClass("code-timer")
+		bar.AddCSSClass("row-timer")
+		bar.SetFraction(Fraction(r.Expiry, r.Period, time.Now()))
+		l.liveRows = append(l.liveRows, liveRow{bar: bar, expiry: r.Expiry, period: r.Period})
+		text.Append(bar)
 	}
 	box.Append(text)
 

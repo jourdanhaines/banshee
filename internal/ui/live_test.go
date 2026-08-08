@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -8,52 +9,94 @@ import (
 )
 
 // liveNow is a fixed instant so every case below is deterministic; the ticker
-// itself reads the wall clock, but none of the logic under test does.
+// itself reads the wall clock, but none of the logic under test does. It sits
+// exactly on a 30-second boundary (every HH:MM:00 does, the Unix epoch being
+// aligned to midnight), which is what makes the StandardFraction cases legible.
 var liveNow = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 
-func TestCountdownText(t *testing.T) {
+// fracEps tolerates the float division in Fraction/StandardFraction; the
+// values under test are ratios of durations, never exact binary fractions.
+const fracEps = 1e-9
+
+func closeTo(got, want float64) bool { return math.Abs(got-want) <= fracEps }
+
+func TestIsStandard(t *testing.T) {
 	tests := []struct {
 		name   string
-		expiry time.Time
-		want   string
+		period time.Duration
+		want   bool
 	}{
-		{"whole seconds", liveNow.Add(12 * time.Second), "12s"},
-		{"one second", liveNow.Add(time.Second), "1s"},
-		{"sub-second remainder rounds up", liveNow.Add(1500 * time.Millisecond), "2s"},
-		{"a nanosecond of life is still 1s", liveNow.Add(time.Nanosecond), "1s"},
-		{"just under a second", liveNow.Add(999 * time.Millisecond), "1s"},
-		{"exact expiry instant clamps", liveNow, "0s"},
-		{"past expiry clamps", liveNow.Add(-5 * time.Second), "0s"},
-		{"far past clamps", liveNow.Add(-99 * time.Hour), "0s"},
-		{"a full TOTP period", liveNow.Add(30 * time.Second), "30s"},
+		{"zero means the usual window", 0, true},
+		{"the standard window itself", 30 * time.Second, true},
+		{"a 60-second window is not standard", 60 * time.Second, false},
+		{"an odd window is not standard", 45 * time.Second, false},
+		{"a negative window is not standard", -1, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := CountdownText(tt.expiry, liveNow); got != tt.want {
-				t.Errorf("CountdownText(%v, %v) = %q, want %q", tt.expiry, liveNow, got, tt.want)
+			if got := IsStandard(tt.period); got != tt.want {
+				t.Errorf("IsStandard(%v) = %v, want %v", tt.period, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestLiveSubtitle(t *testing.T) {
+func TestFraction(t *testing.T) {
 	tests := []struct {
 		name   string
-		sub    string
 		expiry time.Time
-		want   string
+		period time.Duration
+		want   float64
 	}{
-		{"base plus countdown", "GitHub", liveNow.Add(9 * time.Second), "GitHub · 9s"},
-		{"empty base is just the countdown", "", liveNow.Add(9 * time.Second), "9s"},
-		{"expired base", "GitHub", liveNow, "GitHub · 0s"},
-		{"expired with empty base", "", liveNow.Add(-time.Second), "0s"},
-		{"zero expiry leaves the subtitle alone", "GitHub", time.Time{}, "GitHub"},
-		{"zero expiry with empty base stays empty", "", time.Time{}, ""},
+		{"a full window is full", liveNow.Add(30 * time.Second), 30 * time.Second, 1},
+		{"half a window", liveNow.Add(15 * time.Second), 30 * time.Second, 0.5},
+		{"one second left of thirty", liveNow.Add(time.Second), 30 * time.Second, 1.0 / 30.0},
+		{"the expiry instant is empty", liveNow, 30 * time.Second, 0},
+		{"a past expiry is empty", liveNow.Add(-time.Second), 30 * time.Second, 0},
+		{"a far-past expiry is empty", liveNow.Add(-99 * time.Hour), 30 * time.Second, 0},
+		{"zero period defaults to standard", liveNow.Add(15 * time.Second), 0, 0.5},
+		{"negative period defaults to standard", liveNow.Add(15 * time.Second), -time.Second, 0.5},
+		{"half of a 60-second window", liveNow.Add(30 * time.Second), 60 * time.Second, 0.5},
+		{"remaining longer than the period clamps", liveNow.Add(45 * time.Second), 30 * time.Second, 1},
+		{"a nanosecond of life is not empty", liveNow.Add(time.Nanosecond), 30 * time.Second, 1.0 / 30e9},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := LiveSubtitle(tt.sub, tt.expiry, liveNow); got != tt.want {
-				t.Errorf("LiveSubtitle(%q, %v, %v) = %q, want %q", tt.sub, tt.expiry, liveNow, got, tt.want)
+			got := Fraction(tt.expiry, tt.period, liveNow)
+			if !closeTo(got, tt.want) {
+				t.Errorf("Fraction(%v, %v, %v) = %v, want %v", tt.expiry, tt.period, liveNow, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStandardFraction(t *testing.T) {
+	tests := []struct {
+		name string
+		now  time.Time
+		want float64
+	}{
+		{"on the boundary the window is whole", liveNow, 1},
+		{"halfway through", liveNow.Add(15 * time.Second), 0.5},
+		{"the second boundary of the minute", liveNow.Add(30 * time.Second), 1},
+		{"halfway through the second window", liveNow.Add(45 * time.Second), 0.5},
+		{"one second before the boundary", liveNow.Add(29 * time.Second), 1.0 / 30.0},
+		{"a nanosecond before the boundary", liveNow.Add(30*time.Second - time.Nanosecond), 1.0 / 30e9},
+		{"a nanosecond after the boundary is nearly whole", liveNow.Add(time.Nanosecond), 1 - 1.0/30e9},
+		// A pre-epoch clock has a negative UnixNano; the window still runs from
+		// 23:59:30 to 00:00:00, so these are the same halves as any other minute.
+		{"pre-epoch, halfway through", time.Date(1969, 12, 31, 23, 59, 45, 0, time.UTC), 0.5},
+		{"pre-epoch, ten seconds left", time.Date(1969, 12, 31, 23, 59, 50, 0, time.UTC), 1.0 / 3.0},
+		{"pre-epoch, on the boundary", time.Date(1969, 12, 31, 23, 59, 30, 0, time.UTC), 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := StandardFraction(tt.now)
+			if !closeTo(got, tt.want) {
+				t.Errorf("StandardFraction(%v) = %v, want %v", tt.now, got, tt.want)
+			}
+			if got <= 0 || got > 1 {
+				t.Errorf("StandardFraction(%v) = %v, outside (0, 1]", tt.now, got)
 			}
 		})
 	}
@@ -62,6 +105,13 @@ func TestLiveSubtitle(t *testing.T) {
 // live builds a result carrying expiry; a zero expiry yields a static row.
 func live(id string, expiry time.Time) providers.Result {
 	return providers.Result{ID: id, Title: id, Expiry: expiry}
+}
+
+// livePeriod builds a live result on an explicit rotation window.
+func livePeriod(id string, expiry time.Time, period time.Duration) providers.Result {
+	r := live(id, expiry)
+	r.Period = period
+	return r
 }
 
 func TestAnyLive(t *testing.T) {
@@ -81,6 +131,30 @@ func TestAnyLive(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := AnyLive(tt.rs); got != tt.want {
 				t.Errorf("AnyLive() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAnyStandardLive(t *testing.T) {
+	exp := liveNow.Add(10 * time.Second)
+	tests := []struct {
+		name string
+		rs   []providers.Result
+		want bool
+	}{
+		{"nil slice", nil, false},
+		{"static rows only", []providers.Result{live("a", time.Time{}), live("b", time.Time{})}, false},
+		{"a live row with no period is standard", []providers.Result{live("a", exp)}, true},
+		{"an explicit 30-second row is standard", []providers.Result{livePeriod("a", exp, 30*time.Second)}, true},
+		{"only 60-second rows", []providers.Result{livePeriod("a", exp, 60*time.Second), livePeriod("b", exp, 60*time.Second)}, false},
+		{"mixed periods", []providers.Result{livePeriod("a", exp, 60*time.Second), livePeriod("b", exp, 30*time.Second)}, true},
+		{"a period on a static row is inert", []providers.Result{livePeriod("a", time.Time{}, 30*time.Second)}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AnyStandardLive(tt.rs); got != tt.want {
+				t.Errorf("AnyStandardLive() = %v, want %v", got, tt.want)
 			}
 		})
 	}

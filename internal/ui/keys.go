@@ -154,7 +154,13 @@ func (l *Launcher) newKeyController() *gtk.EventControllerKey {
 		case KeyFormCancel:
 			l.closeForm(true)
 		case KeyFormSubmit:
-			l.submitForm()
+			// Not always ours: Enter inside a form dropdown belongs to the
+			// widget. The decision needs the focused widget, which KeyFor
+			// (a pure keyval→action mapping, testable without a display)
+			// deliberately knows nothing about, so it lives on the launcher.
+			if !l.submitFormOrPass() {
+				return false
+			}
 		default:
 			return false // not ours: let the focused widget have it
 		}

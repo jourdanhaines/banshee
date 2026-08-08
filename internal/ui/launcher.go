@@ -102,10 +102,19 @@ type Launcher struct {
 	// shift-click as the alternate action the way Shift+Enter does.
 	shiftClick bool
 
-	// liveRows are the subtitle labels of the rows whose Result carried a
-	// non-zero Expiry. Rebuilt from scratch by every setResults, because the
-	// labels they point at are destroyed with the old rows.
+	// liveRows are the per-row progress bars of the live rows whose period is
+	// *not* the standard one; standard rows are represented by sharedBar and
+	// register nothing here. Rebuilt from scratch by every setResults, because
+	// the bars they point at are destroyed with the old rows.
 	liveRows []liveRow
+
+	// sharedBar drains the standard 30-second TOTP window under the query
+	// entry. It stands in for every standard-period live row at once — they all
+	// rotate on the same unix%30 boundary — and is always allocated, shown and
+	// hidden by opacity alone: SetVisible would change the panel's height on
+	// every query, which is exactly what the min==max resultsHeight rule above
+	// exists to prevent.
+	sharedBar *gtk.ProgressBar
 
 	// tickerOn reports whether a live tick is scheduled, and doubles as the
 	// stop signal: a GLib timeout source that has already been queued still
@@ -126,18 +135,23 @@ type Launcher struct {
 	requeryPending bool
 }
 
-// liveRow binds one rendered subtitle label to the data the ticker needs to
-// recompute its text: the provider's own subtitle and the instant the row's
-// content stops being valid.
+// liveRow binds one rendered progress bar to the data the ticker needs to
+// redraw it: the instant the row's content stops being valid and the length of
+// the window ending there. Only non-standard-period rows get one — a standard
+// row's remaining share is the same as every other standard row's, which is
+// what sharedBar draws.
 type liveRow struct {
-	label  *gtk.Label
-	base   string
+	bar    *gtk.ProgressBar
 	expiry time.Time
+	period time.Duration
 }
 
-// liveTick is how often live rows re-render their countdown. One second is the
-// coarsest interval at which a seconds-resolution countdown still looks smooth.
-const liveTick = time.Second
+// liveTick is how often the drain bars are redrawn. Each tick recomputes the
+// fraction from the wall clock, so the interval only governs smoothness, never
+// accuracy: 4 Hz on a single widget the width of the panel looks continuous,
+// costs nothing, and caps the latency between a code rotating and the boundary
+// requery noticing at one tick.
+const liveTick = 250 * time.Millisecond
 
 // NewLauncher builds the launcher window for app and wires the query pipeline
 // to agg and the activation path to disp. It must be called on the GTK main
@@ -170,6 +184,7 @@ const formTransition = 150 * time.Millisecond
 //	   └─ Stack (slide transitions)
 //	      ├─ "main": Box .main-view
 //	      │   ├─ Entry .query
+//	      │   ├─ ProgressBar .code-timer   (shared TOTP drain, opacity-toggled)
 //	      │   └─ ScrolledWindow .results-scroll
 //	      │      └─ ListBox .results (SelectionModeBrowse)
 //	      └─ "form": Box (persistent page, contents rebuilt per form)
@@ -194,6 +209,13 @@ func (l *Launcher) build() {
 	l.entry.SetPlaceholderText("Search…")
 	l.entry.SetHExpand(true)
 	l.mainBox.Append(l.entry)
+
+	// Allocated once, for the lifetime of the window: see the sharedBar field
+	// comment on why visibility is opacity and not SetVisible.
+	l.sharedBar = gtk.NewProgressBar()
+	l.sharedBar.AddCSSClass("code-timer")
+	l.sharedBar.SetOpacity(0)
+	l.mainBox.Append(l.sharedBar)
 
 	l.list = gtk.NewListBox()
 	l.list.AddCSSClass("results")
@@ -336,6 +358,11 @@ func (l *Launcher) Hide() {
 	// notices the flag on its next fire and stops itself.
 	l.tickerOn = false
 	l.requeryPending = false
+	// Leave no half-drained bar behind for the next show to flash before its
+	// first results land.
+	if l.sharedBar != nil {
+		l.sharedBar.SetOpacity(0)
+	}
 	l.win.SetVisible(false)
 	l.visible = false
 }
@@ -461,6 +488,20 @@ func (l *Launcher) closeForm(refocus bool) {
 	}
 }
 
+// submitFormOrPass handles Enter while a form is open: it submits, unless one
+// of the form's dropdowns has its option list popped up, in which case it
+// reports false so the key controller lets GTK have the press — that Enter
+// commits the highlighted option, and stealing it as a submit would make a
+// fixed-choice field unusable from the keyboard. A dropdown that merely holds
+// focus does not withhold Enter; see formView.dropdownListOpen.
+func (l *Launcher) submitFormOrPass() bool {
+	if l.form != nil && l.form.dropdownListOpen() {
+		return false
+	}
+	l.submitForm()
+	return true
+}
+
 // submitForm validates the open form and dispatches the action it builds,
 // following the same hide-before-dispatch order as Activate. Validation
 // failure keeps the form up with the offending field marked.
@@ -569,7 +610,7 @@ func (l *Launcher) setResults(res []providers.Result) {
 	l.results = res
 	l.requeryPending = false
 
-	// The previous generation's labels are about to be destroyed with their
+	// The previous generation's bars are about to be destroyed with their
 	// rows; newRow re-registers the live ones as it rebuilds.
 	l.liveRows = nil
 
@@ -579,6 +620,17 @@ func (l *Launcher) setResults(res []providers.Result) {
 		l.list.Append(l.newRow(res[i]))
 	}
 	l.syncing = false
+
+	// Seed the shared bar here as well as in tick, so a query that lands
+	// mid-window paints at the right level instead of jumping on the first tick.
+	if l.sharedBar != nil {
+		if AnyStandardLive(res) {
+			l.sharedBar.SetFraction(StandardFraction(time.Now()))
+			l.sharedBar.SetOpacity(1)
+		} else {
+			l.sharedBar.SetOpacity(0)
+		}
+	}
 
 	if AnyLive(res) {
 		l.startTicker()
@@ -590,9 +642,9 @@ func (l *Launcher) setResults(res []providers.Result) {
 	l.applySelection()
 }
 
-// startTicker schedules the 1 Hz live-row refresh, unless one is already
-// running. Idempotent: setResults calls it on every generation that contains a
-// live row, and the ticker must not multiply.
+// startTicker schedules the live-row refresh, unless one is already running.
+// Idempotent: setResults calls it on every generation that contains a live row,
+// and the ticker must not multiply.
 func (l *Launcher) startTicker() {
 	if l.tickerOn {
 		return
@@ -603,17 +655,17 @@ func (l *Launcher) startTicker() {
 	glib.TimeoutAdd(uint(liveTick.Milliseconds()), func() bool { return l.tick(gen) })
 }
 
-// tick refreshes every live row's countdown and, when a row's content has
-// actually expired, re-runs the current query once so the provider can hand
-// back fresh content. It runs on the GTK main loop (GLib timeout) and returns
-// false to unschedule itself.
+// tick drains the visible progress bars and, when a row's content has actually
+// expired, re-runs the current query once so the provider can hand back fresh
+// content. It runs on the GTK main loop (GLib timeout) and returns false to
+// unschedule itself.
 //
-// The split is deliberate. Re-running the whole query every second to move a
-// countdown would rescan /proc and poke every exec plugin thirty times per
-// TOTP rotation; updating labels in place alone cannot work either, because
-// the code text behind the countdown is only obtainable from the provider,
-// which holds the secret. So: cheap in-place text on every tick, one real
-// query at the expiry boundary.
+// The split is deliberate. Re-running the whole query on every tick to move a
+// bar would rescan /proc and poke every exec plugin a hundred-plus times per
+// TOTP rotation; redrawing bars alone cannot work either, because the code
+// behind the bar is only obtainable from the provider, which holds the secret.
+// So: cheap fraction updates on every tick, one real query at the expiry
+// boundary.
 //
 // Time comes from time.Now on every tick rather than a decrementing counter,
 // so a suspended machine or a delayed source shows the true remaining time
@@ -630,11 +682,14 @@ func (l *Launcher) tick(gen uint64) bool {
 	}
 
 	now := time.Now()
+	if l.sharedBar != nil && AnyStandardLive(l.results) {
+		l.sharedBar.SetFraction(StandardFraction(now))
+	}
 	for _, lr := range l.liveRows {
-		if lr.label == nil {
+		if lr.bar == nil {
 			continue
 		}
-		lr.label.SetText(LiveSubtitle(lr.base, lr.expiry, now))
+		lr.bar.SetFraction(Fraction(lr.expiry, lr.period, now))
 	}
 
 	if !l.requeryPending && AnyExpired(l.results, now) && l.entry != nil {
