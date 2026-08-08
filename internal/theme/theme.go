@@ -120,7 +120,8 @@ window#banshee-window {
 	box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5);
 }
 
-/* Query entry */
+/* Query entry and form fields share one look */
+#banshee-window entry.form-field,
 #banshee-window entry.query {
 	background-color: rgba(255, 255, 255, 0.04);
 	background-image: none;
@@ -135,19 +136,51 @@ window#banshee-window {
 	box-shadow: none;
 }
 
+#banshee-window entry.form-field:focus,
+#banshee-window entry.form-field:focus-within,
 #banshee-window entry.query:focus,
 #banshee-window entry.query:focus-within {
 	border-color: {{ alpha .AccentRGB 0.6 }};
 	background-color: rgba(255, 255, 255, 0.06);
 }
 
+#banshee-window entry.form-field > text > placeholder,
 #banshee-window entry.query > text > placeholder {
 	color: rgba(230, 233, 240, 0.32);
 }
 
+#banshee-window entry.form-field > text > selection,
 #banshee-window entry.query > text > selection {
 	background-color: {{ alpha .AccentRGB 0.35 }};
 	color: #ffffff;
+}
+
+/* Form view (secondary input slid in over the results) */
+#banshee-window .form-view {
+	padding: 4px 2px;
+}
+
+#banshee-window .form-title {
+	color: #f2f5fb;
+	font-size: 15px;
+	font-weight: bold;
+	margin-bottom: 10px;
+}
+
+#banshee-window .form-label {
+	color: rgba(223, 228, 238, 0.55);
+	font-size: 12px;
+	margin-bottom: 4px;
+}
+
+#banshee-window entry.form-field.error {
+	border-color: rgba(247, 118, 142, 0.7);
+}
+
+#banshee-window .form-hint {
+	color: rgba(223, 228, 238, 0.35);
+	font-size: 11px;
+	margin-top: 10px;
 }
 
 /* Results list */

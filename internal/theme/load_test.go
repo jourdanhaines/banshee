@@ -61,6 +61,14 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window entry.query",
 		"#banshee-window entry.query > text > placeholder",
 		"#banshee-window entry.query > text > selection",
+		"#banshee-window entry.form-field",
+		// GTK re-serializes compound class selectors alphabetically, so
+		// entry.form-field.error comes back as entry.error.form-field.
+		"#banshee-window entry.error.form-field",
+		"#banshee-window .form-view",
+		"#banshee-window .form-title",
+		"#banshee-window .form-label",
+		"#banshee-window .form-hint",
 		"#banshee-window scrolledwindow.results-scroll",
 		"#banshee-window list.results",
 		"#banshee-window list.results > row",

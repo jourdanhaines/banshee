@@ -59,11 +59,18 @@ type Launcher struct {
 	agg  providers.Aggregator
 	disp *launch.Dispatcher
 
-	win    *gtk.ApplicationWindow
-	panel  *gtk.Box
-	entry  *gtk.Entry
-	scroll *gtk.ScrolledWindow
-	list   *gtk.ListBox
+	win     *gtk.ApplicationWindow
+	panel   *gtk.Box
+	stack   *gtk.Stack // "main" (query + results) / "form" pages
+	mainBox *gtk.Box
+	formBox *gtk.Box // persistent form page; contents rebuilt per openForm
+	entry   *gtk.Entry
+	scroll  *gtk.ScrolledWindow
+	list    *gtk.ListBox
+
+	// form is the open form view; nil means the results view is active and
+	// is what mode() derives the keymap from.
+	form *formView
 
 	debounce *Debouncer
 	sel      Selection
@@ -117,13 +124,19 @@ func NewLauncher(app *gtk.Application, cfg config.Config, agg providers.Aggregat
 	return l
 }
 
+// formTransition is the slide duration between the results and form views.
+const formTransition = 150 * time.Millisecond
+
 // build assembles the widget tree:
 //
 //	ApplicationWindow #banshee-window
 //	└─ Box .panel (vertical)
-//	   ├─ Entry .query
-//	   └─ ScrolledWindow .results-scroll
-//	      └─ ListBox .results (SelectionModeBrowse)
+//	   └─ Stack (slide transitions)
+//	      ├─ "main": Box .main-view
+//	      │   ├─ Entry .query
+//	      │   └─ ScrolledWindow .results-scroll
+//	      │      └─ ListBox .results (SelectionModeBrowse)
+//	      └─ "form": Box (persistent page, contents rebuilt per form)
 func (l *Launcher) build() {
 	l.applyTheme()
 
@@ -137,11 +150,14 @@ func (l *Launcher) build() {
 	l.panel.AddCSSClass("panel")
 	l.panel.SetSizeRequest(l.launcherWidth(), -1)
 
+	l.mainBox = gtk.NewBox(gtk.OrientationVertical, 0)
+	l.mainBox.AddCSSClass("main-view")
+
 	l.entry = gtk.NewEntry()
 	l.entry.AddCSSClass("query")
 	l.entry.SetPlaceholderText("Search…")
 	l.entry.SetHExpand(true)
-	l.panel.Append(l.entry)
+	l.mainBox.Append(l.entry)
 
 	l.list = gtk.NewListBox()
 	l.list.AddCSSClass("results")
@@ -166,7 +182,21 @@ func (l *Launcher) build() {
 	l.scroll.SetPropagateNaturalHeight(true)
 	l.scroll.SetVExpand(true)
 	l.scroll.SetChild(l.list)
-	l.panel.Append(l.scroll)
+	l.mainBox.Append(l.scroll)
+
+	// The form page is a single persistent stack child whose contents are
+	// replaced per openForm — adding or removing stack children mid-transition
+	// kills the slide animation, so the page itself is never removed. The
+	// stack stays vertically homogeneous (the default), so the form page
+	// adopts the results page's fixed height and the panel never resizes —
+	// the same no-jitter rationale as the min==max scroll height above.
+	l.formBox = gtk.NewBox(gtk.OrientationVertical, 0)
+
+	l.stack = gtk.NewStack()
+	l.stack.SetTransitionDuration(uint(formTransition.Milliseconds()))
+	l.stack.AddNamed(l.mainBox, "main")
+	l.stack.AddNamed(l.formBox, "form")
+	l.panel.Append(l.stack)
 
 	l.win.SetChild(l.panel)
 
@@ -234,6 +264,10 @@ func (l *Launcher) Show(query string) {
 		return
 	}
 
+	// A form left open by a previous show is stale state: showing always
+	// starts at the results view.
+	l.resetToResults()
+
 	// Setting the text fires ::changed and schedules a debounced query; the
 	// explicit Fire below supersedes it so the first paint is immediate.
 	l.entry.SetText(query)
@@ -257,6 +291,9 @@ func (l *Launcher) Hide() {
 	if l.win == nil || !l.visible {
 		return
 	}
+	// Discard any open form first — a stale l.form would leave the keymap in
+	// ModeForm and trap Esc on the next show.
+	l.resetToResults()
 	l.debounce.Cancel()
 	l.cancelQuery()
 	l.win.SetVisible(false)
@@ -306,6 +343,14 @@ func (l *Launcher) Activate(alt bool) {
 	}
 	res := l.results[l.sel.Index()]
 
+	// A form result's primary activation opens the in-launcher form instead
+	// of dispatching; the window stays up. The alt action still dispatches
+	// directly below, bypassing the form.
+	if !alt && res.Form != nil {
+		l.openForm(res)
+		return
+	}
+
 	action := res.Action
 	if alt {
 		if res.AltAction == nil {
@@ -323,6 +368,101 @@ func (l *Launcher) Activate(alt bool) {
 	if err := l.disp.Dispatch(action); err != nil {
 		l.notify("Could not run “" + res.Title + "”: " + err.Error())
 	}
+}
+
+// mode reports which keymap is active: ModeForm while a form is open.
+func (l *Launcher) mode() UIMode {
+	if l.form != nil {
+		return ModeForm
+	}
+	return ModeResults
+}
+
+// openForm rebuilds the form page for res.Form, slides it in and focuses the
+// first field. The in-flight query and debounce are left alone: a late
+// setResults just repaints the hidden results page, and the form holds its
+// own copy of the result.
+func (l *Launcher) openForm(res providers.Result) {
+	if l.stack == nil || res.Form == nil {
+		return
+	}
+	l.form = newFormView(res)
+
+	for c := l.formBox.FirstChild(); c != nil; c = l.formBox.FirstChild() {
+		l.formBox.Remove(c)
+	}
+	l.formBox.Append(l.form.root)
+
+	l.stack.SetTransitionType(gtk.StackTransitionTypeSlideLeft)
+	l.stack.SetVisibleChildName("form")
+	// The page becomes visible synchronously, but the grab is deferred to
+	// idle so it lands after the transition has mapped the child.
+	v := l.form
+	glib.IdleAdd(func() {
+		if l.form == v {
+			v.focusFirst()
+		}
+	})
+}
+
+// closeForm slides back to the results view exactly as the user left it.
+// refocus re-grabs the query entry (Esc); it is false when the caller is
+// about to hide or refocus itself.
+func (l *Launcher) closeForm(refocus bool) {
+	if l.form == nil || l.stack == nil {
+		return
+	}
+	l.form = nil
+	l.stack.SetTransitionType(gtk.StackTransitionTypeSlideRight)
+	l.stack.SetVisibleChildName("main")
+	if refocus && l.entry != nil {
+		l.entry.GrabFocus()
+		l.entry.SetPosition(-1)
+	}
+}
+
+// submitForm validates the open form and dispatches the action it builds,
+// following the same hide-before-dispatch order as Activate. Validation
+// failure keeps the form up with the offending field marked.
+func (l *Launcher) submitForm() {
+	if l.form == nil {
+		return
+	}
+	values := TrimValues(l.form.values())
+	if i, ok := FirstMissingRequired(l.form.form.Fields, values); !ok {
+		l.form.markError(i)
+		return
+	}
+	res, form := l.form.res, l.form.form
+
+	l.Hide() // also resets the stack to the results view
+
+	if form.Build == nil {
+		return
+	}
+	action, err := form.Build(values)
+	if err != nil {
+		l.notify("Could not run “" + res.Title + "”: " + err.Error())
+		return
+	}
+	if l.disp == nil {
+		l.notify("Nothing is wired up to run " + res.Title)
+		return
+	}
+	if err := l.disp.Dispatch(action); err != nil {
+		l.notify("Could not run “" + res.Title + "”: " + err.Error())
+	}
+}
+
+// resetToResults is the no-animation teardown used by Hide and Show: whatever
+// view is up, the next paint is the results page.
+func (l *Launcher) resetToResults() {
+	if l.form == nil || l.stack == nil {
+		return
+	}
+	l.form = nil
+	l.stack.SetTransitionType(gtk.StackTransitionTypeNone)
+	l.stack.SetVisibleChildName("main")
 }
 
 // deleteWordBeforeCursor implements Ctrl-W in the query entry: delete from

@@ -27,6 +27,19 @@ const (
 	// KeyDeleteWord deletes the word before the cursor in the query entry
 	// (Ctrl-W, readline/vim style).
 	KeyDeleteWord
+	// KeyFormCancel slides an open form away, back to the results view
+	// (Esc while a form is open — the window stays up).
+	KeyFormCancel
+	// KeyFormSubmit validates and submits an open form (Enter).
+	KeyFormSubmit
+)
+
+// UIMode selects the keymap: the results list or an open form.
+type UIMode int
+
+const (
+	ModeResults UIMode = iota
+	ModeForm
 )
 
 // String implements fmt.Stringer for readable test failures.
@@ -44,19 +57,38 @@ func (a KeyAction) String() string {
 		return "activate-alt"
 	case KeyDeleteWord:
 		return "delete-word"
+	case KeyFormCancel:
+		return "form-cancel"
+	case KeyFormSubmit:
+		return "form-submit"
 	default:
 		return "pass"
 	}
 }
 
-// KeyFor maps a GDK keyval plus modifier state onto a KeyAction.
+// KeyFor maps a GDK keyval plus modifier state onto a KeyAction for the
+// given UI mode.
 //
-// The bindings are the ones the plan freezes: Esc hides; Down/Ctrl-J and
-// Up/Ctrl-K move the selection while the entry keeps focus; Enter activates;
-// Tab and Shift+Enter take the alternate action. Ctrl-J/Ctrl-K are matched on
-// the letter keyvals so they work regardless of Shift or Caps Lock, and Tab is
-// matched in both its plain and Shift (ISO_Left_Tab) forms.
-func KeyFor(keyval uint, state gdk.ModifierType) KeyAction {
+// ModeResults bindings are the ones the plan freezes: Esc hides; Down/Ctrl-J
+// and Up/Ctrl-K move the selection while the entry keeps focus; Enter
+// activates; Tab and Shift+Enter take the alternate action. Ctrl-J/Ctrl-K are
+// matched on the letter keyvals so they work regardless of Shift or Caps
+// Lock, and Tab is matched in both its plain and Shift (ISO_Left_Tab) forms.
+//
+// ModeForm is deliberately minimal: Esc cancels back to the results, Enter
+// submits, and everything else — including Tab — passes through so GTK's own
+// focus chain moves between the form's fields and text editing keeps working.
+func KeyFor(keyval uint, state gdk.ModifierType, mode UIMode) KeyAction {
+	if mode == ModeForm {
+		switch keyval {
+		case gdk.KEY_Escape:
+			return KeyFormCancel
+		case gdk.KEY_Return, gdk.KEY_KP_Enter, gdk.KEY_ISO_Enter:
+			return KeyFormSubmit
+		}
+		return KeyPass
+	}
+
 	ctrl := state&gdk.ControlMask != 0
 	shift := state&gdk.ShiftMask != 0
 
@@ -106,7 +138,7 @@ func (l *Launcher) newKeyController() *gtk.EventControllerKey {
 	keys := gtk.NewEventControllerKey()
 	keys.SetPropagationPhase(gtk.PhaseCapture)
 	keys.ConnectKeyPressed(func(keyval, _ uint, state gdk.ModifierType) bool {
-		switch KeyFor(keyval, state) {
+		switch KeyFor(keyval, state, l.mode()) {
 		case KeyHide:
 			l.Hide()
 		case KeyNext:
@@ -119,8 +151,12 @@ func (l *Launcher) newKeyController() *gtk.EventControllerKey {
 			l.Activate(true)
 		case KeyDeleteWord:
 			l.deleteWordBeforeCursor()
+		case KeyFormCancel:
+			l.closeForm(true)
+		case KeyFormSubmit:
+			l.submitForm()
 		default:
-			return false // not ours: let the entry have it
+			return false // not ours: let the focused widget have it
 		}
 		return true
 	})
