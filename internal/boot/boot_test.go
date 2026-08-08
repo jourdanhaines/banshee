@@ -88,6 +88,7 @@ func TestNewWiring(t *testing.T) {
 			"totp-add",
 			"totp-setup",
 			"totp-wizard-reset",
+			"totp-wizard-fix",
 		}
 		for _, kind := range kinds {
 			// Dispatch with an empty payload: a registered handler rejects it

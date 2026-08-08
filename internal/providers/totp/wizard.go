@@ -15,6 +15,16 @@ import (
 // that emit it, so this file compiles without waiting on the handler.
 const ActTOTPWizardReset = "totp-wizard-reset"
 
+// ActTOTPWizardFix applies one canned repair for an unusable backend and, when
+// it succeeds, retries setup so the wizard retires itself.
+//
+// Argv is [backend, fixID] and is a *lookup key*, never a command line: the
+// handler resolves the pair through wizardFixes and refuses anything the table
+// does not name, so a forged Result — a rogue plugin, a hand-built IPC payload —
+// can never turn this kind into "run arbitrary argv". It is declared here beside
+// the rows that emit it for the same reason as ActTOTPWizardReset.
+const ActTOTPWizardFix = "totp-wizard-fix"
+
 // Scores for the wizard block. They sit above TriggerScore so a wizard, once
 // triggered, owns the top of the list, and they are fixed constants because the
 // rows must keep a diagnosis → fix → retry → escape order that no fuzzy score
@@ -36,10 +46,15 @@ const (
 	wizardBackScore = 810
 )
 
-// Icon theme names used by the wizard rows.
+// Icon theme names used by the wizard rows. The three guidance icons exist
+// because a guidance row no longer does one thing: the icon is the only advance
+// warning the user gets that Enter will copy text, run something, or throw a
+// terminal at them.
 const (
 	iconWizardStatus   = "dialog-warning-symbolic"
-	iconWizardGuidance = "edit-copy-symbolic"
+	iconWizardCopy     = "edit-copy-symbolic"
+	iconWizardRun      = "media-playback-start-symbolic"
+	iconWizardTerminal = "utilities-terminal-symbolic"
 	iconWizardRetry    = "view-refresh-symbolic"
 	iconWizardBack     = "go-previous-symbolic"
 )
@@ -140,11 +155,11 @@ func WithSetupState(s *SetupState) Option {
 // The wizard is plain result rows rather than a new UI surface. Every choice a
 // user has to make here is "pick one of these things" — which is what a
 // launcher list already is — so the wizard needs no new form-field kinds, no
-// new Result fields and no change in internal/ui at all: each row dispatches
-// through an action kind that already exists (a copy for the fix rows, the
-// setup action for retry, the reset action for the escape hatch). Errors show
-// up in the launcher, where the user is looking and can act on them, instead of
-// as a desktop toast that vanishes into a dead end.
+// new Result fields and no change in internal/ui at all: each row is an ordinary
+// Result dispatching an ordinary action (a clipboard copy, a terminal handoff,
+// the fix action, the setup action for retry, the reset action for the escape
+// hatch). Errors show up in the launcher, where the user is looking and can act
+// on them, instead of as a desktop toast that vanishes into a dead end.
 //
 // message is the recorded error text and rides the header row's subtitle: it is
 // the machine's own account of the failure, while the guidance rows below are
@@ -153,8 +168,13 @@ func WithSetupState(s *SetupState) Option {
 // firstTime reports that no backend has been persisted yet, which is the only
 // situation where "choose a different backend" makes sense — once seeds exist
 // under a backend, switching is not a wizard's decision.
-func wizardResults(backend, message string, firstTime bool) []providers.Result {
-	guidance := wizardGuidance(backend)
+//
+// lookPath probes for a program on PATH (exec.LookPath in production) and is
+// threaded through rather than called directly so the rendered rows stay a pure
+// function of their inputs, which is what lets a test pin them byte for byte on
+// any machine.
+func wizardResults(backend, message string, firstTime bool, lookPath func(string) (string, error)) []providers.Result {
+	guidance := wizardGuidance(backend, lookPath)
 	out := make([]providers.Result, 0, len(guidance)+3)
 	out = append(out, providers.Result{
 		ID:       "totp:wizard:status",
@@ -173,13 +193,18 @@ func wizardResults(backend, message string, firstTime bool) []providers.Result {
 			ID:       "totp:wizard:" + g.id,
 			Title:    g.title,
 			Subtitle: g.subtitle,
-			Icon:     providers.Icon{ThemeName: iconWizardGuidance},
+			Icon:     providers.Icon{ThemeName: g.icon()},
 			Category: providers.CatTOTP,
 			Score:    wizardGuidanceFirstScore - i*wizardGuidanceStep,
-			// Copying beats running: banshee has no business executing a
-			// package-manager or systemd command on the user's behalf, and the
-			// user's terminal is one paste away.
-			Action: providers.Action{Kind: providers.ActClipboardCopy, Text: g.cmd},
+			// Three tiers, by what the fix costs the user to authorize:
+			// an unprivileged, user-level repair (starting a systemd --user
+			// unit) banshee runs itself, because making the user paste a
+			// command banshee could have run is busywork; a privileged one
+			// (installing a package) is handed to the user's terminal, where
+			// sudo can prompt interactively and banshee never sees the
+			// password; a pure diagnostic is copied, because the answer only
+			// means anything in the user's own shell.
+			Action: g.action(backend),
 		})
 	}
 	out = append(out, providers.Result{
@@ -205,18 +230,185 @@ func wizardResults(backend, message string, firstTime bool) []providers.Result {
 	return out
 }
 
+// guidanceKind says what pressing Enter on a guidance row does, which is the
+// one thing that varies between them; everything else about a row is text.
+type guidanceKind int
+
+const (
+	// guidanceCopy puts cmd on the clipboard and does nothing else. It is the
+	// zero value, so a row that forgets to say what it is stays harmless.
+	guidanceCopy guidanceKind = iota
+	// guidanceRun asks the fix handler to run this row's entry in wizardFixes
+	// and retry setup afterwards.
+	guidanceRun
+	// guidanceTerminal opens the user's terminal on argv, for a command that
+	// needs to talk to the user (interactive sudo) rather than just succeed.
+	guidanceTerminal
+)
+
 // guidanceRow is one "here is how you fix it" row before it becomes a Result:
-// a human instruction plus the exact command that lands on the clipboard.
+// a human instruction plus whatever the row's kind needs to act on.
 type guidanceRow struct {
 	// id is the suffix appended to "totp:wizard:", kept backend-qualified so
-	// two backends' advice can never collide on a result ID.
+	// two backends' advice can never collide on a result ID. For a guidanceRun
+	// row it doubles as the key into the backend's wizardFixes table.
 	id       string
+	kind     guidanceKind
 	title    string
 	subtitle string
-	cmd      string
+	// cmd is the text a guidanceCopy row copies. Other kinds leave it empty:
+	// their command lives in wizardFixes (run) or in argv (terminal), and a
+	// second copy of it here would be a second thing to keep in sync.
+	cmd string
+	// argv is the command a guidanceTerminal row hands to the terminal.
+	argv []string
+}
+
+// action builds the Action this row dispatches.
+//
+// A run row deliberately carries only [backend, id] — the key, not the command.
+// Actions travel through the dispatcher from anywhere a Result can be minted, so
+// putting argv on one would make "execute this argv" a kind any forged Result
+// could reach; the handler instead looks the pair up in wizardFixes, which this
+// package writes and nothing else can extend.
+//
+// A terminal row may carry argv because ActTerminal is a pre-existing surface
+// with exactly that contract (it is how lastaction re-attaches a session), and
+// because the argv here is built from static package-level strings — no user
+// input, no secret material, ever reaches it.
+func (g guidanceRow) action(backend string) providers.Action {
+	switch g.kind {
+	case guidanceRun:
+		return providers.Action{Kind: ActTOTPWizardFix, Argv: []string{backend, g.id}}
+	case guidanceTerminal:
+		return providers.Action{Kind: providers.ActTerminal, Argv: g.argv}
+	default:
+		return providers.Action{Kind: providers.ActClipboardCopy, Text: g.cmd}
+	}
+}
+
+// icon returns the theme icon matching the row's kind, so the list telegraphs
+// what Enter will do before the user presses it.
+func (g guidanceRow) icon() string {
+	switch g.kind {
+	case guidanceRun:
+		return iconWizardRun
+	case guidanceTerminal:
+		return iconWizardTerminal
+	default:
+		return iconWizardCopy
+	}
+}
+
+// wizardFix is one repair banshee is willing to run itself: the exact argv and
+// the sentence that introduces a failure to the user.
+type wizardFix struct {
+	// argv is executed directly, without a shell, so nothing here is ever
+	// word-split or expanded.
+	argv []string
+	// failMsg heads the error the wizard re-renders with when argv fails, so
+	// the user reads "could not start the Secret Service daemon: …" rather than
+	// a bare exit status.
+	failMsg string
+}
+
+// wizardFixes is the complete set of commands ActTOTPWizardFix may run, keyed
+// by backend and then by the guidance row's id. The handler executes nothing
+// outside it, which is what makes the action kind safe to expose.
+//
+// Everything here must be user-level and non-interactive: it runs detached from
+// a handler goroutine with no terminal attached, so a command that wants a
+// password or a confirmation would hang until the timeout and report a
+// meaningless failure. Anything privileged belongs in a guidanceTerminal row,
+// where the user's own terminal can answer sudo.
+var wizardFixes = map[string]map[string]wizardFix{
+	secrets.BackendKeyring: {
+		"keyring:daemon": {
+			argv:    []string{"systemctl", "--user", "start", "gnome-keyring-daemon"},
+			failMsg: "could not start the Secret Service daemon",
+		},
+	},
+}
+
+// lookupWizardFix resolves an ActTOTPWizardFix Argv pair. ok is false for an
+// unknown backend or an id that backend does not define — including an id that
+// another backend does, so the two halves of the key can never be mixed.
+func lookupWizardFix(backend, id string) (wizardFix, bool) {
+	fixes, ok := wizardFixes[backend]
+	if !ok {
+		return wizardFix{}, false
+	}
+	fix, ok := fixes[id]
+	return fix, ok
+}
+
+// packageManagers maps a package manager's binary onto the command that
+// installs gnome-keyring with it, in probe order — the first one found on PATH
+// wins, because a machine with two of them (a distro shipping both dnf and
+// zypper, a user with apt on an Arch box) is still overwhelmingly likely to be
+// administered with the first.
+//
+// The list is deliberately short: it covers the mainstream families and a
+// machine outside them falls back to the copy row, which was the only behavior
+// before and is never wrong.
+var packageManagers = []struct {
+	bin string
+	cmd string
+}{
+	{bin: "pacman", cmd: "sudo pacman -S --needed gnome-keyring"},
+	{bin: "apt", cmd: "sudo apt install gnome-keyring"},
+	{bin: "dnf", cmd: "sudo dnf install gnome-keyring"},
+	{bin: "zypper", cmd: "sudo zypper install gnome-keyring"},
+}
+
+// installGuidance builds the "install a Secret Service provider" row for this
+// machine: a terminal handoff when a known package manager is on PATH, and
+// otherwise the distro-neutral copy row, unchanged from before this probe
+// existed. A nil lookPath counts as "found nothing", so a caller that never
+// wired one up gets the safe fallback rather than a panic.
+func installGuidance(lookPath func(string) (string, error)) guidanceRow {
+	row := guidanceRow{
+		id:       "keyring:install",
+		title:    "Install a Secret Service provider",
+		subtitle: "Enter copies: gnome-keyring — install with your package manager",
+		cmd:      "gnome-keyring",
+	}
+	if lookPath == nil {
+		return row
+	}
+	for _, m := range packageManagers {
+		if _, err := lookPath(m.bin); err != nil {
+			continue
+		}
+		return guidanceRow{
+			id:       "keyring:install",
+			kind:     guidanceTerminal,
+			title:    "Install a Secret Service provider",
+			subtitle: "Enter opens a terminal to install it (sudo prompts there)",
+			argv:     terminalWrap(m.cmd),
+		}
+	}
+	return row
+}
+
+// terminalWrap turns an install command into argv for ActTerminal, holding the
+// window open when it finishes.
+//
+// Every terminal banshee resolves is launched as `term -e argv…` and closes the
+// moment argv exits, which would flash a package manager's output — including
+// the reason it refused — past the user in a fraction of a second. The trailing
+// prompt keeps the window up until they have read it.
+//
+// Joining cmd into a shell string is safe because every cmd is a static literal
+// from packageManagers: no user input, no path, nothing quoted is reachable
+// here. Do not extend this to caller-supplied text without quoting it.
+func terminalWrap(cmd string) []string {
+	return []string{"sh", "-c", cmd + `; printf '\nPress Enter to close\n'; read _`}
 }
 
 // wizardGuidance returns the fix advice for backend, most-likely cause first.
+// lookPath is the PATH probe installGuidance uses to decide whether it can
+// offer a real install command.
 //
 // Only the keyring has advice today: it is the one backend with an external
 // dependency that can be absent (a Secret Service provider on a live session
@@ -226,24 +418,25 @@ type guidanceRow struct {
 // future remote backend fills in.
 //
 // A backend's table may hold at most three rows; see wizardGuidanceFirstScore.
-func wizardGuidance(backend string) []guidanceRow {
+func wizardGuidance(backend string, lookPath func(string) (string, error)) []guidanceRow {
 	switch backend {
 	case secrets.BackendKeyring:
 		return []guidanceRow{
 			{
 				id:       "keyring:daemon",
+				kind:     guidanceRun,
 				title:    "Start the Secret Service daemon",
-				subtitle: "Enter copies: systemctl --user start gnome-keyring-daemon",
-				cmd:      "systemctl --user start gnome-keyring-daemon",
+				subtitle: "Enter starts the daemon and retries setup",
 			},
+			installGuidance(lookPath),
 			{
-				id:       "keyring:install",
-				title:    "Install a Secret Service provider",
-				subtitle: "Enter copies: gnome-keyring — install with your package manager",
-				cmd:      "gnome-keyring",
-			},
-			{
-				id:       "keyring:dbus",
+				id:   "keyring:dbus",
+				kind: guidanceCopy,
+				// Stays a copy even though banshee could run it: the daemon's
+				// environment is not the user's shell environment, so the value
+				// banshee would read says nothing about why *their* session has
+				// no bus. The answer is only meaningful pasted into the shell
+				// the keyring client actually runs in.
 				title:    "Check the session bus",
 				subtitle: "Enter copies: echo $DBUS_SESSION_BUS_ADDRESS — empty means no session bus",
 				cmd:      "echo $DBUS_SESSION_BUS_ADDRESS",

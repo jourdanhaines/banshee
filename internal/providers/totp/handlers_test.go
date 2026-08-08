@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,6 +45,48 @@ type harness struct {
 	indexPath string
 	copied    chan string
 	notified  chan string
+	// ran records every argv the fix handler asked Deps.Run to execute, which is
+	// how this suite proves what banshee would have run without running it.
+	ran chan []string
+	// runOut and runErr are what the injected Run answers with. They are plain
+	// fields rather than channels because a test sets them before it dispatches
+	// and never touches them again — the `go` statement inside the handler
+	// orders that write ahead of the goroutine's read.
+	runOut []byte
+	runErr error
+}
+
+// recordRun builds the Deps.Run both harnesses inject: it reports the argv and
+// answers with the test's canned result, so no test in this package ever starts
+// a daemon, touches systemd or depends on what is installed on the machine.
+func (h *harness) recordRun() func(context.Context, []string) ([]byte, error) {
+	return func(_ context.Context, argv []string) ([]byte, error) {
+		h.ran <- append([]string(nil), argv...)
+		return h.runOut, h.runErr
+	}
+}
+
+// waitRan blocks until the fix handler runs a command and returns its argv.
+func (h *harness) waitRan(t *testing.T) []string {
+	t.Helper()
+	select {
+	case argv := <-h.ran:
+		return argv
+	case <-time.After(asyncWait):
+		t.Fatal("timed out waiting for the fix command to run")
+	}
+	return nil
+}
+
+// assertNothingRan fails if any command was executed, which is what pins a
+// rejected fix as rejected rather than merely unreported.
+func (h *harness) assertNothingRan(t *testing.T) {
+	t.Helper()
+	select {
+	case argv := <-h.ran:
+		t.Fatalf("handler ran %v; a fix it refused must execute nothing at all", argv)
+	default:
+	}
 }
 
 // newHarness registers the handlers over idx, resolving every backend name to
@@ -57,6 +100,7 @@ func newHarness(t *testing.T, idx Index, store *fakeStore) *harness {
 		indexPath: filepath.Join(t.TempDir(), "totp.json"),
 		copied:    make(chan string, 4),
 		notified:  make(chan string, 4),
+		ran:       make(chan []string, 4),
 	}
 	if err := SaveIndex(h.indexPath, idx); err != nil {
 		t.Fatalf("SaveIndex: %v", err)
@@ -72,6 +116,7 @@ func newHarness(t *testing.T, idx Index, store *fakeStore) *harness {
 		Copy:   func(text string) error { h.copied <- text; return nil },
 		Now:    h.clock.now,
 		Notify: func(msg string) { h.notified <- msg },
+		Run:    h.recordRun(),
 	})
 	return h
 }
@@ -548,6 +593,7 @@ func newWizardHarness(t *testing.T, idx Index, store *fakeStore) *wizardHarness 
 			indexPath: filepath.Join(t.TempDir(), "totp.json"),
 			copied:    make(chan string, 4),
 			notified:  make(chan string, 4),
+			ran:       make(chan []string, 4),
 		},
 		state:    &SetupState{},
 		reopened: make(chan string, 4),
@@ -566,6 +612,7 @@ func newWizardHarness(t *testing.T, idx Index, store *fakeStore) *wizardHarness 
 		Copy:   func(text string) error { h.copied <- text; return nil },
 		Now:    h.clock.now,
 		Notify: func(msg string) { h.notified <- msg },
+		Run:    h.recordRun(),
 		State:  h.state,
 		Reopen: func(q string) { h.reopened <- q },
 	})
@@ -1007,6 +1054,220 @@ func TestWizardResetHandler(t *testing.T) {
 		case msg := <-h.notified:
 			t.Fatalf("unwired reset notified %q, want it to do nothing at all", msg)
 		default:
+		}
+	})
+}
+
+// daemonFixArgv is the command the keyring's one fix row stands for. It is
+// written out here rather than read back out of wizardFixes so a test that
+// dispatches the row's Action proves the whole chain — row id, table lookup,
+// Deps.Run — lands on this exact argv.
+var daemonFixArgv = []string{"systemctl", "--user", "start", "gnome-keyring-daemon"}
+
+// keyringFixAction is the Action the wizard's "Start the Secret Service daemon"
+// row emits.
+func keyringFixAction() providers.Action {
+	return providers.Action{Kind: ActTOTPWizardFix, Argv: []string{"keyring", "keyring:daemon"}}
+}
+
+// TestWizardFixSuccessCompletesSetup is the headline of the fix row: pressing
+// Enter runs the repair and then finishes setup by itself. The user asked for a
+// working keyring, not for a command to be run, so a fix that worked must leave
+// the backend probed, persisted and the wizard gone — being handed a "now press
+// Retry" row would be banshee asking them to do its remaining half of the job.
+//
+// The store is deliberately non-blocking: the fix path detaches because it shells
+// out, not because of anything the backend does, and Dispatch must return
+// immediately either way.
+func TestWizardFixSuccessCompletesSetup(t *testing.T) {
+	store := newFakeStore("keyring")
+	h := newWizardHarness(t, Index{V: IndexVersion}, store)
+	h.state.Fail(wizardStaleBackend, errors.New("stale failure"))
+
+	if err := h.disp.Dispatch(keyringFixAction()); err != nil {
+		t.Fatalf("Dispatch returned %v, want the fix to run detached", err)
+	}
+	if argv := h.waitRan(t); !reflect.DeepEqual(argv, daemonFixArgv) {
+		t.Errorf("ran %v, want %v from the fix table", argv, daemonFixArgv)
+	}
+	if q := h.waitReopened(t); q != "totp" {
+		t.Errorf("reopened on %q, want the provider's trigger", q)
+	}
+	h.assertQuiet(t)
+
+	if backend, msg, ok := h.state.Snapshot(); ok {
+		t.Errorf("recorded failure = (%q, %q) after a fix that worked, want the wizard retired", backend, msg)
+	}
+	if got := h.index(t).Backend; got != "keyring" {
+		t.Errorf("persisted backend = %q, want the fix to have finished setup", got)
+	}
+	// The probe is the only thing that deletes a key, so a delete is proof the
+	// fix retried setup rather than just persisting a backend it never checked.
+	if got := store.deletedKeys(); !reflect.DeepEqual(got, []string{probeKey}) {
+		t.Errorf("deleted keys = %v, want the probe to have run and cleaned up", got)
+	}
+}
+
+// TestWizardFixCommandFails covers the repair that does not take. The user is
+// looking at the wizard, so the new diagnosis belongs in it — with the command's
+// own output, which is the sentence that points at the next row down ("Unit not
+// found" means install it) — and never as a toast behind the launcher.
+func TestWizardFixCommandFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		runOut  []byte
+		wantSub string
+	}{
+		{
+			name:    "the command's own complaint is carried",
+			runOut:  []byte("Failed to start gnome-keyring-daemon.service: Unit not found.\n"),
+			wantSub: "Unit not found",
+		},
+		{
+			name:    "a silent command still names the fix",
+			runOut:  nil,
+			wantSub: "could not start the Secret Service daemon",
+		},
+		{
+			// A daemon that dumps a log into stderr must not turn a result
+			// subtitle into a scrollback buffer.
+			name:    "a flood of output is bounded",
+			runOut:  []byte(strings.Repeat("boom ", 4000)),
+			wantSub: "boom",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore("keyring")
+			h := newWizardHarness(t, Index{V: IndexVersion}, store)
+			h.runOut = tt.runOut
+			h.runErr = errors.New("exit status 1")
+
+			if err := h.disp.Dispatch(keyringFixAction()); err != nil {
+				t.Fatalf("Dispatch returned %v, want the failure reported as wizard rows", err)
+			}
+			h.waitRan(t)
+			if q := h.waitReopened(t); q != "totp" {
+				t.Errorf("reopened on %q, want the provider's trigger", q)
+			}
+			h.assertQuiet(t)
+
+			backend, msg, ok := h.state.Snapshot()
+			if !ok || backend != "keyring" {
+				t.Fatalf("recorded failure = (%q, %v), want one against the keyring", backend, ok)
+			}
+			if !strings.Contains(msg, "could not start the Secret Service daemon") {
+				t.Errorf("recorded message %q does not head with the fix's own failMsg", msg)
+			}
+			if !strings.Contains(msg, "exit status 1") {
+				t.Errorf("recorded message %q drops the command's error", msg)
+			}
+			if !strings.Contains(msg, tt.wantSub) {
+				t.Errorf("recorded message %q does not mention %q", msg, tt.wantSub)
+			}
+			if len(msg) > 2*fixOutputLimit {
+				t.Errorf("recorded message is %d bytes, want the output folded in bounded by %d", len(msg), fixOutputLimit)
+			}
+			if got := h.index(t).Backend; got != "" {
+				t.Errorf("persisted backend = %q, want the index untouched by a failed fix", got)
+			}
+			if got := store.deletedKeys(); len(got) != 0 {
+				t.Errorf("probe ran (%v) after the fix failed; there was nothing to re-probe", got)
+			}
+		})
+	}
+}
+
+// TestWizardFixProbeStillFails is the fix that ran cleanly and changed nothing —
+// systemctl reports success, the Secret Service is still refusing writes. The
+// user must get the backend's own fresh diagnosis, not a silent success, and the
+// index must stay untouched so the setup rows still come back.
+func TestWizardFixProbeStillFails(t *testing.T) {
+	store := newFakeStore("keyring")
+	store.setErr = errors.New("collection is locked")
+	h := newWizardHarness(t, Index{V: IndexVersion}, store)
+
+	if err := h.disp.Dispatch(keyringFixAction()); err != nil {
+		t.Fatalf("Dispatch returned %v, want the fix to run detached", err)
+	}
+	h.waitRan(t)
+	if q := h.waitReopened(t); q != "totp" {
+		t.Errorf("reopened on %q, want the provider's trigger", q)
+	}
+	h.assertQuiet(t)
+
+	backend, msg, ok := h.state.Snapshot()
+	if !ok || backend != "keyring" {
+		t.Fatalf("recorded failure = (%q, %v), want one against the keyring", backend, ok)
+	}
+	if !strings.Contains(msg, "not usable") {
+		t.Errorf("recorded message %q does not carry the probe's own diagnosis", msg)
+	}
+	if got := h.index(t).Backend; got != "" {
+		t.Errorf("persisted backend = %q, want the index untouched by a failed probe", got)
+	}
+}
+
+// TestWizardFixRejections is the security gate in test form: the Action carries a
+// lookup key, so anything that is not a pair this package published must be
+// refused synchronously and execute nothing. A forged Result — a rogue plugin, a
+// hand-built IPC payload — gets an error, never a process.
+func TestWizardFixRejections(t *testing.T) {
+	tests := []struct {
+		name string
+		argv []string
+	}{
+		{name: "no argv at all", argv: nil},
+		{name: "a backend with no fix id", argv: []string{"keyring"}},
+		{name: "an id nobody defined", argv: []string{"keyring", "keyring:rm-rf"}},
+		{name: "an id belonging to another backend", argv: []string{"plaintext", "keyring:daemon"}},
+		{name: "blank halves", argv: []string{"  ", "  "}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newWizardHarness(t, Index{V: IndexVersion}, newFakeStore("keyring"))
+			err := h.disp.Dispatch(providers.Action{Kind: ActTOTPWizardFix, Argv: tt.argv})
+			if err == nil {
+				t.Fatal("Dispatch succeeded, want a synchronous error")
+			}
+			if !strings.Contains(err.Error(), "totp-wizard-fix") {
+				t.Errorf("error %q does not name the action kind that refused it", err)
+			}
+			h.assertNothingRan(t)
+			h.assertNotReopened(t)
+		})
+	}
+}
+
+// TestWizardFixUnwired keeps the promise Deps.State and Deps.Reopen make to a
+// front-end that wires neither: the wizard is off, so both outcomes of a fix have
+// to reach the user as a toast rather than vanishing.
+func TestWizardFixUnwired(t *testing.T) {
+	t.Run("the command fails", func(t *testing.T) {
+		h := newHarness(t, Index{V: IndexVersion}, newFakeStore("keyring"))
+		h.runErr = errors.New("exit status 1")
+
+		if err := h.disp.Dispatch(keyringFixAction()); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		h.waitRan(t)
+		if msg := h.waitNotified(t); !strings.Contains(msg, "could not start the Secret Service daemon") {
+			t.Errorf("notification %q does not carry the fix's diagnosis", msg)
+		}
+	})
+	t.Run("the command works", func(t *testing.T) {
+		store := newFakeStore("keyring")
+		h := newHarness(t, Index{V: IndexVersion}, store)
+
+		if err := h.disp.Dispatch(keyringFixAction()); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		h.waitRan(t)
+		if msg := h.waitNotified(t); !strings.Contains(msg, "will be stored") {
+			t.Errorf("notification %q does not confirm the completed setup", msg)
+		}
+		if got := h.index(t).Backend; got != "keyring" {
+			t.Errorf("persisted backend = %q, want the fix to have finished setup", got)
 		}
 	})
 }

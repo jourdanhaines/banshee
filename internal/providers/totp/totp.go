@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -96,6 +97,18 @@ func WithQueryTimeout(d time.Duration) Option {
 	}
 }
 
+// WithLookPath overrides how the wizard probes PATH for a program. The setup
+// wizard uses it to decide whether it can offer a real package-manager install
+// command, so a test injects a fake to pin those rows on any machine —
+// production wants the real exec.LookPath.
+func WithLookPath(lookPath func(name string) (string, error)) Option {
+	return func(p *Provider) {
+		if lookPath != nil {
+			p.lookPath = lookPath
+		}
+	}
+}
+
 // Provider turns the TOTP index into launcher rows showing live codes.
 //
 // It holds no state between queries: the index is a small local file and the
@@ -111,12 +124,15 @@ type Provider struct {
 	// setup is the shared backend-failure state, injected by WithSetupState.
 	// Nil means no wizard: the provider renders its ordinary rows.
 	setup *SetupState
+	// lookPath probes PATH on the wizard's behalf; see WithLookPath.
+	lookPath func(name string) (string, error)
 }
 
 var _ providers.Provider = (*Provider)(nil)
 
 // New returns the TOTP provider scoring entry names with score. Defaults:
-// the real index path, secrets.Open and time.Now — all overridable by Option.
+// the real index path, secrets.Open, time.Now and exec.LookPath — all
+// overridable by Option.
 func New(score Scorer, opts ...Option) *Provider {
 	p := &Provider{
 		score:        score,
@@ -124,6 +140,7 @@ func New(score Scorer, opts ...Option) *Provider {
 		open:         secrets.Open,
 		now:          time.Now,
 		queryTimeout: queryTimeout,
+		lookPath:     exec.LookPath,
 	}
 	for _, o := range opts {
 		o(p)
@@ -185,7 +202,7 @@ func (p *Provider) Query(ctx context.Context, q string) ([]providers.Result, err
 	// with no SetupState wired up needs no check of its own.
 	if triggered {
 		if backend, message, ok := p.setup.Snapshot(); ok && wizardApplies(idx.Backend, backend) {
-			return wizardResults(backend, message, idx.Backend == ""), nil
+			return wizardResults(backend, message, idx.Backend == "", p.lookPath), nil
 		}
 	}
 	if idx.Backend == "" {

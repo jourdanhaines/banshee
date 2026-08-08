@@ -167,7 +167,7 @@ instead of a list until you pick one:
 
 | Row | What it does |
 |---|---|
-| **Use OS keyring (local)** | Stores seeds in the system Secret Service (GNOME Keyring, KWallet, …). Recommended. banshee writes and deletes a throwaway test secret before committing to it, so a keyring that quietly refuses writes is caught now rather than after you have added a code. |
+| **Use OS keyring (local)** | Stores seeds in the system Secret Service (GNOME Keyring, KWallet, …). Recommended. banshee writes and deletes a throwaway test secret before committing to it, so a keyring that quietly refuses writes is caught now rather than after you have added a code. If the probe does fail, the in-launcher wizard can start the Secret Service daemon itself and retry setup automatically, or — when it recognizes your package manager (`pacman`, `apt`, `dnf`, `zypper`) — open a terminal to install `gnome-keyring` with it, so sudo prompts there and banshee never sees the password. On any other distro that row copies the package name for you to install yourself. |
 | **Use plaintext file (local, not recommended)** | Stores seeds unencrypted in `~/.local/share/banshee/secrets/plaintext.json` (0600, in a 0700 directory). Anything running as you can read them. |
 | **Nimbus (cloud — coming soon)** | Not available yet; picking it says so and changes nothing. |
 

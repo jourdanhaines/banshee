@@ -572,6 +572,10 @@ func TestQueryWizard(t *testing.T) {
 				WithOpenStore(func(string) (secrets.Store, error) { return store, nil }),
 				WithNow(fixedNow),
 				WithSetupState(tt.state),
+				// Without this the wizard's install row would probe the real
+				// PATH and render differently on a machine with pacman than in a
+				// bare container.
+				WithLookPath(noPackageManager),
 			)
 			res, err := p.Query(context.Background(), tt.query)
 			if err != nil {
@@ -597,6 +601,7 @@ func TestQueryWizardClearedMidLife(t *testing.T) {
 		WithOpenStore(func(string) (secrets.Store, error) { return stockedStore(), nil }),
 		WithNow(fixedNow),
 		WithSetupState(state),
+		WithLookPath(noPackageManager),
 	)
 	res, err := p.Query(context.Background(), "totp")
 	if err != nil {

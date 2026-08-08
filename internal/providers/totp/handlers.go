@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -34,7 +35,21 @@ const (
 	copyTimeout  = 15 * time.Second
 	addTimeout   = 15 * time.Second
 	probeTimeout = 15 * time.Second
+	// fixTimeout bounds the repair command a wizard fix row runs, and nothing
+	// else. The setup that follows a successful fix takes a fresh probeTimeout
+	// rather than the remainder of this one: a repair that succeeded after
+	// fourteen seconds would otherwise hand the re-probe a second, report the
+	// keyring it had just fixed as broken, and abandon the probe's write with no
+	// matching delete behind it. The fix's auto-retry is a retry, so it gets
+	// exactly the budget pressing Retry gets.
+	fixTimeout = 15 * time.Second
 )
+
+// fixOutputLimit caps how much of a failed fix command's output is folded into
+// the message the wizard shows. The output lands in a single-line result
+// subtitle, so this is a diagnosis — the first thing systemctl or the daemon
+// complained about — and not a pager.
+const fixOutputLimit = 200
 
 // probeKey is written and immediately deleted to prove a backend works before
 // it is persisted as the user's choice. It lives in this package's key
@@ -51,7 +66,8 @@ const reopenQuery = "totp"
 
 // Deps are the handlers' collaborators. Every one is injectable because the
 // handlers are the only part of this package that touches the clock, the
-// clipboard, the user's disk and a real vault — the tests replace all four.
+// clipboard, the user's disk, a real vault and a real subprocess — the tests
+// replace all five.
 type Deps struct {
 	// IndexPath is the totp.json to read and write.
 	IndexPath string
@@ -62,6 +78,17 @@ type Deps struct {
 	Copy func(text string) error
 	// Now supplies the instant a code is computed for. Defaults to time.Now.
 	Now func() time.Time
+	// Run executes a wizard-fix command to completion and returns whatever it
+	// printed. Defaults to exec.CommandContext plus CombinedOutput.
+	//
+	// argv never comes from an Action: the handler resolves it out of
+	// wizardFixes, so the only commands reachable here are the ones this
+	// package wrote down. The output is never shown on its own and never
+	// logged — it is only ever folded, truncated, into the error message the
+	// wizard re-renders with, because a fix command's stderr is the one place
+	// that says *why* it refused. Tests inject a recorder instead, which is what
+	// keeps this suite from starting daemons on the developer's machine.
+	Run func(ctx context.Context, argv []string) ([]byte, error)
 	// Notify reports an asynchronous failure to the user. The launcher window
 	// is already hidden by the time a detached copy fails, so a returned error
 	// would go nowhere; this is the only channel back. Defaults to the log.
@@ -102,7 +129,43 @@ func (d Deps) withDefaults() Deps {
 	if d.Copy == nil {
 		d.Copy = func(string) error { return errors.New("totp: no clipboard configured") }
 	}
+	if d.Run == nil {
+		d.Run = func(ctx context.Context, argv []string) ([]byte, error) {
+			if len(argv) == 0 {
+				return nil, errors.New("totp: no command to run")
+			}
+			// No shell: argv comes from wizardFixes already split, and running
+			// it through one would only add a layer that could word-split or
+			// expand something.
+			return exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+		}
+	}
 	return d
+}
+
+// trimmedOutput renders a fix command's output as the tail of an error message:
+// empty for a command that said nothing, and otherwise ": " plus at most
+// fixOutputLimit bytes of it.
+//
+// Every run of whitespace is collapsed to a single space first, interior
+// newlines included, because the destination is a single-line ellipsized result
+// subtitle: a second line would not be rendered at all, so leaving it in would
+// spend the byte budget on text the user cannot read and push the part that
+// matters past the limit. Collapsing also folds systemd's usual two-line
+// "it failed / see journalctl" pair into one readable sentence.
+//
+// The truncation is by bytes and then re-validated as UTF-8, because a cut in
+// the middle of a multi-byte rune would put a replacement character into a
+// string that ends up in daemon-lifetime state and on screen.
+func trimmedOutput(out []byte) string {
+	s := strings.Join(strings.Fields(string(out)), " ")
+	if s == "" {
+		return ""
+	}
+	if len(s) > fixOutputLimit {
+		s = strings.ToValidUTF8(s[:fixOutputLimit], "") + "…"
+	}
+	return ": " + s
 }
 
 // RegisterHandlers binds every TOTP action kind on d, wired to the real
@@ -123,6 +186,7 @@ func RegisterHandlersWith(dispatch *launch.Dispatcher, deps Deps) {
 	dispatch.Register(ActTOTPAdd, deps.handleAdd)
 	dispatch.Register(ActTOTPSetup, deps.handleSetup)
 	dispatch.Register(ActTOTPWizardReset, deps.handleWizardReset)
+	dispatch.Register(ActTOTPWizardFix, deps.handleWizardFix)
 }
 
 // backendUnusable reports whether err means the secrets backend itself is
@@ -410,6 +474,135 @@ func (d Deps) handleAdd(a providers.Action) error {
 	return recordEntry()
 }
 
+// probeBackend proves a backend can actually hold a seed, by writing a
+// throwaway value and deleting it again. probe false is the backends that need
+// no proving (a plaintext file is a plain disk write), and makes this a no-op so
+// every caller can run the same sequence.
+//
+// The two failures are worded apart because they are different diagnoses: a
+// refused write is an unusable keyring, while a write that lands and will not
+// come back out is a keyring that would silently accumulate every seed the user
+// ever adds.
+func (d Deps) probeBackend(ctx context.Context, store secrets.Store, probe bool) error {
+	if !probe {
+		return nil
+	}
+	if err := store.Set(ctx, probeKey, "probe", secrets.Credential{}); err != nil {
+		return fmt.Errorf("the OS keyring is not usable: %w", err)
+	}
+	if err := store.Delete(ctx, probeKey, secrets.Credential{}); err != nil {
+		return fmt.Errorf("the OS keyring stored a test secret but would not remove it: %w", err)
+	}
+	return nil
+}
+
+// persistBackend records store as this machine's choice, re-reading the index
+// first so a concurrent add is not clobbered by a stale copy.
+//
+// It is kept apart from probeBackend because the two fail for entirely different
+// reasons: a failed probe is the definition of an unusable backend and belongs
+// in the wizard, while a failed index write is a disk problem that retrying a
+// keyring probe would never fix.
+func (d Deps) persistBackend(store secrets.Store) error {
+	idx, err := LoadIndex(d.IndexPath)
+	if err != nil {
+		return err
+	}
+	idx.Backend = store.Name()
+	return SaveIndex(d.IndexPath, idx)
+}
+
+// finishSetup is the asynchronous tail every path that ends in "this backend is
+// now the one" shares: probe it, retire any recorded failure, persist the
+// choice, and put the user back in the launcher. It is one function because
+// handleSetup's detached branch and handleWizardFix's auto-retry must agree
+// exactly on that order and on what each failure is reported as — a wizard fix
+// that worked has to retire the wizard the same way a manual retry does.
+//
+// It never spawns a goroutine: both callers already run detached and own their
+// own context, and a function that sometimes detached would make "has this
+// finished" unanswerable at the call site.
+func (d Deps) finishSetup(ctx context.Context, backend string, store secrets.Store, probe bool) {
+	if err := d.probeBackend(ctx, store, probe); err != nil {
+		// Every probe failure routes to the wizard, without consulting
+		// backendUnusable: the probe's whole job is to answer "can this backend
+		// hold seeds", so a probe that could not finish — for any reason,
+		// including an unlock prompt nobody answered — has answered no, and
+		// retrying is the next step either way.
+		d.reportUnusable(backend, err)
+		return
+	}
+	// Cleared here, before the index write, for the reason handleCopy and
+	// handleAdd clear before their own bookkeeping: the backend has just
+	// answered for itself, so a recorded failure against it is disproved now.
+	// Clearing after persist instead would leave a wizard on screen diagnosing a
+	// keyring that demonstrably works, every time the disk refused the write.
+	d.State.Clear()
+	if err := d.persistBackend(store); err != nil {
+		d.Notify(err.Error())
+		return
+	}
+	if d.Reopen != nil {
+		// Reopening is the confirmation: the user lands on the normal entry/add
+		// rows, which both prove the backend took and offer the obvious next
+		// step. A toast on top would say it twice.
+		d.Reopen(reopenQuery)
+		return
+	}
+	d.Notify(fmt.Sprintf("TOTP secrets will be stored in the %s backend", store.Name()))
+}
+
+// handleWizardFix runs one canned repair from wizardFixes and, when it works,
+// finishes setup so the wizard retires itself — the user pressed Enter on
+// "start the daemon", and being handed a "now press Retry" row afterwards would
+// be the launcher asking them to do its remaining half of the job.
+//
+// The command is looked up, never taken from the Action: Argv is [backend,
+// fixID] and anything the table does not name is refused outright, so a forged
+// Result cannot turn this kind into arbitrary execution. The lookup and the
+// store open are synchronous so a bad key is a real dispatcher error; the run
+// itself is detached because a systemd call takes as long as it takes and the
+// handler runs on the GTK main loop (see handleCopy).
+//
+// A command that fails routes to the wizard rather than a toast, carrying its
+// own output: the user is looking at the wizard, and "could not start the Secret
+// Service daemon: Unit not found" is the sentence that tells them the next row
+// down — install it — is the one they want.
+func (d Deps) handleWizardFix(a providers.Action) error {
+	if len(a.Argv) < 2 {
+		return errors.New("totp-wizard-fix: expected a backend and a fix id")
+	}
+	backend := strings.TrimSpace(a.Argv[0])
+	id := strings.TrimSpace(a.Argv[1])
+	fix, ok := lookupWizardFix(backend, id)
+	if !ok {
+		return fmt.Errorf("totp-wizard-fix: no fix %q for the %s backend", id, backend)
+	}
+	store, err := d.OpenStore(backend)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		fixCtx, cancelFix := context.WithTimeout(context.Background(), fixTimeout)
+		out, err := d.Run(fixCtx, fix.argv)
+		cancelFix()
+		if err != nil {
+			d.reportUnusable(backend, fmt.Errorf("%s: %w%s", fix.failMsg, err, trimmedOutput(out)))
+			return
+		}
+		// A budget of its own, not what the fix left over: see fixTimeout. It is
+		// deliberately the same probeTimeout handleSetup gives the manual Retry
+		// row, because finishSetup's contract is that the two paths behave
+		// identically — a slow repair that worked must not be reported as a
+		// broken backend.
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		defer cancel()
+		d.finishSetup(ctx, backend, store, backend == secrets.BackendKeyring)
+	}()
+	return nil
+}
+
 // handleSetup records which secrets backend holds this machine's seeds.
 //
 // A keyring is probed with a throwaway write and delete before being
@@ -436,70 +629,19 @@ func (d Deps) handleSetup(a providers.Action) error {
 		return err
 	}
 	probe := backend == secrets.BackendKeyring
-	// The probe and the persist are separate because they fail for entirely
-	// different reasons: a failed probe is the definition of an unusable backend
-	// and belongs in the wizard, while a failed index write is a disk problem
-	// that retrying a keyring probe would never fix.
-	runProbe := func(ctx context.Context) error {
-		if !probe {
-			return nil
-		}
-		if err := store.Set(ctx, probeKey, "probe", secrets.Credential{}); err != nil {
-			return fmt.Errorf("the OS keyring is not usable: %w", err)
-		}
-		if err := store.Delete(ctx, probeKey, secrets.Credential{}); err != nil {
-			return fmt.Errorf("the OS keyring stored a test secret but would not remove it: %w", err)
-		}
-		return nil
-	}
-	persist := func() error {
-		idx, err := LoadIndex(d.IndexPath)
-		if err != nil {
-			return err
-		}
-		idx.Backend = store.Name()
-		return SaveIndex(d.IndexPath, idx)
-	}
 
 	if store.Blocking() {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 			defer cancel()
-			if err := runProbe(ctx); err != nil {
-				// Every probe failure routes to the wizard, without consulting
-				// backendUnusable: the probe's whole job is to answer "can this
-				// backend hold seeds", so a probe that could not finish — for
-				// any reason, including an unlock prompt nobody answered — has
-				// answered no, and retrying is the next step either way.
-				d.reportUnusable(backend, err)
-				return
-			}
-			// Cleared here, before the index write, for the reason handleCopy and
-			// handleAdd clear before their own bookkeeping: the backend has just
-			// answered for itself, so a recorded failure against it is disproved
-			// now. Clearing after persist instead would leave a wizard on screen
-			// diagnosing a keyring that demonstrably works, every time the disk
-			// refused the write.
-			d.State.Clear()
-			if err := persist(); err != nil {
-				d.Notify(err.Error())
-				return
-			}
-			if d.Reopen != nil {
-				// Reopening is the confirmation: the user lands on the normal
-				// entry/add rows, which both prove the backend took and offer
-				// the obvious next step. A toast on top would say it twice.
-				d.Reopen(reopenQuery)
-				return
-			}
-			d.Notify(fmt.Sprintf("TOTP secrets will be stored in the %s backend", store.Name()))
+			d.finishSetup(ctx, backend, store, probe)
 		}()
 		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
-	if err := runProbe(ctx); err != nil {
+	if err := d.probeBackend(ctx, store, probe); err != nil {
 		return err
 	}
 	// The synchronous path is the wizard's retry row too, for a backend whose
@@ -509,7 +651,7 @@ func (d Deps) handleSetup(a providers.Action) error {
 	// successful copy or add — the one escape it offers would not work. A failed
 	// persist below still reaches the user, as the dispatcher's own error.
 	d.State.Clear()
-	if err := persist(); err != nil {
+	if err := d.persistBackend(store); err != nil {
 		return err
 	}
 	if d.Reopen != nil {
