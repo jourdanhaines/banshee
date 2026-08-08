@@ -43,6 +43,14 @@ func newFormView(res providers.Result) *formView {
 		entry.AddCSSClass("form-field")
 		entry.SetPlaceholderText(f.Placeholder)
 		entry.SetHExpand(true)
+		if f.Secret {
+			// A plain masked Entry, not gtk.PasswordEntry: it keeps
+			// v.entries uniform (values/markError index straight into it)
+			// and inherits the shared .form-field styling.
+			entry.SetVisibility(false)
+			entry.SetInputPurpose(gtk.InputPurposePassword)
+			entry.AddCSSClass("secret")
+		}
 		// Typing clears a validation error the moment the field changes.
 		e := entry
 		entry.ConnectChanged(func() { e.RemoveCSSClass("error") })

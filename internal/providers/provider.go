@@ -6,11 +6,17 @@
 // This file is a frozen Phase-0 contract. Changing any exported type here
 // requires touching every provider — prefer adding new optional fields over
 // modifying existing ones.
+//
+// Migration 2026-08b: CatTOTP, FormField.Secret and Result.Expiry added for
+// the built-in TOTP service — additive, zero value inert. A provider that
+// never sets them behaves exactly as before, and a UI that ignores them
+// renders every field unmasked and every row static.
 package providers
 
 import (
 	"context"
 	"syscall"
+	"time"
 )
 
 // Category orders results in the launcher list. Lower value = higher priority
@@ -24,6 +30,7 @@ const (
 	CatConnector Category = 20 // "Open <repo> on <Connector>"
 	CatDirectory Category = 30 // "Open <repo> directory"
 	CatCalc      Category = 35 // inline calculator answer
+	CatTOTP      Category = 37 // inline TOTP code rows; sits above CatApp so the MinScore threshold never drops them
 	CatApp       Category = 40 // installed applications
 	CatKill      Category = 50 // "Kill <proc>"
 	CatPlugin    Category = 60 // exec-plugin results
@@ -90,6 +97,10 @@ type FormField struct {
 	Placeholder string
 	// Required refuses submission while the trimmed value is empty.
 	Required bool
+	// Secret renders the input masked (no echoed characters), for passwords
+	// and TOTP seeds typed in front of a screen. It is a display property
+	// only: the submitted value still travels verbatim in Action.Values.
+	Secret bool
 }
 
 // Form makes a result open a secondary input view inside the launcher
@@ -125,6 +136,12 @@ type Result struct {
 	// Build's action on submit. AltAction still dispatches directly (or does
 	// nothing when nil), bypassing the form.
 	Form *Form
+	// Expiry, when non-zero, marks the row's displayed content as valid only
+	// until that instant — a rotating TOTP code, say. The UI ticks a
+	// countdown suffix onto the subtitle once a second and re-runs the
+	// current query once the instant passes, so the row's text refreshes
+	// without the user touching the keyboard. Zero means a static row.
+	Expiry time.Time
 }
 
 // Provider is a source of results. Query must honor ctx cancellation: the

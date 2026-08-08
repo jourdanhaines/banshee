@@ -169,6 +169,11 @@ type WireFormField struct {
 	Label       string `json:"label"`
 	Placeholder string `json:"placeholder"`
 	Required    bool   `json:"required"`
+	// Secret masks the input in the launcher. Degradation is symmetric: a
+	// host too old to know the field ignores it and renders the input
+	// unmasked, and a plugin too old to set it leaves it false — either way
+	// the submitted value is unchanged.
+	Secret bool `json:"secret"`
 }
 
 // toResult converts a wire result into a launcher result, filling icon and
@@ -213,6 +218,7 @@ func wireFormTo(f WireForm, pluginID, resultID string) *providers.Form {
 			Label:       wf.Label,
 			Placeholder: wf.Placeholder,
 			Required:    wf.Required,
+			Secret:      wf.Secret,
 		}
 	}
 	return &providers.Form{

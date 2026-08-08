@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,6 +88,62 @@ func TestWireFormToResult(t *testing.T) {
 			t.Errorf("Form = %+v, want nil", res.Form)
 		}
 	})
+}
+
+// TestWireFormFieldSecret pins the "secret" flag's trip across the wire: a
+// plugin that sets it gets a masked field, and one that predates the flag
+// keeps the unmasked default (symmetric degradation).
+func TestWireFormFieldSecret(t *testing.T) {
+	m := connectors.Manifest{ID: "vault", Dir: "/plugins/vault"}
+
+	tests := []struct {
+		name string
+		json string
+		want []bool // Secret per field, in order
+	}{
+		{
+			name: `"secret": true survives the conversion`,
+			json: `{"id":"r","title":"R","form":{"title":"Unlock","fields":[{"key":"pass","label":"Password","secret":true}]}}`,
+			want: []bool{true},
+		},
+		{
+			name: "absent secret stays false",
+			json: `{"id":"r","title":"R","form":{"title":"Unlock","fields":[{"key":"user","label":"User"}]}}`,
+			want: []bool{false},
+		},
+		{
+			name: `explicit "secret": false stays false`,
+			json: `{"id":"r","title":"R","form":{"title":"Unlock","fields":[{"key":"user","label":"User","secret":false}]}}`,
+			want: []bool{false},
+		},
+		{
+			name: "mixed fields keep their own flag",
+			json: `{"id":"r","title":"R","form":{"title":"Login","fields":[{"key":"user","label":"User"},{"key":"pass","label":"Password","secret":true},{"key":"note","label":"Note"}]}}`,
+			want: []bool{false, true, false},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var w WireResult
+			if err := json.Unmarshal([]byte(tt.json), &w); err != nil {
+				t.Fatal(err)
+			}
+			res := w.toResult(m)
+			if res.Form == nil {
+				t.Fatal("Form is nil")
+			}
+			if len(res.Form.Fields) != len(tt.want) {
+				t.Fatalf("got %d fields, want %d", len(res.Form.Fields), len(tt.want))
+			}
+			for i, want := range tt.want {
+				if got := res.Form.Fields[i].Secret; got != want {
+					t.Errorf("field %d (%s) Secret = %v, want %v",
+						i, res.Form.Fields[i].Key, got, want)
+				}
+			}
+		})
+	}
 }
 
 func TestExecPluginSubmit(t *testing.T) {
