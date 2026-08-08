@@ -54,6 +54,17 @@ type harness struct {
 	// orders that write ahead of the goroutine's read.
 	runOut []byte
 	runErr error
+	// ranInput records every RunInput call the fix handler makes: the argv and
+	// exactly what was piped to the command's stdin, so a test can prove the
+	// password went to stdin and nowhere else. Answers with runOut/runErr like
+	// recordRun does.
+	ranInput chan runInputCall
+}
+
+// runInputCall is one recorded Deps.RunInput invocation.
+type runInputCall struct {
+	argv  []string
+	input string
 }
 
 // recordRun builds the Deps.Run both harnesses inject: it reports the argv and
@@ -64,6 +75,26 @@ func (h *harness) recordRun() func(context.Context, []string) ([]byte, error) {
 		h.ran <- append([]string(nil), argv...)
 		return h.runOut, h.runErr
 	}
+}
+
+// recordRunInput is recordRun for the stdin-taking fixes.
+func (h *harness) recordRunInput() func(context.Context, []string, string) ([]byte, error) {
+	return func(_ context.Context, argv []string, input string) ([]byte, error) {
+		h.ranInput <- runInputCall{argv: append([]string(nil), argv...), input: input}
+		return h.runOut, h.runErr
+	}
+}
+
+// waitRanInput blocks until the fix handler runs a stdin-taking command.
+func (h *harness) waitRanInput(t *testing.T) runInputCall {
+	t.Helper()
+	select {
+	case call := <-h.ranInput:
+		return call
+	case <-time.After(asyncWait):
+		t.Fatal("timed out waiting for the stdin fix command to run")
+	}
+	return runInputCall{}
 }
 
 // waitRan blocks until the fix handler runs a command and returns its argv.
@@ -101,6 +132,7 @@ func newHarness(t *testing.T, idx Index, store *fakeStore) *harness {
 		copied:    make(chan string, 4),
 		notified:  make(chan string, 4),
 		ran:       make(chan []string, 4),
+		ranInput:  make(chan runInputCall, 4),
 	}
 	if err := SaveIndex(h.indexPath, idx); err != nil {
 		t.Fatalf("SaveIndex: %v", err)
@@ -113,10 +145,11 @@ func newHarness(t *testing.T, idx Index, store *fakeStore) *harness {
 			}
 			return store, nil
 		},
-		Copy:   func(text string) error { h.copied <- text; return nil },
-		Now:    h.clock.now,
-		Notify: func(msg string) { h.notified <- msg },
-		Run:    h.recordRun(),
+		Copy:     func(text string) error { h.copied <- text; return nil },
+		Now:      h.clock.now,
+		Notify:   func(msg string) { h.notified <- msg },
+		Run:      h.recordRun(),
+		RunInput: h.recordRunInput(),
 	})
 	return h
 }
@@ -594,6 +627,7 @@ func newWizardHarness(t *testing.T, idx Index, store *fakeStore) *wizardHarness 
 			copied:    make(chan string, 4),
 			notified:  make(chan string, 4),
 			ran:       make(chan []string, 4),
+			ranInput:  make(chan runInputCall, 4),
 		},
 		state:    &SetupState{},
 		reopened: make(chan string, 4),
@@ -609,12 +643,13 @@ func newWizardHarness(t *testing.T, idx Index, store *fakeStore) *wizardHarness 
 			}
 			return store, nil
 		},
-		Copy:   func(text string) error { h.copied <- text; return nil },
-		Now:    h.clock.now,
-		Notify: func(msg string) { h.notified <- msg },
-		Run:    h.recordRun(),
-		State:  h.state,
-		Reopen: func(q string) { h.reopened <- q },
+		Copy:     func(text string) error { h.copied <- text; return nil },
+		Now:      h.clock.now,
+		Notify:   func(msg string) { h.notified <- msg },
+		Run:      h.recordRun(),
+		RunInput: h.recordRunInput(),
+		State:    h.state,
+		Reopen:   func(q string) { h.reopened <- q },
 	})
 	return h
 }
@@ -1068,6 +1103,102 @@ var daemonFixArgv = []string{"systemctl", "--user", "start", "gnome-keyring-daem
 // row emits.
 func keyringFixAction() providers.Action {
 	return providers.Action{Kind: ActTOTPWizardFix, Argv: []string{"keyring", "keyring:daemon"}}
+}
+
+// createFixArgv is the create-keyring fix's command, written out for the same
+// reason as daemonFixArgv.
+var createFixArgv = []string{"gnome-keyring-daemon", "--unlock"}
+
+// createFixAction is what the create-keyring form's Build emits: the fix key
+// plus the submitted password riding Values.
+func createFixAction(password string) providers.Action {
+	return providers.Action{
+		Kind:   ActTOTPWizardFix,
+		Argv:   []string{"keyring", "keyring:create"},
+		Values: map[string]string{"password": password},
+	}
+}
+
+// TestWizardFixStdinPipesPassword proves the create-keyring fix sends the
+// submitted password to the command's standard input — never argv — and then
+// finishes setup exactly like any other fix that worked.
+func TestWizardFixStdinPipesPassword(t *testing.T) {
+	store := newFakeStore("keyring")
+	h := newWizardHarness(t, Index{V: IndexVersion}, store)
+	h.state.Fail("keyring", errors.New("no default collection"))
+
+	if err := h.disp.Dispatch(createFixAction("hunter2")); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	call := h.waitRanInput(t)
+	if !reflect.DeepEqual(call.argv, createFixArgv) {
+		t.Errorf("ran %v, want %v from the fix table", call.argv, createFixArgv)
+	}
+	if call.input != "hunter2" {
+		t.Errorf("stdin = %q, want the submitted password", call.input)
+	}
+	for _, arg := range call.argv {
+		if strings.Contains(arg, "hunter2") {
+			t.Fatalf("password appeared on argv: %v", call.argv)
+		}
+	}
+	if q := h.waitReopened(t); q != "totp" {
+		t.Errorf("reopened on %q, want the provider's trigger", q)
+	}
+	h.assertQuiet(t)
+	if _, _, ok := h.state.Snapshot(); ok {
+		t.Error("failure still recorded after a create that worked")
+	}
+	if got := h.index(t).Backend; got != "keyring" {
+		t.Errorf("persisted backend = %q, want setup finished", got)
+	}
+}
+
+// TestWizardFixStdinPasswordVariants pins the edge shapes of the piped
+// password: absent Values means the empty password (a legitimate blank-keyring
+// choice), and a failure must never leak the password into the recorded
+// diagnosis the wizard renders on screen.
+func TestWizardFixStdinPasswordVariants(t *testing.T) {
+	t.Run("nil Values pipes the empty password", func(t *testing.T) {
+		store := newFakeStore("keyring")
+		h := newWizardHarness(t, Index{V: IndexVersion}, store)
+		action := createFixAction("")
+		action.Values = nil
+		if err := h.disp.Dispatch(action); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		if call := h.waitRanInput(t); call.input != "" {
+			t.Errorf("stdin = %q, want empty", call.input)
+		}
+		h.waitReopened(t)
+	})
+
+	t.Run("a failed create never leaks the password", func(t *testing.T) {
+		store := newFakeStore("keyring")
+		h := newWizardHarness(t, Index{V: IndexVersion}, store)
+		h.runErr = errors.New("exit status 1")
+		h.runOut = []byte("couldn't unlock the login keyring")
+		if err := h.disp.Dispatch(createFixAction("hunter2")); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		h.waitRanInput(t)
+		if q := h.waitReopened(t); q != "totp" {
+			t.Errorf("reopened on %q", q)
+		}
+		backend, msg, ok := h.state.Snapshot()
+		if !ok || backend != "keyring" {
+			t.Fatalf("Snapshot = (%q, %q, %v), want a keyring failure recorded", backend, msg, ok)
+		}
+		if !strings.Contains(msg, "could not create or unlock the login keyring") {
+			t.Errorf("message %q lacks the fix's failMsg", msg)
+		}
+		if strings.Contains(msg, "hunter2") {
+			t.Fatalf("recorded diagnosis contains the password: %q", msg)
+		}
+		if got := h.index(t).Backend; got != "" {
+			t.Errorf("persisted backend = %q, want untouched after a failed create", got)
+		}
+	})
 }
 
 // TestWizardFixSuccessCompletesSetup is the headline of the fix row: pressing

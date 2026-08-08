@@ -89,6 +89,15 @@ type Deps struct {
 	// that says *why* it refused. Tests inject a recorder instead, which is what
 	// keeps this suite from starting daemons on the developer's machine.
 	Run func(ctx context.Context, argv []string) ([]byte, error)
+	// RunInput is Run for the fixes that read a secret from standard input
+	// (wizardFix.stdin): the submitted keyring password is written to the
+	// command's stdin and nowhere else — never argv, never the environment,
+	// never a log line — the same rule the clipboard and the secret stores
+	// follow. The command's output is folded into error messages exactly like
+	// Run's; the fixes that use this (gnome-keyring-daemon --unlock) do not
+	// echo their stdin, and nothing user-typed may be added to a fix whose
+	// output can. Defaults to exec.CommandContext with a string reader.
+	RunInput func(ctx context.Context, argv []string, input string) ([]byte, error)
 	// Notify reports an asynchronous failure to the user. The launcher window
 	// is already hidden by the time a detached copy fails, so a returned error
 	// would go nowhere; this is the only channel back. Defaults to the log.
@@ -138,6 +147,16 @@ func (d Deps) withDefaults() Deps {
 			// it through one would only add a layer that could word-split or
 			// expand something.
 			return exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+		}
+	}
+	if d.RunInput == nil {
+		d.RunInput = func(ctx context.Context, argv []string, input string) ([]byte, error) {
+			if len(argv) == 0 {
+				return nil, errors.New("totp: no command to run")
+			}
+			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+			cmd.Stdin = strings.NewReader(input)
+			return cmd.CombinedOutput()
 		}
 	}
 	return d
@@ -582,10 +601,24 @@ func (d Deps) handleWizardFix(a providers.Action) error {
 	if err != nil {
 		return err
 	}
+	// The password a stdin fix pipes to the command. Reading it here keeps the
+	// Action out of the goroutine below; a fix without stdin ignores Values
+	// entirely, and a nil Values map reads as the empty password — a
+	// legitimate keyring choice, not an error.
+	var input string
+	if fix.stdin && a.Values != nil {
+		input = a.Values[wizardPasswordKey]
+	}
 
 	go func() {
 		fixCtx, cancelFix := context.WithTimeout(context.Background(), fixTimeout)
-		out, err := d.Run(fixCtx, fix.argv)
+		var out []byte
+		var err error
+		if fix.stdin {
+			out, err = d.RunInput(fixCtx, fix.argv, input)
+		} else {
+			out, err = d.Run(fixCtx, fix.argv)
+		}
 		cancelFix()
 		if err != nil {
 			d.reportUnusable(backend, fmt.Errorf("%s: %w%s", fix.failMsg, err, trimmedOutput(out)))

@@ -1,6 +1,7 @@
 package totp
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -31,12 +32,12 @@ const ActTOTPWizardFix = "totp-wizard-fix"
 // may reshuffle.
 const (
 	// wizardStatusScore pins the header (what actually failed) first.
-	wizardStatusScore = 860
+	wizardStatusScore = 870
 	// wizardGuidanceFirstScore is the first fix row's score; each subsequent
-	// row drops by wizardGuidanceStep. There is room for exactly three rows
+	// row drops by wizardGuidanceStep. There is room for exactly four rows
 	// between it and wizardRetryScore, which is the cap on a backend's
 	// wizardGuidance table.
-	wizardGuidanceFirstScore = 850
+	wizardGuidanceFirstScore = 860
 	wizardGuidanceStep       = 10
 	// wizardRetryScore keeps "try again" under the fixes: retrying before
 	// reading them just reproduces the failure.
@@ -54,10 +55,22 @@ const (
 	iconWizardStatus   = "dialog-warning-symbolic"
 	iconWizardCopy     = "edit-copy-symbolic"
 	iconWizardRun      = "media-playback-start-symbolic"
+	iconWizardPassword = "dialog-password-symbolic"
 	iconWizardTerminal = "utilities-terminal-symbolic"
 	iconWizardRetry    = "view-refresh-symbolic"
 	iconWizardBack     = "go-previous-symbolic"
 )
+
+// wizardPasswordKey is the form-field key a password-collecting fix row submits
+// under, and the Action.Values key the fix handler pipes to the command's
+// stdin. One constant because the two sides never meet in the type system.
+const wizardPasswordKey = "password"
+
+// errPasswordMismatch rejects a create-keyring form whose two password fields
+// differ. By the time Build runs the launcher has already hidden the window, so
+// this surfaces as a notification rather than an in-form error — the same
+// accepted limitation the add form documents.
+var errPasswordMismatch = errors.New("the two passwords do not match")
 
 // SetupState records the most recent "this backend is not usable" failure so
 // the provider can render a setup wizard instead of rows the user cannot use.
@@ -189,23 +202,32 @@ func wizardResults(backend, message string, firstTime bool, lookPath func(string
 		Action: providers.Action{Kind: ActTOTPSetup, Argv: []string{backend}},
 	})
 	for i, g := range guidance {
-		out = append(out, providers.Result{
+		row := providers.Result{
 			ID:       "totp:wizard:" + g.id,
 			Title:    g.title,
 			Subtitle: g.subtitle,
 			Icon:     providers.Icon{ThemeName: g.icon()},
 			Category: providers.CatTOTP,
 			Score:    wizardGuidanceFirstScore - i*wizardGuidanceStep,
-			// Three tiers, by what the fix costs the user to authorize:
-			// an unprivileged, user-level repair (starting a systemd --user
-			// unit) banshee runs itself, because making the user paste a
-			// command banshee could have run is busywork; a privileged one
-			// (installing a package) is handed to the user's terminal, where
-			// sudo can prompt interactively and banshee never sees the
-			// password; a pure diagnostic is copied, because the answer only
-			// means anything in the user's own shell.
-			Action: g.action(backend),
-		})
+		}
+		// Three tiers, by what the fix costs the user to authorize:
+		// an unprivileged, user-level repair (starting a systemd --user
+		// unit) banshee runs itself, because making the user paste a
+		// command banshee could have run is busywork; a privileged one
+		// (installing a package) is handed to the user's terminal, where
+		// sudo can prompt interactively and banshee never sees the
+		// password; a pure diagnostic is copied, because the answer only
+		// means anything in the user's own shell. A repair that needs a
+		// secret from the user (creating the login keyring) opens a masked
+		// form first — the form replaces the primary activation, so such a
+		// row carries no direct Action at all and nothing can dispatch it
+		// without the password step.
+		if form := g.formFor(backend); form != nil {
+			row.Form = form
+		} else {
+			row.Action = g.action(backend)
+		}
+		out = append(out, row)
 	}
 	out = append(out, providers.Result{
 		ID:       "totp:wizard:retry",
@@ -262,6 +284,12 @@ type guidanceRow struct {
 	cmd string
 	// argv is the command a guidanceTerminal row hands to the terminal.
 	argv []string
+	// passwordForm makes a guidanceRun row collect a password first: instead
+	// of dispatching immediately, the row opens a masked in-launcher form and
+	// the submitted password rides Action.Values to the fix handler, which
+	// pipes it to the command's stdin (never argv). Only meaningful on
+	// guidanceRun rows whose wizardFixes entry sets stdin.
+	passwordForm bool
 }
 
 // action builds the Action this row dispatches.
@@ -290,13 +318,63 @@ func (g guidanceRow) action(backend string) providers.Action {
 // icon returns the theme icon matching the row's kind, so the list telegraphs
 // what Enter will do before the user presses it.
 func (g guidanceRow) icon() string {
-	switch g.kind {
-	case guidanceRun:
+	switch {
+	case g.passwordForm:
+		return iconWizardPassword
+	case g.kind == guidanceRun:
 		return iconWizardRun
-	case guidanceTerminal:
+	case g.kind == guidanceTerminal:
 		return iconWizardTerminal
 	default:
 		return iconWizardCopy
+	}
+}
+
+// formFor builds the masked password form a passwordForm row opens instead of
+// dispatching. Nil for every other row, which is what keeps them dispatching
+// directly.
+//
+// Two fields, neither required: an empty password is a legitimate choice
+// (gnome-keyring stores such a keyring unencrypted, which is what an autologin
+// user who never types a password may actually want), so the only validation
+// is that the two entries agree. The launcher trims surrounding whitespace
+// from every submitted value — an existing form-contract behavior — so a
+// password that begins or ends with a space cannot be set here; that is the
+// same trade every consumer of the form system makes.
+//
+// The submitted Values map carries only the password, under wizardPasswordKey:
+// the confirmation is a UI-side check and has no business travelling further.
+func (g guidanceRow) formFor(backend string) *providers.Form {
+	if !g.passwordForm {
+		return nil
+	}
+	id := g.id
+	return &providers.Form{
+		Title: g.title,
+		Fields: []providers.FormField{
+			{
+				Key:         wizardPasswordKey,
+				Label:       "Keyring password",
+				Placeholder: "leave empty to store the keyring unencrypted",
+				Secret:      true,
+			},
+			{
+				Key:         "confirm",
+				Label:       "Repeat password",
+				Placeholder: "same password again",
+				Secret:      true,
+			},
+		},
+		Build: func(values map[string]string) (providers.Action, error) {
+			if values[wizardPasswordKey] != values["confirm"] {
+				return providers.Action{}, errPasswordMismatch
+			}
+			return providers.Action{
+				Kind:   ActTOTPWizardFix,
+				Argv:   []string{backend, id},
+				Values: map[string]string{wizardPasswordKey: values[wizardPasswordKey]},
+			}, nil
+		},
 	}
 }
 
@@ -310,6 +388,13 @@ type wizardFix struct {
 	// the user reads "could not start the Secret Service daemon: …" rather than
 	// a bare exit status.
 	failMsg string
+	// stdin makes the handler pipe the submitted password (Action.Values under
+	// wizardPasswordKey) to the command's standard input. It is the one
+	// exception to "user-level and non-interactive": the command still runs
+	// without a terminal, but it reads exactly one secret from stdin — the
+	// same channel the clipboard and the secret stores use, because a password
+	// on argv would sit in the process list.
+	stdin bool
 }
 
 // wizardFixes is the complete set of commands ActTOTPWizardFix may run, keyed
@@ -326,6 +411,17 @@ var wizardFixes = map[string]map[string]wizardFix{
 		"keyring:daemon": {
 			argv:    []string{"systemctl", "--user", "start", "gnome-keyring-daemon"},
 			failMsg: "could not start the Secret Service daemon",
+		},
+		// --unlock reads the password from stdin and creates the login keyring
+		// when none exists — the "daemon running, zero collections" state a
+		// machine lands in when PAM never provisioned one (autologin, greetd,
+		// tty logins). Correctness does not hinge on this command's exit
+		// status: the setup probe that follows is what actually proves the
+		// keyring took the password and can store secrets.
+		"keyring:create": {
+			argv:    []string{"gnome-keyring-daemon", "--unlock"},
+			failMsg: "could not create or unlock the login keyring",
+			stdin:   true,
 		},
 	},
 }
@@ -417,7 +513,7 @@ func terminalWrap(cmd string) []string {
 // stays on screen and is one keypress from being retried. This is the seam a
 // future remote backend fills in.
 //
-// A backend's table may hold at most three rows; see wizardGuidanceFirstScore.
+// A backend's table may hold at most four rows; see wizardGuidanceFirstScore.
 func wizardGuidance(backend string, lookPath func(string) (string, error)) []guidanceRow {
 	switch backend {
 	case secrets.BackendKeyring:
@@ -427,6 +523,18 @@ func wizardGuidance(backend string, lookPath func(string) (string, error)) []gui
 				kind:     guidanceRun,
 				title:    "Start the Secret Service daemon",
 				subtitle: "Enter starts the daemon and retries setup",
+			},
+			{
+				// The daemon can be up with no keyring behind it: PAM creates
+				// the login collection at login, so autologin/greetd/tty
+				// sessions never get one and every write fails against an
+				// empty Secret Service. Creating (or unlocking) it needs a
+				// password, hence the masked form instead of a bare run row.
+				id:           "keyring:create",
+				kind:         guidanceRun,
+				passwordForm: true,
+				title:        "Create or unlock the login keyring",
+				subtitle:     "Enter asks for a keyring password, then retries setup",
 			},
 			installGuidance(lookPath),
 			{

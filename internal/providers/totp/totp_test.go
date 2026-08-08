@@ -505,6 +505,7 @@ func TestQueryWizard(t *testing.T) {
 	wizardRows := []string{
 		"totp:wizard:status",
 		"totp:wizard:keyring:daemon",
+		"totp:wizard:keyring:create",
 		"totp:wizard:keyring:install",
 		"totp:wizard:keyring:dbus",
 		"totp:wizard:retry",

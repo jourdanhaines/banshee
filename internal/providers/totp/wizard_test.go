@@ -184,7 +184,7 @@ func keyringWizardRows(message string) []providers.Result {
 			Subtitle: message,
 			Icon:     providers.Icon{ThemeName: "dialog-warning-symbolic"},
 			Category: providers.CatTOTP,
-			Score:    860,
+			Score:    870,
 			Action:   providers.Action{Kind: ActTOTPSetup, Argv: []string{"keyring"}},
 		},
 		{
@@ -193,8 +193,20 @@ func keyringWizardRows(message string) []providers.Result {
 			Subtitle: "Enter starts the daemon and retries setup",
 			Icon:     providers.Icon{ThemeName: "media-playback-start-symbolic"},
 			Category: providers.CatTOTP,
-			Score:    850,
+			Score:    860,
 			Action:   providers.Action{Kind: ActTOTPWizardFix, Argv: []string{"keyring", "keyring:daemon"}},
+		},
+		{
+			// Form is nil here because reflect.DeepEqual cannot compare Build
+			// closures; the comparing test asserts the real Form separately
+			// and nils it before the whole-slice comparison. The form's own
+			// contract is pinned by TestWizardCreateKeyringForm.
+			ID:       "totp:wizard:keyring:create",
+			Title:    "Create or unlock the login keyring",
+			Subtitle: "Enter asks for a keyring password, then retries setup",
+			Icon:     providers.Icon{ThemeName: "dialog-password-symbolic"},
+			Category: providers.CatTOTP,
+			Score:    850,
 		},
 		{
 			ID:       "totp:wizard:keyring:install",
@@ -251,15 +263,102 @@ func TestWizardResultsKeyring(t *testing.T) {
 		{
 			name:      "an established backend does not",
 			firstTime: false,
-			want:      keyringWizardRows(message)[:5],
+			want:      keyringWizardRows(message)[:6],
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := wizardResults(secrets.BackendKeyring, message, tt.firstTime, noPackageManager)
+			// The create row's Build closure defeats DeepEqual; prove the form
+			// is there, then compare everything else against the fixture.
+			for i := range got {
+				if got[i].ID != "totp:wizard:keyring:create" {
+					continue
+				}
+				if got[i].Form == nil {
+					t.Fatal("create row has no Form")
+				}
+				got[i].Form = nil
+			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("wizardResults mismatch\n got: %+v\nwant: %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWizardCreateKeyringForm pins the create-keyring form: its fields, the
+// password-confirmation check, and that the built action carries the password
+// under wizardPasswordKey and nothing else — the confirmation must not travel.
+func TestWizardCreateKeyringForm(t *testing.T) {
+	rows := wizardResults(secrets.BackendKeyring, "boom", true, noPackageManager)
+	var form *providers.Form
+	for _, r := range rows {
+		if r.ID == "totp:wizard:keyring:create" {
+			form = r.Form
+		}
+	}
+	if form == nil {
+		t.Fatal("no create row form")
+	}
+	if form.Title != "Create or unlock the login keyring" {
+		t.Errorf("Form.Title = %q", form.Title)
+	}
+	wantFields := []providers.FormField{
+		{Key: "password", Label: "Keyring password", Placeholder: "leave empty to store the keyring unencrypted", Secret: true},
+		{Key: "confirm", Label: "Repeat password", Placeholder: "same password again", Secret: true},
+	}
+	if !reflect.DeepEqual(form.Fields, wantFields) {
+		t.Errorf("Form.Fields = %+v, want %+v", form.Fields, wantFields)
+	}
+
+	tests := []struct {
+		name     string
+		values   map[string]string
+		wantErr  bool
+		wantVals map[string]string
+	}{
+		{
+			name:     "matching passwords build the fix action",
+			values:   map[string]string{"password": "hunter2", "confirm": "hunter2"},
+			wantVals: map[string]string{"password": "hunter2"},
+		},
+		{
+			name:     "empty on both sides is a legitimate blank password",
+			values:   map[string]string{"password": "", "confirm": ""},
+			wantVals: map[string]string{"password": ""},
+		},
+		{
+			name:    "mismatched passwords are refused",
+			values:  map[string]string{"password": "hunter2", "confirm": "hunter3"},
+			wantErr: true,
+		},
+		{
+			name:    "one side empty is a mismatch, not a blank password",
+			values:  map[string]string{"password": "hunter2", "confirm": ""},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := form.Build(tt.values)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Build succeeded, want a mismatch error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Build error: %v", err)
+			}
+			want := providers.Action{
+				Kind:   ActTOTPWizardFix,
+				Argv:   []string{"keyring", "keyring:create"},
+				Values: tt.wantVals,
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("Build() = %+v, want %+v", got, want)
 			}
 		})
 	}
@@ -332,16 +431,18 @@ func TestWizardResultsInvariants(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if n := len(wizardGuidance(tt.backend, tt.lookPath)); n > 3 {
-				t.Errorf("wizardGuidance(%q) returned %d rows, want at most 3", tt.backend, n)
+			if n := len(wizardGuidance(tt.backend, tt.lookPath)); n > 4 {
+				t.Errorf("wizardGuidance(%q) returned %d rows, want at most 4", tt.backend, n)
 			}
 			got := wizardResults(tt.backend, "boom", tt.firstTime, tt.lookPath)
 			if len(got) == 0 {
 				t.Fatal("no wizard rows")
 			}
 			for i, r := range got {
-				if r.Action.Kind == "" {
-					t.Errorf("row %d (%s) has an empty Action.Kind", i, r.ID)
+				// A row must be activatable one way or the other: a dispatchable
+				// Action, or a Form that replaces the primary activation.
+				if r.Action.Kind == "" && r.Form == nil {
+					t.Errorf("row %d (%s) has neither an Action nor a Form", i, r.ID)
 				}
 				if r.Category != providers.CatTOTP {
 					t.Errorf("row %d (%s) category = %d, want CatTOTP", i, r.ID, r.Category)
