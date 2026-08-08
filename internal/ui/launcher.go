@@ -101,7 +101,43 @@ type Launcher struct {
 	// row-activated (which GTK fires without event state) can honor
 	// shift-click as the alternate action the way Shift+Enter does.
 	shiftClick bool
+
+	// liveRows are the subtitle labels of the rows whose Result carried a
+	// non-zero Expiry. Rebuilt from scratch by every setResults, because the
+	// labels they point at are destroyed with the old rows.
+	liveRows []liveRow
+
+	// tickerOn reports whether a live tick is scheduled, and doubles as the
+	// stop signal: a GLib timeout source that has already been queued still
+	// fires after Hide, so tick self-stops by reading this instead of the
+	// launcher removing the source underneath it.
+	tickerOn bool
+
+	// tickerGen distinguishes ticker sources across stop/start cycles. A tick
+	// from a superseded generation returns false and dies without touching the
+	// live one's state, which is what keeps a Hide-then-Show from ending up
+	// with two sources updating the same labels.
+	tickerGen uint64
+
+	// requeryPending suppresses further boundary requeries until results land.
+	// Without it a provider that takes longer than a tick to answer (a locked
+	// keyring, say) would be cancelled and restarted once a second and never
+	// finish. setResults clears it.
+	requeryPending bool
 }
+
+// liveRow binds one rendered subtitle label to the data the ticker needs to
+// recompute its text: the provider's own subtitle and the instant the row's
+// content stops being valid.
+type liveRow struct {
+	label  *gtk.Label
+	base   string
+	expiry time.Time
+}
+
+// liveTick is how often live rows re-render their countdown. One second is the
+// coarsest interval at which a seconds-resolution countdown still looks smooth.
+const liveTick = time.Second
 
 // NewLauncher builds the launcher window for app and wires the query pipeline
 // to agg and the activation path to disp. It must be called on the GTK main
@@ -296,6 +332,10 @@ func (l *Launcher) Hide() {
 	l.resetToResults()
 	l.debounce.Cancel()
 	l.cancelQuery()
+	// A hidden launcher has nothing to animate; the pending timeout source
+	// notices the flag on its next fire and stops itself.
+	l.tickerOn = false
+	l.requeryPending = false
 	l.win.SetVisible(false)
 	l.visible = false
 }
@@ -527,6 +567,11 @@ func (l *Launcher) setResults(res []providers.Result) {
 		res = res[:max]
 	}
 	l.results = res
+	l.requeryPending = false
+
+	// The previous generation's labels are about to be destroyed with their
+	// rows; newRow re-registers the live ones as it rebuilds.
+	l.liveRows = nil
 
 	l.syncing = true
 	l.list.RemoveAll()
@@ -535,8 +580,68 @@ func (l *Launcher) setResults(res []providers.Result) {
 	}
 	l.syncing = false
 
+	if AnyLive(res) {
+		l.startTicker()
+	} else {
+		l.tickerOn = false
+	}
+
 	l.sel.Reset(len(res))
 	l.applySelection()
+}
+
+// startTicker schedules the 1 Hz live-row refresh, unless one is already
+// running. Idempotent: setResults calls it on every generation that contains a
+// live row, and the ticker must not multiply.
+func (l *Launcher) startTicker() {
+	if l.tickerOn {
+		return
+	}
+	l.tickerOn = true
+	l.tickerGen++
+	gen := l.tickerGen
+	glib.TimeoutAdd(uint(liveTick.Milliseconds()), func() bool { return l.tick(gen) })
+}
+
+// tick refreshes every live row's countdown and, when a row's content has
+// actually expired, re-runs the current query once so the provider can hand
+// back fresh content. It runs on the GTK main loop (GLib timeout) and returns
+// false to unschedule itself.
+//
+// The split is deliberate. Re-running the whole query every second to move a
+// countdown would rescan /proc and poke every exec plugin thirty times per
+// TOTP rotation; updating labels in place alone cannot work either, because
+// the code text behind the countdown is only obtainable from the provider,
+// which holds the secret. So: cheap in-place text on every tick, one real
+// query at the expiry boundary.
+//
+// Time comes from time.Now on every tick rather than a decrementing counter,
+// so a suspended machine or a delayed source shows the true remaining time
+// instead of accumulated drift.
+func (l *Launcher) tick(gen uint64) bool {
+	// A superseded source must die quietly: startTicker has already handed
+	// ownership of tickerOn to a newer generation.
+	if gen != l.tickerGen {
+		return false
+	}
+	if !l.tickerOn || !l.visible {
+		l.tickerOn = false
+		return false
+	}
+
+	now := time.Now()
+	for _, lr := range l.liveRows {
+		if lr.label == nil {
+			continue
+		}
+		lr.label.SetText(LiveSubtitle(lr.base, lr.expiry, now))
+	}
+
+	if !l.requeryPending && AnyExpired(l.results, now) && l.entry != nil {
+		l.requeryPending = true
+		l.runQuery(l.entry.Text())
+	}
+	return true
 }
 
 // MoveSelection shifts the highlighted row by delta and keeps it on screen.
@@ -595,6 +700,21 @@ func (l *Launcher) scrollToRow(row *gtk.ListBoxRow) {
 		return
 	}
 	glib.IdleAdd(clamp)
+}
+
+// Notify surfaces msg the same way a failed activation does. It exists for
+// action handlers that finish *after* Dispatch returned — a TOTP copy that
+// waits on a secret store, say — and therefore have no other way to tell the
+// user they failed; boot hands one of these to such handlers as a callback.
+//
+// Like every other Launcher method it must be called on the GTK main thread,
+// so a handler running off it wraps the call in glib.IdleAdd. Safe on a nil
+// receiver, so boot can build the callback before the window exists.
+func (l *Launcher) Notify(msg string) {
+	if l == nil {
+		return
+	}
+	l.notify(msg)
 }
 
 // notify logs an error and surfaces it as a desktop notification, because by

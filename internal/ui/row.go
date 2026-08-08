@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
@@ -39,9 +40,16 @@ func (l *Launcher) newRow(r providers.Result) *gtk.ListBoxRow {
 	title.AddCSSClass("result-title")
 	text.Append(title)
 
-	if r.Subtitle != "" {
-		sub := newEllipsizedLabel(r.Subtitle)
+	// A live row always gets a subtitle label even with an empty Subtitle:
+	// the countdown lives there, and the ticker can only rewrite a label that
+	// already exists — adding one mid-tick would resize the row under the
+	// user's cursor.
+	if r.Subtitle != "" || !r.Expiry.IsZero() {
+		sub := newEllipsizedLabel(LiveSubtitle(r.Subtitle, r.Expiry, time.Now()))
 		sub.AddCSSClass("result-subtitle")
+		if !r.Expiry.IsZero() {
+			l.liveRows = append(l.liveRows, liveRow{label: sub, base: r.Subtitle, expiry: r.Expiry})
+		}
 		text.Append(sub)
 	}
 	box.Append(text)
