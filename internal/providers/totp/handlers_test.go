@@ -2,6 +2,7 @@ package totp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -127,6 +128,34 @@ func (h *harness) assertNothingRan(t *testing.T) {
 // store.
 func newHarness(t *testing.T, idx Index, store *fakeStore) *harness {
 	t.Helper()
+	return newHarnessOpen(t, idx, store, func(string) (secrets.Store, error) {
+		if store == nil {
+			return nil, errors.New("no store")
+		}
+		return store, nil
+	})
+}
+
+// newMultiHarness is newHarness with one vault per backend name, for the
+// multi-manager tests: it is the only way to prove which manager a copy read
+// from or an add wrote to, since a single shared store would answer for all of
+// them. An unconfigured name fails the open.
+func newMultiHarness(t *testing.T, idx Index, stores map[string]*fakeStore) *harness {
+	t.Helper()
+	return newHarnessOpen(t, idx, nil, func(name string) (secrets.Store, error) {
+		s, ok := stores[name]
+		if !ok {
+			return nil, fmt.Errorf("no store for %q", name)
+		}
+		return s, nil
+	})
+}
+
+// newHarnessOpen is the shared body of the two above: store is only kept for the
+// tests that reach for h.store, while open is what the handlers actually resolve
+// backend names through.
+func newHarnessOpen(t *testing.T, idx Index, store *fakeStore, open func(string) (secrets.Store, error)) *harness {
+	t.Helper()
 	h := &harness{
 		disp:      launch.NewDispatcher(),
 		store:     store,
@@ -142,17 +171,12 @@ func newHarness(t *testing.T, idx Index, store *fakeStore) *harness {
 	}
 	RegisterHandlersWith(h.disp, Deps{
 		IndexPath: h.indexPath,
-		OpenStore: func(name string) (secrets.Store, error) {
-			if store == nil {
-				return nil, errors.New("no store")
-			}
-			return store, nil
-		},
-		Copy:     func(text string) error { h.copied <- text; return nil },
-		Now:      h.clock.now,
-		Notify:   func(msg string) { h.notified <- msg },
-		Run:      h.recordRun(),
-		RunInput: h.recordRunInput(),
+		OpenStore: open,
+		Copy:      func(text string) error { h.copied <- text; return nil },
+		Now:       h.clock.now,
+		Notify:    func(msg string) { h.notified <- msg },
+		Run:       h.recordRun(),
+		RunInput:  h.recordRunInput(),
 	})
 	return h
 }
@@ -452,6 +476,73 @@ func TestAddSynchronousRejections(t *testing.T) {
 	}
 }
 
+// gatedStore is a blocking store whose Set parks until the test releases it.
+// It exists for one scenario nothing else can stage: a detached add sitting
+// inside store.Set — on a real keyring, an unlock prompt nobody has answered
+// yet — while the rest of banshee rewrites totp.json underneath it.
+type gatedStore struct {
+	*fakeStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedStore) Set(ctx context.Context, key, value string, cred secrets.Credential) error {
+	close(g.entered)
+	<-g.release
+	return g.fakeStore.Set(ctx, key, value, cred)
+}
+
+// TestAddDetachedRereadsIndexAfterBlockingWrite is the data-loss guard on the
+// detached add path: the index it saves must be the one on disk now, not the
+// snapshot it loaded before the write parked. SaveIndex merges only the keys
+// this build does not own — an omitempty field at its zero value *deletes* its
+// key — so writing the stale snapshot back would strip a secrets manager
+// configured meanwhile out of "backends" (silently unrouting every entry that
+// names it) and drop any entry added meanwhile from the list while its seed
+// stayed in the vault.
+func TestAddDetachedRereadsIndexAfterBlockingWrite(t *testing.T) {
+	inner := newFakeStore("keyring")
+	inner.blocking = true
+	gate := &gatedStore{fakeStore: inner, entered: make(chan struct{}), release: make(chan struct{})}
+	h := newHarnessOpen(t, Index{V: IndexVersion, Backend: "keyring"}, inner,
+		func(string) (secrets.Store, error) { return gate, nil })
+
+	values := map[string]string{"name": "github", "secret": testSeed}
+	if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPAdd, Values: values}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	select {
+	case <-gate.entered:
+	case <-time.After(asyncWait):
+		t.Fatal("timed out waiting for the detached add to reach the backend write")
+	}
+
+	// What the user does while the unlock prompt is up: configures a second
+	// manager (appendBackend) and adds a code to it.
+	meanwhile := h.index(t)
+	meanwhile.AddBackend("plaintext")
+	if err := meanwhile.Add(Entry{Name: "gitlab", Backend: "plaintext"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := SaveIndex(h.indexPath, meanwhile); err != nil {
+		t.Fatalf("SaveIndex: %v", err)
+	}
+	close(gate.release)
+
+	if msg := h.waitNotified(t); !strings.Contains(msg, "github") {
+		t.Errorf("notification %q does not name the entry", msg)
+	}
+	got := h.index(t)
+	if want := []string{"keyring", "plaintext"}; !reflect.DeepEqual(got.Configured(), want) {
+		t.Errorf("configured managers = %v, want %v", got.Configured(), want)
+	}
+	for _, name := range []string{"github", "gitlab"} {
+		if _, ok := got.Find(name); !ok {
+			t.Errorf("index lost the %q entry", name)
+		}
+	}
+}
+
 // TestAddDetachesForBlockingBackend pins the rule that keeps the daemon
 // responsive: a backend that can wait on something outside this process — a
 // keyring unlock prompt, a network round trip — is never written from the GTK
@@ -621,6 +712,30 @@ type wizardHarness struct {
 // attached, resolving every backend name to store.
 func newWizardHarness(t *testing.T, idx Index, store *fakeStore) *wizardHarness {
 	t.Helper()
+	return newWizardHarnessOpen(t, idx, store, func(string) (secrets.Store, error) {
+		if store == nil {
+			return nil, errors.New("no store")
+		}
+		return store, nil
+	})
+}
+
+// newMultiWizardHarness is newWizardHarness with one vault per backend name; see
+// newMultiHarness for why the multi-manager tests need it.
+func newMultiWizardHarness(t *testing.T, idx Index, stores map[string]*fakeStore) *wizardHarness {
+	t.Helper()
+	return newWizardHarnessOpen(t, idx, nil, func(name string) (secrets.Store, error) {
+		s, ok := stores[name]
+		if !ok {
+			return nil, fmt.Errorf("no store for %q", name)
+		}
+		return s, nil
+	})
+}
+
+// newWizardHarnessOpen is the shared body of the two above.
+func newWizardHarnessOpen(t *testing.T, idx Index, store *fakeStore, open func(string) (secrets.Store, error)) *wizardHarness {
+	t.Helper()
 	h := &wizardHarness{
 		harness: &harness{
 			disp:      launch.NewDispatcher(),
@@ -640,19 +755,14 @@ func newWizardHarness(t *testing.T, idx Index, store *fakeStore) *wizardHarness 
 	}
 	RegisterHandlersWith(h.disp, Deps{
 		IndexPath: h.indexPath,
-		OpenStore: func(name string) (secrets.Store, error) {
-			if store == nil {
-				return nil, errors.New("no store")
-			}
-			return store, nil
-		},
-		Copy:     func(text string) error { h.copied <- text; return nil },
-		Now:      h.clock.now,
-		Notify:   func(msg string) { h.notified <- msg },
-		Run:      h.recordRun(),
-		RunInput: h.recordRunInput(),
-		State:    h.state,
-		Reopen:   func(q string) { h.reopened <- q },
+		OpenStore: open,
+		Copy:      func(text string) error { h.copied <- text; return nil },
+		Now:       h.clock.now,
+		Notify:    func(msg string) { h.notified <- msg },
+		Run:       h.recordRun(),
+		RunInput:  h.recordRunInput(),
+		State:     h.state,
+		Reopen:    func(q string) { h.reopened <- q },
 	})
 	return h
 }
@@ -730,7 +840,7 @@ func TestSetupFailureOpensWizard(t *testing.T) {
 	}
 	h.assertQuiet(t)
 
-	backend, msg, ok := h.state.Snapshot()
+	backend, msg, _, ok := h.state.Snapshot()
 	if !ok {
 		t.Fatal("no failure recorded, so the next query would render the setup rows again")
 	}
@@ -761,7 +871,7 @@ func TestSetupSuccessClearsAndReopens(t *testing.T) {
 		t.Errorf("reopened on %q, want the provider's trigger", q)
 	}
 	h.assertQuiet(t)
-	if _, _, ok := h.state.Snapshot(); ok {
+	if _, _, _, ok := h.state.Snapshot(); ok {
 		t.Error("a completed setup left a failure recorded, so the wizard would still be on screen")
 	}
 	if got := h.index(t).Backend; got != "keyring" {
@@ -788,7 +898,7 @@ func TestSetupClearsStateWhenPersistFails(t *testing.T) {
 		t.Error("the index failure was reported nowhere")
 	}
 	h.assertNotReopened(t)
-	if backend, msg, ok := h.state.Snapshot(); ok {
+	if backend, msg, _, ok := h.state.Snapshot(); ok {
 		t.Errorf("recorded failure = (%q, %q) after a successful probe, want it cleared", backend, msg)
 	}
 }
@@ -809,7 +919,7 @@ func TestSetupRetryRetiresWizardForNonBlockingBackend(t *testing.T) {
 	if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPSetup, Argv: []string{"plaintext"}}); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	if _, _, ok := h.state.Snapshot(); ok {
+	if _, _, _, ok := h.state.Snapshot(); ok {
 		t.Error("retry left the failure recorded, so the same wizard would come straight back")
 	}
 	if q := h.waitReopened(t); q != "totp" {
@@ -837,7 +947,7 @@ func TestAddRoutesUnusableBackendForNonBlockingBackend(t *testing.T) {
 		t.Errorf("reopened on %q, want the provider's trigger", q)
 	}
 	h.assertQuiet(t)
-	backend, msg, ok := h.state.Snapshot()
+	backend, msg, _, ok := h.state.Snapshot()
 	if !ok || backend != "plaintext" {
 		t.Fatalf("recorded failure = (%q, %v), want the index's backend", backend, ok)
 	}
@@ -852,33 +962,42 @@ func TestAddRoutesUnusableBackendForNonBlockingBackend(t *testing.T) {
 // TestUnusableFailureFallsBackToToast covers the two ways the wizard cannot
 // happen even though a backend failed. Reopening anyway would steal focus onto
 // rows that do not mention the failure, leaving it reported nowhere.
+//
+// Both cases go through the copy path deliberately. A failure raised by an
+// explicit setup attempt is reported as one (reportSetupFailure) and renders the
+// wizard whether or not the manager is configured — configuring it is precisely
+// what failed, see TestSetupSecondManagerOpensWizard — so "the provider would
+// discard this" now only arises for ordinary use of a manager the index no
+// longer lists.
 func TestUnusableFailureFallsBackToToast(t *testing.T) {
 	tests := []struct {
 		name string
-		// idx is the index as it stands when the detached probe finally fails.
+		// idx is the index as it stands when the detached read finally fails.
 		idx Index
 		// wireState wires the failure record; false is the front-end the Deps
 		// godoc describes, which keeps the toast behavior.
 		wireState bool
 	}{
 		{
-			// The user grew tired of waiting on the wedged keyring, reopened the
-			// launcher and picked the plaintext backend, which persisted while the
-			// probe was still running.
-			name:      "the index already names another backend",
-			idx:       Index{V: IndexVersion, Backend: "plaintext"},
+			// The entry names a manager the user has since configured away by
+			// hand, so a diagnosis against it describes nothing they would be
+			// using and the provider's gate would drop it.
+			name: "the failing manager is not configured any more",
+			idx: Index{V: IndexVersion, Backend: "plaintext", Entries: []Entry{
+				{Name: "github", Backend: "keyring"},
+			}},
 			wireState: true,
 		},
 		{
-			name: "no failure record is wired",
-			idx:  Index{V: IndexVersion},
+			name:      "no failure record is wired",
+			idx:       twoEntryIndex(),
+			wireState: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newFakeStore("keyring")
-			store.blocking = true
-			store.setErr = errors.New("collection is locked")
+			store.getErr = errors.New("collection is locked")
 			h := newWizardHarness(t, tt.idx, store)
 			if !tt.wireState {
 				// Register replaces by kind, so this is the same harness with one
@@ -892,17 +1011,54 @@ func TestUnusableFailureFallsBackToToast(t *testing.T) {
 				})
 			}
 
-			if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPSetup, Argv: []string{"keyring"}}); err != nil {
-				t.Fatalf("Dispatch returned %v, want the probe to run detached", err)
+			if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPCopy, Argv: []string{"github"}}); err != nil {
+				t.Fatalf("Dispatch returned %v, want the read to run detached", err)
 			}
-			if msg := h.waitNotified(t); !strings.Contains(msg, "not usable") {
-				t.Errorf("notification %q does not carry the probe's diagnosis", msg)
+			if msg := h.waitNotified(t); !strings.Contains(msg, "could not read") {
+				t.Errorf("notification %q does not carry the backend's diagnosis", msg)
 			}
 			h.assertNotReopened(t)
-			if _, _, ok := h.state.Snapshot(); ok {
+			if _, _, _, ok := h.state.Snapshot(); ok {
 				t.Error("a failure the provider would discard was recorded anyway")
 			}
 		})
+	}
+}
+
+// TestSetupSecondManagerOpensWizard is the other side of that rule: adding a
+// manager probes one that is, by definition, not configured yet. Routing that
+// failure to a toast would leave the user with a message that vanishes and no
+// retry — the dead end the wizard exists to replace.
+func TestSetupSecondManagerOpensWizard(t *testing.T) {
+	keyring := newFakeStore("keyring")
+	keyring.blocking = true
+	keyring.setErr = errors.New("collection is locked")
+	plaintext := newFakeStore("plaintext")
+	h := newMultiWizardHarness(t,
+		Index{V: IndexVersion, Backend: "plaintext", Entries: []Entry{{Name: "github"}}},
+		map[string]*fakeStore{"keyring": keyring, "plaintext": plaintext})
+
+	if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPSetup, Argv: []string{"keyring"}}); err != nil {
+		t.Fatalf("Dispatch returned %v, want the probe to run detached", err)
+	}
+	if q := h.waitReopened(t); q != "totp" {
+		t.Errorf("reopened on %q, want the provider's trigger so the wizard rows render", q)
+	}
+	h.assertQuiet(t)
+	backend, msg, fromSetup, ok := h.state.Snapshot()
+	if !ok || backend != "keyring" {
+		t.Fatalf("recorded failure = (%q, %v), want one against the manager being added", backend, ok)
+	}
+	if !fromSetup {
+		t.Error("the failure is not marked as a setup attempt, so the provider's gate would discard it")
+	}
+	if !strings.Contains(msg, "not usable") {
+		t.Errorf("recorded message %q does not carry the probe's own diagnosis", msg)
+	}
+	// The manager the user already had must survive a failed attempt to add
+	// another one.
+	if got := h.index(t).Configured(); !reflect.DeepEqual(got, []string{"plaintext"}) {
+		t.Errorf("configured = %v, want the failed probe to have changed nothing", got)
 	}
 }
 
@@ -939,7 +1095,7 @@ func TestCopyRoutingMatrix(t *testing.T) {
 					t.Errorf("notification %q does not mention %q", msg, tt.wantWord)
 				}
 				h.assertNotReopened(t)
-				if backend, _, ok := h.state.Snapshot(); !ok || backend != wizardStaleBackend {
+				if backend, _, _, ok := h.state.Snapshot(); !ok || backend != wizardStaleBackend {
 					t.Errorf("recorded failure = (%q, %v), want the earlier one left alone", backend, ok)
 				}
 				return
@@ -948,7 +1104,7 @@ func TestCopyRoutingMatrix(t *testing.T) {
 				t.Errorf("reopened on %q, want the provider's trigger", q)
 			}
 			h.assertQuiet(t)
-			backend, msg, ok := h.state.Snapshot()
+			backend, msg, _, ok := h.state.Snapshot()
 			if !ok || backend != "plaintext" {
 				t.Fatalf("recorded failure = (%q, %v), want the index's backend", backend, ok)
 			}
@@ -1015,7 +1171,7 @@ func TestAddRoutingMatrix(t *testing.T) {
 				}
 				h.assertNotReopened(t)
 			}
-			backend, msg, ok := h.state.Snapshot()
+			backend, msg, _, ok := h.state.Snapshot()
 			if backend != tt.wantStateBackend {
 				t.Errorf("recorded backend = %q (%v), want %q", backend, ok, tt.wantStateBackend)
 			}
@@ -1057,7 +1213,7 @@ func TestSuccessfulOpsClearState(t *testing.T) {
 			if tt.dispatch.Kind == ActTOTPCopy {
 				h.waitCopied(t)
 			}
-			if _, _, ok := h.state.Snapshot(); ok {
+			if _, _, _, ok := h.state.Snapshot(); ok {
 				t.Error("a successful backend operation left the failure recorded, so the wizard would linger")
 			}
 			h.assertNotReopened(t)
@@ -1076,7 +1232,7 @@ func TestWizardResetHandler(t *testing.T) {
 		if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPWizardReset}); err != nil {
 			t.Fatalf("Dispatch: %v", err)
 		}
-		if _, _, ok := h.state.Snapshot(); ok {
+		if _, _, _, ok := h.state.Snapshot(); ok {
 			t.Error("the reset left the failure recorded, so the chooser would not come back")
 		}
 		if q := h.waitReopened(t); q != "totp" {
@@ -1158,7 +1314,7 @@ func TestWizardFixStdinPipesPassword(t *testing.T) {
 		t.Errorf("reopened on %q, want the provider's trigger", q)
 	}
 	h.assertQuiet(t)
-	if _, _, ok := h.state.Snapshot(); ok {
+	if _, _, _, ok := h.state.Snapshot(); ok {
 		t.Error("failure still recorded after a create that worked")
 	}
 	if got := h.index(t).Backend; got != "keyring" {
@@ -1201,7 +1357,7 @@ func TestWizardFixStdinPasswordVariants(t *testing.T) {
 		if q := h.waitReopened(t); q != "totp" {
 			t.Errorf("reopened on %q", q)
 		}
-		_, msg, ok := h.state.Snapshot()
+		_, msg, _, ok := h.state.Snapshot()
 		if !ok || !strings.Contains(msg, "could not create or unlock the login keyring") {
 			t.Errorf("Snapshot = (%q, %v), want the create failMsg recorded", msg, ok)
 		}
@@ -1222,7 +1378,7 @@ func TestWizardFixStdinPasswordVariants(t *testing.T) {
 		if q := h.waitReopened(t); q != "totp" {
 			t.Errorf("reopened on %q", q)
 		}
-		backend, msg, ok := h.state.Snapshot()
+		backend, msg, _, ok := h.state.Snapshot()
 		if !ok || backend != "keyring" {
 			t.Fatalf("Snapshot = (%q, %q, %v), want a keyring failure recorded", backend, msg, ok)
 		}
@@ -1263,7 +1419,7 @@ func TestWizardFixSuccessCompletesSetup(t *testing.T) {
 	}
 	h.assertQuiet(t)
 
-	if backend, msg, ok := h.state.Snapshot(); ok {
+	if backend, msg, _, ok := h.state.Snapshot(); ok {
 		t.Errorf("recorded failure = (%q, %q) after a fix that worked, want the wizard retired", backend, msg)
 	}
 	if got := h.index(t).Backend; got != "keyring" {
@@ -1320,7 +1476,7 @@ func TestWizardFixCommandFails(t *testing.T) {
 			}
 			h.assertQuiet(t)
 
-			backend, msg, ok := h.state.Snapshot()
+			backend, msg, _, ok := h.state.Snapshot()
 			if !ok || backend != "keyring" {
 				t.Fatalf("recorded failure = (%q, %v), want one against the keyring", backend, ok)
 			}
@@ -1364,7 +1520,7 @@ func TestWizardFixProbeStillFails(t *testing.T) {
 	}
 	h.assertQuiet(t)
 
-	backend, msg, ok := h.state.Snapshot()
+	backend, msg, _, ok := h.state.Snapshot()
 	if !ok || backend != "keyring" {
 		t.Fatalf("recorded failure = (%q, %v), want one against the keyring", backend, ok)
 	}
@@ -1438,6 +1594,302 @@ func TestWizardFixUnwired(t *testing.T) {
 			t.Errorf("persisted backend = %q, want the fix to have finished setup", got)
 		}
 	})
+}
+
+// TestCopyRoutesEntryBackend is the read half of per-entry storage: the seed
+// must be fetched from the manager the entry names, and from the index default
+// for the entries written before a second manager existed. Reading the default
+// for everything would silently report every entry in the second manager as
+// having no secret stored.
+func TestCopyRoutesEntryBackend(t *testing.T) {
+	tests := []struct {
+		name string
+		// entry is the index entry to copy, whose Backend is the axis under test.
+		entry Entry
+		// wantStore is the fake vault that must have been asked.
+		wantStore string
+	}{
+		{name: "no backend uses the default", entry: Entry{Name: "github"}, wantStore: "keyring"},
+		{name: "an explicit backend is honored", entry: Entry{Name: "github", Backend: "plaintext"}, wantStore: "plaintext"},
+		{name: "an explicit default is honored too", entry: Entry{Name: "github", Backend: "keyring"}, wantStore: "keyring"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stores := map[string]*fakeStore{"keyring": newFakeStore("keyring"), "plaintext": newFakeStore("plaintext")}
+			stores[tt.wantStore].values["totp/github"] = testSeed
+			idx := Index{V: IndexVersion, Backend: "keyring", Backends: []string{"plaintext"}, Entries: []Entry{tt.entry}}
+			h := newMultiHarness(t, idx, stores)
+
+			if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPCopy, Argv: []string{"github"}}); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			if got := h.waitCopied(t); got != codeAtFixed {
+				t.Errorf("copied %q, want %q", got, codeAtFixed)
+			}
+			for name, s := range stores {
+				reads := len(s.creds)
+				if name == tt.wantStore && reads != 1 {
+					t.Errorf("%s was read %d times, want the entry's manager to answer once", name, reads)
+				}
+				if name != tt.wantStore && reads != 0 {
+					t.Errorf("%s was read %d times, want the other manager left alone", name, reads)
+				}
+			}
+		})
+	}
+}
+
+// TestAddStoresChosenBackend is the write half: the seed goes into the manager
+// the form's Storage dropdown chose, and the choice is recorded on the entry only
+// when it differs from the default — a single-manager user's index must not grow
+// a "backend" key per entry just because the field now exists.
+func TestAddStoresChosenBackend(t *testing.T) {
+	tests := []struct {
+		name string
+		idx  Index
+		// chosen is Values["backend"] as the dropdown would submit it; empty is
+		// the single-manager form, which has no dropdown at all.
+		chosen       string
+		wantStore    string
+		wantRecorded string
+	}{
+		{
+			name:      "no choice uses the default and records nothing",
+			idx:       Index{V: IndexVersion, Backend: "keyring", Backends: []string{"plaintext"}},
+			chosen:    "",
+			wantStore: "keyring",
+		},
+		{
+			name:      "choosing the default records nothing",
+			idx:       Index{V: IndexVersion, Backend: "keyring", Backends: []string{"plaintext"}},
+			chosen:    "keyring",
+			wantStore: "keyring",
+		},
+		{
+			name:         "choosing the second manager records it",
+			idx:          Index{V: IndexVersion, Backend: "keyring", Backends: []string{"plaintext"}},
+			chosen:       "plaintext",
+			wantStore:    "plaintext",
+			wantRecorded: "plaintext",
+		},
+		{
+			name:      "a single manager stays free of the key",
+			idx:       Index{V: IndexVersion, Backend: "plaintext"},
+			chosen:    "",
+			wantStore: "plaintext",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stores := map[string]*fakeStore{}
+			for _, name := range tt.idx.Configured() {
+				stores[name] = newFakeStore(name)
+			}
+			h := newMultiHarness(t, tt.idx, stores)
+
+			values := map[string]string{"name": "github", "secret": testSeed}
+			if tt.chosen != "" {
+				values["backend"] = tt.chosen
+			}
+			if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPAdd, Values: values}); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			for name, s := range stores {
+				_, stored := s.get("totp/github")
+				if want := name == tt.wantStore; stored != want {
+					t.Errorf("%s holds the seed = %v, want %v", name, stored, want)
+				}
+			}
+			entry, ok := h.index(t).Find("github")
+			if !ok {
+				t.Fatal("the index has no entry after a successful add")
+			}
+			if entry.Backend != tt.wantRecorded {
+				t.Errorf("entry backend = %q, want %q", entry.Backend, tt.wantRecorded)
+			}
+			// The rendered rows read through BackendOr, so the recorded value and
+			// the vault that holds the seed have to agree whichever way round it
+			// was stored.
+			if got := entry.BackendOr(h.index(t).DefaultBackend()); got != tt.wantStore {
+				t.Errorf("BackendOr = %q, want the manager the seed went to (%q)", got, tt.wantStore)
+			}
+		})
+	}
+}
+
+// TestAddRejectsUnconfiguredBackend is the validation on Values["backend"]: an
+// Action can be minted anywhere (a plugin, a hand-built IPC payload), and writing
+// a seed into a vault the user never configured would put it somewhere they would
+// never think to look — and somewhere the provider would never read it back from.
+func TestAddRejectsUnconfiguredBackend(t *testing.T) {
+	tests := []struct {
+		name    string
+		chosen  string
+		wantErr string
+	}{
+		{name: "a manager that exists but is not configured", chosen: "keyring", wantErr: "not a configured secrets manager"},
+		{name: "a name no backend answers to", chosen: "vault", wantErr: "not a configured secrets manager"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plaintext := newFakeStore("plaintext")
+			h := newMultiHarness(t, Index{V: IndexVersion, Backend: "plaintext"},
+				map[string]*fakeStore{"plaintext": plaintext, "keyring": newFakeStore("keyring")})
+
+			values := map[string]string{"name": "github", "secret": testSeed, "backend": tt.chosen}
+			err := h.disp.Dispatch(providers.Action{Kind: ActTOTPAdd, Values: values})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Dispatch error = %v, want one mentioning %q", err, tt.wantErr)
+			}
+			if len(h.index(t).Entries) != 0 {
+				t.Error("a rejected add left metadata behind")
+			}
+			if _, stored := plaintext.get("totp/github"); stored {
+				t.Error("a rejected add wrote the seed to the default manager anyway")
+			}
+		})
+	}
+}
+
+// TestAppendBackendCompat is the on-disk compatibility contract of adding a
+// second manager, asserted through the real save path because that is where it
+// can break: mergeKnown deletes a key whose omitempty field is zero, so the
+// AddBackend invariant (legacy "backend" always holds Configured()[0]) is the
+// only thing keeping an older banshee able to find any seeds at all. Unknown keys
+// have to survive the rewrite for the same reason they always did.
+func TestAppendBackendCompat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "totp.json")
+	const legacy = `{
+  "v": 1,
+  "backend": "keyring",
+  "comment": "hand written",
+  "entries": [
+    {"name": "github", "note": "work account"}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Adding the manager already configured must be a no-op, twice over.
+	for _, name := range []string{"keyring", "plaintext", "plaintext"} {
+		idx, err := LoadIndex(path)
+		if err != nil {
+			t.Fatalf("LoadIndex: %v", err)
+		}
+		idx.AddBackend(name)
+		if err := SaveIndex(path, idx); err != nil {
+			t.Fatalf("SaveIndex: %v", err)
+		}
+	}
+
+	idx, err := LoadIndex(path)
+	if err != nil {
+		t.Fatalf("LoadIndex: %v", err)
+	}
+	if want := []string{"keyring", "plaintext"}; !reflect.DeepEqual(idx.Configured(), want) {
+		t.Errorf("Configured() = %v, want %v (deduped, default first)", idx.Configured(), want)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["backend"] != "keyring" {
+		t.Errorf("\"backend\" = %v, want the first manager left in the legacy key an older build reads", raw["backend"])
+	}
+	if !reflect.DeepEqual(raw["backends"], []any{"plaintext"}) {
+		t.Errorf("\"backends\" = %v, want just the second manager", raw["backends"])
+	}
+	if raw["comment"] != "hand written" {
+		t.Errorf("unknown key \"comment\" = %v, want it preserved", raw["comment"])
+	}
+	entries, ok := raw["entries"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("entries = %v, want the original one", raw["entries"])
+	}
+	first, _ := entries[0].(map[string]any)
+	if first["note"] != "work account" {
+		t.Errorf("unknown entry key \"note\" = %v, want it preserved", first["note"])
+	}
+	if _, present := first["backend"]; present {
+		t.Errorf("entry gained a \"backend\" key: %v; an entry in the default manager must stay untouched", first)
+	}
+
+	t.Run("a single manager writes no backends key at all", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "totp.json")
+		var idx Index
+		idx.AddBackend("plaintext")
+		if err := SaveIndex(path, idx); err != nil {
+			t.Fatalf("SaveIndex: %v", err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "backends") {
+			t.Errorf("single-manager index mentions \"backends\": %s", data)
+		}
+	})
+}
+
+// TestSetupMoreReopens covers the hint row's handler. Its only job is
+// navigation, so it must never fail — and with no Reopen wired it has to name the
+// query the user could type instead, because a row that silently does nothing is
+// worse than no row.
+func TestSetupMoreReopens(t *testing.T) {
+	t.Run("wired", func(t *testing.T) {
+		h := newWizardHarness(t, twoEntryIndex(), stockedStore())
+		if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPSetupMore}); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		if q := h.waitReopened(t); q != "totp setup" {
+			t.Errorf("reopened on %q, want the chooser query", q)
+		}
+	})
+	t.Run("unwired", func(t *testing.T) {
+		h := newHarness(t, twoEntryIndex(), stockedStore())
+		if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPSetupMore}); err != nil {
+			t.Fatalf("Dispatch with no Reopen: %v", err)
+		}
+		if msg := h.waitNotified(t); !strings.Contains(msg, "totp setup") {
+			t.Errorf("notification %q does not name the query that opens the chooser", msg)
+		}
+	})
+}
+
+// TestSetupAppendsManagers is the accumulating half of setup: a second choice
+// must join the first rather than replace it, or every seed in the first manager
+// would become unreachable the moment a user tried a second one.
+func TestSetupAppendsManagers(t *testing.T) {
+	stores := map[string]*fakeStore{"plaintext": newFakeStore("plaintext"), "keyring": newFakeStore("keyring")}
+	h := newMultiHarness(t, Index{V: IndexVersion, Backend: "plaintext", Entries: []Entry{{Name: "github"}}}, stores)
+
+	if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPSetup, Argv: []string{"keyring"}}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	idx := h.index(t)
+	if want := []string{"plaintext", "keyring"}; !reflect.DeepEqual(idx.Configured(), want) {
+		t.Errorf("Configured() = %v, want %v", idx.Configured(), want)
+	}
+	if idx.Backend != "plaintext" {
+		t.Errorf("legacy backend = %q, want the first manager kept there", idx.Backend)
+	}
+	if _, ok := idx.Find("github"); !ok {
+		t.Error("the existing entry was lost by configuring a second manager")
+	}
+	// Idempotent: the wizard's Retry row and a second pass through the chooser
+	// both re-run setup on a manager already configured.
+	if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPSetup, Argv: []string{"keyring"}}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if want := []string{"plaintext", "keyring"}; !reflect.DeepEqual(h.index(t).Configured(), want) {
+		t.Errorf("Configured() = %v after re-running setup, want %v", h.index(t).Configured(), want)
+	}
 }
 
 func TestDispatchRejectsUnregisteredKind(t *testing.T) {

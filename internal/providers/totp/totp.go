@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,7 +32,45 @@ const (
 	// AddScore keeps the "Add TOTP code" row pinned last within the triggered
 	// block: every real entry outranks it, but it never disappears.
 	AddScore = 10
+	// SetupMoreScore puts the "add another secrets manager" hint under the add
+	// row: configuring storage is rarer than adding a code, so it is the last
+	// thing in the triggered block and the first thing pushed off a full screen.
+	SetupMoreScore = 5
 )
+
+// setupToken is the word after the trigger that reopens the manager chooser
+// ("totp setup"). It is a query rather than a mode or a flag because the
+// provider holds no state between queries: the chooser has to be reachable from
+// a freshly typed query alone, which is also what lets the hint row simply
+// reopen the launcher on reopenSetupQuery.
+const setupToken = "setup"
+
+// reopenSetupQuery is what the launcher is reopened with to land on the manager
+// chooser: the trigger plus setupToken, spelled once so the hint row's handler
+// and the query parser cannot disagree.
+const reopenSetupQuery = "totp " + setupToken
+
+// configurableBackends is every secrets manager a user can actually configure
+// today. It is what decides whether the "add another secrets manager" hint is
+// worth showing: with all of them configured there is nothing left to choose,
+// and offering the hint anyway would walk the user to a chooser whose only
+// remaining row (Nimbus) the setup handler refuses outright.
+//
+// The chooser itself still lists Nimbus — a "coming soon" row is the only thing
+// that ever tells the user a cloud backend is planned — which is exactly why the
+// two lists are separate rather than one.
+var configurableBackends = []string{secrets.BackendKeyring, secrets.BackendPlaintext}
+
+// moreBackendsConfigurable reports whether any manager the user could configure
+// today is still missing from configured.
+func moreBackendsConfigurable(configured []string) bool {
+	for _, name := range configurableBackends {
+		if !slices.Contains(configured, name) {
+			return true
+		}
+	}
+	return false
+}
 
 // queryTimeout bounds one entry's backend read while rendering a query.
 //
@@ -158,13 +197,23 @@ func (p *Provider) Name() string { return "totp" }
 //   - An empty query returns nothing. Codes are secret material and the
 //     launcher's idle state is visible to anyone glancing at the screen.
 //   - "totp" / "otp" (optionally followed by a filter) is the trigger: it
-//     lists every entry, plus the "Add TOTP code" row last.
+//     lists every entry, plus the "Add TOTP code" row and — while a manager the
+//     user could actually configure is still missing — the "add another secrets
+//     manager" hint, last.
 //   - Without the trigger, entry names are fuzzy-matched and only positive
 //     matches appear, so typing a repo name never scatters codes into the list.
-//   - With no backend chosen yet, the trigger offers the three setup rows
+//   - With no manager configured yet, the trigger offers the setup rows
 //     instead of entries; without the trigger it stays silent.
+//   - "totp setup" reopens the chooser for the managers not configured yet, so
+//     a second one can be added without a settings screen. With all of them
+//     configured it falls through to the ordinary listing.
 //   - While a backend failure is recorded in the shared SetupState, the trigger
 //     renders the setup wizard instead of any of the above.
+//
+// A manager that cannot even be opened degrades the rows that live in it to an
+// explanatory subtitle rather than failing the whole query: with several
+// managers configured, one broken vault must not blank the codes held in the
+// others.
 //
 // # Shared-score contract
 //
@@ -190,33 +239,68 @@ func (p *Provider) Query(ctx context.Context, q string) ([]providers.Result, err
 	if err != nil {
 		return nil, err
 	}
+	configured := idx.Configured()
 	// A recorded backend failure replaces every other row, but only under the
 	// trigger: an untriggered query that merely fuzzy-matches an entry name must
 	// never leak a backend diagnosis into a list the user did not ask TOTP for.
-	// The backend guard drops a stale wizard — a failure recorded against a
-	// backend the user has since reconfigured out of band no longer describes
-	// what they would be using, so the ordinary rows win. A wizard raised while
-	// no backend is persisted is still first-time setup, which is the only
-	// situation where the "choose a different backend" escape row belongs; that
-	// is the firstTime argument. Snapshot is nil-receiver-safe, so a provider
+	// The configured guard drops a stale wizard — a failure recorded against a
+	// manager the user has since reconfigured out of band no longer describes
+	// anything they would be using, so the ordinary rows win. The exception is a
+	// failure raised by an explicit setup attempt (fromSetup): that names a
+	// manager the user is trying to add right now, which is by definition not
+	// configured yet, and it is the one case where a not-configured manager's
+	// diagnosis is exactly what they asked for. The escape row is offered for
+	// exactly the wizards that name a manager the user does not depend on yet —
+	// nothing configured at all, or one they were in the middle of adding — because
+	// those are the ones there is somewhere safe to go back from; that is the
+	// offerBack argument, and without it a failed attempt to add a second manager
+	// would hold the trigger hostage for the daemon's lifetime, hiding the codes
+	// already working in the first. Snapshot is nil-receiver-safe, so a provider
 	// with no SetupState wired up needs no check of its own.
 	if triggered {
-		if backend, message, ok := p.setup.Snapshot(); ok && wizardApplies(idx.Backend, backend) {
-			return wizardResults(backend, message, idx.Backend == "", p.lookPath), nil
+		if backend, message, fromSetup, ok := p.setup.Snapshot(); ok && (fromSetup || wizardApplies(configured, backend)) {
+			return wizardResults(backend, message, len(configured) == 0 || fromSetup, p.lookPath), nil
 		}
 	}
-	if idx.Backend == "" {
+	if len(configured) == 0 {
 		if !triggered {
 			return nil, nil
 		}
-		return p.setupResults(), nil
+		return p.setupResults(nil), nil
+	}
+	// The chooser token, for adding a manager to the ones already configured.
+	// It deliberately shadows the fuzzy filter: an entry literally named "setup"
+	// stops being reachable by "totp setup" while any manager is unconfigured.
+	// That is accepted — the entry is still reachable by its bare name and by
+	// any other filter, while the alternative is a settings surface banshee does
+	// not have.
+	if triggered && strings.EqualFold(filter, setupToken) {
+		if rows := p.setupResults(configured); len(rows) > 0 {
+			return rows, nil
+		}
 	}
 
-	store, err := p.open(idx.Backend)
-	if err != nil {
-		return nil, err
+	def := idx.DefaultBackend()
+	// One open per distinct manager per query, cached: several entries usually
+	// share a manager, and opening a store may construct a client. A failed open
+	// is cached too, so a broken manager is diagnosed once rather than once per
+	// row.
+	opened := map[string]openedStore{}
+	openFor := func(name string) openedStore {
+		if s, ok := opened[name]; ok {
+			return s
+		}
+		s := openedStore{}
+		if store, err := p.open(name); err != nil {
+			s.err = err
+		} else {
+			s.store = store
+			s.auth = store.AuthPerAccess()
+		}
+		opened[name] = s
+		return s
 	}
-	auth := store.AuthPerAccess()
+	multi := len(configured) > 1
 	now := p.now()
 
 	var out []providers.Result
@@ -228,16 +312,29 @@ func (p *Provider) Query(ctx context.Context, q string) ([]providers.Result, err
 		if !ok {
 			continue
 		}
-		row, err := p.entryResult(ctx, store, auth, e, score, now)
+		backend := e.BackendOr(def)
+		row, err := p.entryResult(ctx, openFor(backend), e, score, now, backendLabel(backend, multi))
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, row)
 	}
 	if triggered {
-		out = append(out, p.addResult(auth))
+		out = append(out, p.addResult(configured, func(name string) bool { return openFor(name).auth }))
+		if moreBackendsConfigurable(configured) {
+			out = append(out, setupMoreResult())
+		}
 	}
 	return out, nil
+}
+
+// openedStore is one manager's opened Store, or the failure to open it, cached
+// for the length of a query. auth is read once here rather than per row so a
+// backend cannot answer differently halfway down the list.
+type openedStore struct {
+	store secrets.Store
+	auth  bool
+	err   error
 }
 
 // matchScore decides whether entry name belongs in the result list and at what
@@ -262,20 +359,27 @@ func (p *Provider) matchScore(triggered bool, filter, q, name string) (int, bool
 	return s, true
 }
 
-// entryResult builds one entry's row.
+// entryResult builds one entry's row, reading the seed from the manager that
+// holds it (st) and tagging the row with label when there is more than one
+// manager to tell apart.
 //
 // For a local backend the code is computed here so the row shows it directly,
-// and Expiry is set so the UI can tick a countdown and re-query when the code
-// rotates. A backend that authenticates per access gets no code at all: asking
-// for the password once per keystroke would be absurd, so the row carries a
-// masked credential form and defers everything to activation.
+// and Expiry plus Period are set so the UI can drain a progress bar over the
+// window and re-query when the code rotates. Period is set from the entry's own
+// parameters even for the standard 30 seconds: the provider knows the window it
+// derived Expiry from, and making the UI assume it would break the moment an
+// entry is not standard. A backend that authenticates per access gets no code at
+// all: asking for the password once per keystroke would be absurd, so the row
+// carries a masked credential form and defers everything to activation.
 //
 // A backend failure for one entry degrades that row to an explanatory subtitle
-// rather than failing the query — one unreadable key must not blank the list.
-// That includes a read that ran past queryTimeout, which is why the abort check
-// consults the caller's ctx rather than the bounded one: only a cancelled query
-// aborts, because that means the user has already typed the next character.
-func (p *Provider) entryResult(ctx context.Context, store secrets.Store, auth bool, e Entry, score int, now time.Time) (providers.Result, error) {
+// rather than failing the query — one unreadable key, or one manager that will
+// not open, must not blank the list. That includes a read that ran past
+// queryTimeout, which is why the abort check consults the caller's ctx rather
+// than the bounded one: only a cancelled query aborts, because that means the
+// user has already typed the next character.
+func (p *Provider) entryResult(ctx context.Context, st openedStore, e Entry, score int, now time.Time, label string) (providers.Result, error) {
+	params := e.Params()
 	res := providers.Result{
 		ID:       "totp:" + e.Name,
 		Title:    e.Name,
@@ -283,10 +387,18 @@ func (p *Provider) entryResult(ctx context.Context, store secrets.Store, auth bo
 		Category: providers.CatTOTP,
 		Score:    score,
 		Action:   providers.Action{Kind: ActTOTPCopy, Argv: []string{e.Name}},
+		Period:   time.Duration(params.Period) * time.Second,
 	}
-	if auth {
+	if st.err != nil {
+		// The manager itself could not be opened — an unknown name in the index,
+		// a client that refuses to construct. The row stays activatable: the copy
+		// handler reports the same failure with the room to explain it.
+		res.Subtitle = withLabel("secrets backend unavailable", label)
+		return res, nil
+	}
+	if st.auth {
 		name := e.Name
-		res.Subtitle = "Enter to unlock and copy"
+		res.Subtitle = withLabel("Enter to unlock and copy", label)
 		res.Form = &providers.Form{
 			Title:  "Unlock " + name,
 			Fields: []providers.FormField{credentialField()},
@@ -300,45 +412,85 @@ func (p *Provider) entryResult(ctx context.Context, store secrets.Store, auth bo
 		return res, nil
 	}
 
-	params := e.Params()
 	getCtx, cancel := context.WithTimeout(ctx, p.queryTimeout)
 	defer cancel()
-	secret, err := store.Get(getCtx, secretKey(e.Name), secrets.Credential{})
+	secret, err := st.store.Get(getCtx, secretKey(e.Name), secrets.Credential{})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return providers.Result{}, ctxErr
 		}
-		res.Subtitle = unavailable(err)
+		res.Subtitle = withLabel(unavailable(err), label)
 		return res, nil
 	}
 	raw, err := DecodeSecret(secret)
 	if err != nil {
-		res.Subtitle = "stored secret is not valid base32"
+		res.Subtitle = withLabel("stored secret is not valid base32", label)
 		return res, nil
 	}
 	code, err := Code(raw, now, params)
 	if err != nil {
-		res.Subtitle = unavailable(err)
+		res.Subtitle = withLabel(unavailable(err), label)
 		return res, nil
 	}
-	res.Subtitle = FormatCode(code)
+	res.Subtitle = withLabel(FormatCode(code), label)
 	res.Expiry = ExpiryOf(now, params.Period)
 	return res, nil
+}
+
+// backendLabel is the manager name a row is tagged with, or "" while only one
+// manager is configured — for the single-manager user, who is most users, the
+// name is the same on every row and therefore pure noise.
+func backendLabel(name string, multi bool) string {
+	if !multi {
+		return ""
+	}
+	return name
+}
+
+// withLabel appends a manager label to a subtitle. It is applied to every
+// subtitle an entry row can carry, code and diagnosis alike: with several
+// managers configured, "no secret stored for this entry" is only actionable once
+// the user knows which vault was asked.
+func withLabel(subtitle, label string) string {
+	if label == "" {
+		return subtitle
+	}
+	if subtitle == "" {
+		return label
+	}
+	return subtitle + " · " + label
 }
 
 // addResult is the row that opens the "add a code" form. It is emitted only
 // under the trigger — an unfiltered list of every launcher query would carry a
 // row nobody asked for — and always last, at AddScore.
 //
+// configured is every manager the seed could go to and authFor reports whether
+// one of them authenticates per access. Two fields depend on them:
+//
+//   - With more than one manager configured the form grows a "Storage"
+//     dropdown listing them in Configured() order, so the first option — the
+//     one a dropdown preselects — is the index's default. A single manager gets
+//     no dropdown: a one-option choice is a decision the user cannot make wrong
+//     and does not want to be asked about.
+//   - The masked credential field is required exactly when there is one manager
+//     and it authenticates per access, which is the pre-multi-manager rule. With
+//     several, the field appears whenever *any* of them authenticates but is not
+//     required, because whether a password is needed depends on the dropdown
+//     choice the user has not made yet. Enforcement stays where it always
+//     effectively was: the store answers ErrAuthRequired at dispatch and the
+//     handler turns that into a notification.
+//
 // Build only checks that the fields are non-empty. Everything else (base32
-// validity, otpauth parsing, duplicate names) is the handler's job, because a
-// mistyped seed is worth explaining after the fact rather than blocking
-// submission on a parse the handler repeats anyway — and because validating
-// here would buy nothing: the launcher hides the window before it calls Build
-// (internal/ui/launcher.go, submitForm), so a Build error surfaces as the same
-// notification a handler error does, not as a corrected form. The only check
-// that keeps the form on screen is the launcher's own required-field pass.
-func (p *Provider) addResult(auth bool) providers.Result {
+// validity, otpauth parsing, duplicate names, whether the chosen manager is
+// configured) is the handler's job, because a mistyped seed is worth explaining
+// after the fact rather than blocking submission on a parse the handler repeats
+// anyway — and because validating here would buy nothing: the launcher hides the
+// window before it calls Build (internal/ui/launcher.go, submitForm), so a Build
+// error surfaces as the same notification a handler error does, not as a
+// corrected form. The only check that keeps the form on screen is the launcher's
+// own required-field pass.
+func (p *Provider) addResult(configured []string, authFor func(string) bool) providers.Result {
 	fields := []providers.FormField{
 		{
 			Key:         "name",
@@ -354,8 +506,23 @@ func (p *Provider) addResult(auth bool) providers.Result {
 			Secret:      true,
 		},
 	}
-	if auth {
-		fields = append(fields, credentialField())
+	if len(configured) > 1 {
+		fields = append(fields, providers.FormField{
+			Key:     "backend",
+			Label:   "Storage",
+			Options: configured,
+		})
+	}
+	if authList := authBackends(configured, authFor); len(authList) > 0 {
+		if len(configured) == 1 {
+			fields = append(fields, credentialField())
+		} else {
+			fields = append(fields, providers.FormField{
+				Key:    "credential",
+				Label:  "Password (" + strings.Join(authList, ", ") + " only)",
+				Secret: true,
+			})
+		}
 	}
 	return providers.Result{
 		ID:       "totp:add",
@@ -379,12 +546,39 @@ func (p *Provider) addResult(auth bool) providers.Result {
 	}
 }
 
-// setupResults offers the one-time backend choice. The rows exist in the
-// launcher rather than in a config file because picking a secrets backend is
-// the first thing a user does with this feature and banshee never writes
-// banshee.conf on the user's behalf — the choice is persisted in totp.json by
-// the setup handler.
-func (p *Provider) setupResults() []providers.Result {
+// authBackends returns the configured managers that authenticate per access, in
+// configured order. It is a helper rather than an inline loop because the answer
+// shapes both halves of the credential rule in addResult, and because it is the
+// one place authFor is called for every manager — a caller that only needs the
+// count must not pay for a second pass.
+func authBackends(configured []string, authFor func(string) bool) []string {
+	if authFor == nil {
+		return nil
+	}
+	var out []string
+	for _, name := range configured {
+		if authFor(name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// setupResults offers the secrets-manager choice, skipping every name in
+// exclude — nil during first-time setup, and the already-configured managers
+// when the user asks for another one. An empty result therefore means "nothing
+// left to configure", which is what lets the caller fall through to the
+// ordinary listing rather than showing an empty chooser.
+//
+// The rows exist in the launcher rather than in a config file because picking a
+// secrets manager is the first thing a user does with this feature and banshee
+// never writes banshee.conf on the user's behalf — the choice is persisted in
+// totp.json by the setup handler.
+func (p *Provider) setupResults(exclude []string) []providers.Result {
+	skip := make(map[string]bool, len(exclude))
+	for _, name := range exclude {
+		skip[name] = true
+	}
 	rows := []struct {
 		backend  string
 		title    string
@@ -406,8 +600,11 @@ func (p *Provider) setupResults() []providers.Result {
 			subtitle: "Not available yet",
 		},
 	}
-	out := make([]providers.Result, 0, len(rows))
+	var out []providers.Result
 	for _, r := range rows {
+		if skip[r.backend] {
+			continue
+		}
 		out = append(out, providers.Result{
 			ID:       "totp:setup:" + r.backend,
 			Title:    r.title,
@@ -419,6 +616,23 @@ func (p *Provider) setupResults() []providers.Result {
 		})
 	}
 	return out
+}
+
+// setupMoreResult is the hint row that reopens the chooser for a further secrets
+// manager. It is a row rather than a documented query because nothing else would
+// ever tell the user that storing seeds in two places is possible at all; it
+// dispatches its own kind so the handler owns the reopen, which is the only part
+// of the flow the provider cannot do from a query.
+func setupMoreResult() providers.Result {
+	return providers.Result{
+		ID:       "totp:setup:more",
+		Title:    "Add another secrets manager",
+		Subtitle: "Store some codes somewhere else — Enter shows the choices",
+		Icon:     providers.Icon{ThemeName: iconAdd},
+		Category: providers.CatTOTP,
+		Score:    SetupMoreScore,
+		Action:   providers.Action{Kind: ActTOTPSetupMore},
+	}
 }
 
 // credentialField is the masked per-access password input shared by the unlock

@@ -10,15 +10,48 @@ import (
 	"github.com/jourdanhaines/banshee/internal/secrets"
 )
 
+// TestWizardApplies pins the staleness rule: a recorded failure is only worth
+// rendering while it describes a manager the user would actually be using.
+// Nothing configured is first-time setup, where any candidate applies.
+//
+// It says nothing about setup attempts on purpose — those name a manager that is
+// deliberately not configured yet and are carried by SetupState's own flag, which
+// is asserted through the provider's gate and the handlers instead.
+func TestWizardApplies(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured []string
+		failed     string
+		want       bool
+	}{
+		{name: "nothing configured admits any failure", configured: nil, failed: "keyring", want: true},
+		{name: "nothing configured admits an empty failure", configured: nil, failed: "", want: true},
+		{name: "the single configured manager", configured: []string{"keyring"}, failed: "keyring", want: true},
+		{name: "another manager is stale", configured: []string{"plaintext"}, failed: "keyring", want: false},
+		{name: "the default among several", configured: []string{"keyring", "plaintext"}, failed: "keyring", want: true},
+		{name: "a second manager among several", configured: []string{"keyring", "plaintext"}, failed: "plaintext", want: true},
+		{name: "a manager configured away", configured: []string{"keyring", "plaintext"}, failed: "nimbus", want: false},
+		{name: "an empty failure against a configured manager", configured: []string{"keyring"}, failed: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wizardApplies(tt.configured, tt.failed); got != tt.want {
+				t.Fatalf("wizardApplies(%v, %q) = %v, want %v", tt.configured, tt.failed, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSetupStateLifecycle(t *testing.T) {
 	tests := []struct {
 		name string
 		// state builds the state under test and applies the operations; a nil
 		// return exercises the nil-receiver path every method must survive.
-		state       func() *SetupState
-		wantBackend string
-		wantMessage string
-		wantOK      bool
+		state         func() *SetupState
+		wantBackend   string
+		wantMessage   string
+		wantFromSetup bool
+		wantOK        bool
 	}{
 		{
 			name:   "zero value has nothing recorded",
@@ -84,7 +117,54 @@ func TestSetupStateLifecycle(t *testing.T) {
 			state: func() *SetupState {
 				var s *SetupState
 				s.Fail("keyring", errors.New("no session bus"))
+				s.FailSetup("keyring", errors.New("no session bus"))
 				s.Clear()
+				return s
+			},
+			wantOK: false,
+		},
+		{
+			name: "a setup failure is marked as one",
+			state: func() *SetupState {
+				s := &SetupState{}
+				s.FailSetup("keyring", errors.New("collection is locked"))
+				return s
+			},
+			wantBackend:   "keyring",
+			wantMessage:   "collection is locked",
+			wantFromSetup: true,
+			wantOK:        true,
+		},
+		{
+			// The flag belongs to the failure, not to the state: an ordinary
+			// failure recorded afterwards must not inherit the wizard-anywhere
+			// privilege of the setup attempt it replaced.
+			name: "an ordinary failure replacing a setup one clears the mark",
+			state: func() *SetupState {
+				s := &SetupState{}
+				s.FailSetup("keyring", errors.New("collection is locked"))
+				s.Fail("plaintext", errors.New("vault is read-only"))
+				return s
+			},
+			wantBackend: "plaintext",
+			wantMessage: "vault is read-only",
+			wantOK:      true,
+		},
+		{
+			name: "clear forgets the mark too",
+			state: func() *SetupState {
+				s := &SetupState{}
+				s.FailSetup("keyring", errors.New("collection is locked"))
+				s.Clear()
+				return s
+			},
+			wantOK: false,
+		},
+		{
+			name: "a nil error records no setup failure either",
+			state: func() *SetupState {
+				s := &SetupState{}
+				s.FailSetup("keyring", nil)
 				return s
 			},
 			wantOK: false,
@@ -93,7 +173,7 @@ func TestSetupStateLifecycle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			backend, message, ok := tt.state().Snapshot()
+			backend, message, fromSetup, ok := tt.state().Snapshot()
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -102,6 +182,9 @@ func TestSetupStateLifecycle(t *testing.T) {
 			}
 			if message != tt.wantMessage {
 				t.Errorf("message = %q, want %q", message, tt.wantMessage)
+			}
+			if fromSetup != tt.wantFromSetup {
+				t.Errorf("fromSetup = %v, want %v", fromSetup, tt.wantFromSetup)
 			}
 		})
 	}
@@ -127,11 +210,17 @@ func TestSetupStateConcurrent(t *testing.T) {
 			for i := 0; i < iterations; i++ {
 				switch g % 3 {
 				case 0:
-					s.Fail(secrets.BackendKeyring, failure)
+					// Both recorders, alternating, so the setup flag is written
+					// under the race detector as well as read.
+					if i%2 == 0 {
+						s.Fail(secrets.BackendKeyring, failure)
+					} else {
+						s.FailSetup(secrets.BackendKeyring, failure)
+					}
 				case 1:
 					s.Clear()
 				default:
-					backend, message, ok := s.Snapshot()
+					backend, message, _, ok := s.Snapshot()
 					if !ok {
 						continue
 					}
@@ -146,7 +235,7 @@ func TestSetupStateConcurrent(t *testing.T) {
 	wg.Wait()
 
 	s.Clear()
-	if _, _, ok := s.Snapshot(); ok {
+	if _, _, _, ok := s.Snapshot(); ok {
 		t.Fatalf("state still active after a final Clear")
 	}
 }
@@ -252,24 +341,24 @@ func TestWizardResultsKeyring(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		firstTime bool
+		offerBack bool
 		want      []providers.Result
 	}{
 		{
 			name:      "first-time setup offers the escape hatch",
-			firstTime: true,
+			offerBack: true,
 			want:      keyringWizardRows(message),
 		},
 		{
 			name:      "an established backend does not",
-			firstTime: false,
+			offerBack: false,
 			want:      keyringWizardRows(message)[:6],
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := wizardResults(secrets.BackendKeyring, message, tt.firstTime, noPackageManager)
+			got := wizardResults(secrets.BackendKeyring, message, tt.offerBack, noPackageManager)
 			// The create row's Build closure defeats DeepEqual; prove the form
 			// is there, then compare everything else against the fixture.
 			for i := range got {
@@ -369,24 +458,24 @@ func TestWizardCreateKeyringForm(t *testing.T) {
 func TestWizardResultsUnknownBackend(t *testing.T) {
 	tests := []struct {
 		name      string
-		firstTime bool
+		offerBack bool
 		wantIDs   []string
 	}{
 		{
 			name:      "header and retry only",
-			firstTime: false,
+			offerBack: false,
 			wantIDs:   []string{"totp:wizard:status", "totp:wizard:retry"},
 		},
 		{
 			name:      "plus the escape hatch during first-time setup",
-			firstTime: true,
+			offerBack: true,
 			wantIDs:   []string{"totp:wizard:status", "totp:wizard:retry", "totp:wizard:back"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := wizardResults("nimbus", "not configured", tt.firstTime, noPackageManager)
+			got := wizardResults("nimbus", "not configured", tt.offerBack, noPackageManager)
 			if !reflect.DeepEqual(ids(got), tt.wantIDs) {
 				t.Fatalf("ids = %v, want %v", ids(got), tt.wantIDs)
 			}
@@ -417,16 +506,16 @@ func TestWizardResultsInvariants(t *testing.T) {
 	tests := []struct {
 		name      string
 		backend   string
-		firstTime bool
+		offerBack bool
 		lookPath  func(string) (string, error)
 	}{
-		{name: "keyring, first time", backend: secrets.BackendKeyring, firstTime: true, lookPath: noPackageManager},
-		{name: "keyring, established", backend: secrets.BackendKeyring, firstTime: false, lookPath: noPackageManager},
-		{name: "keyring with a package manager, first time", backend: secrets.BackendKeyring, firstTime: true, lookPath: foundPackageManagers("apt")},
-		{name: "keyring with a package manager, established", backend: secrets.BackendKeyring, firstTime: false, lookPath: foundPackageManagers("apt")},
-		{name: "keyring with no lookPath wired up", backend: secrets.BackendKeyring, firstTime: true, lookPath: nil},
-		{name: "unknown, first time", backend: "nimbus", firstTime: true, lookPath: noPackageManager},
-		{name: "unknown, established", backend: "nimbus", firstTime: false, lookPath: noPackageManager},
+		{name: "keyring, first time", backend: secrets.BackendKeyring, offerBack: true, lookPath: noPackageManager},
+		{name: "keyring, established", backend: secrets.BackendKeyring, offerBack: false, lookPath: noPackageManager},
+		{name: "keyring with a package manager, first time", backend: secrets.BackendKeyring, offerBack: true, lookPath: foundPackageManagers("apt")},
+		{name: "keyring with a package manager, established", backend: secrets.BackendKeyring, offerBack: false, lookPath: foundPackageManagers("apt")},
+		{name: "keyring with no lookPath wired up", backend: secrets.BackendKeyring, offerBack: true, lookPath: nil},
+		{name: "unknown, first time", backend: "nimbus", offerBack: true, lookPath: noPackageManager},
+		{name: "unknown, established", backend: "nimbus", offerBack: false, lookPath: noPackageManager},
 	}
 
 	for _, tt := range tests {
@@ -434,7 +523,7 @@ func TestWizardResultsInvariants(t *testing.T) {
 			if n := len(wizardGuidance(tt.backend, tt.lookPath)); n > 4 {
 				t.Errorf("wizardGuidance(%q) returned %d rows, want at most 4", tt.backend, n)
 			}
-			got := wizardResults(tt.backend, "boom", tt.firstTime, tt.lookPath)
+			got := wizardResults(tt.backend, "boom", tt.offerBack, tt.lookPath)
 			if len(got) == 0 {
 				t.Fatal("no wizard rows")
 			}

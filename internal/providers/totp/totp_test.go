@@ -3,9 +3,11 @@ package totp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -242,6 +244,46 @@ func TestQuerySetupRowShape(t *testing.T) {
 	}
 }
 
+// multiIndex is the two-manager fixture: keyring is the default (the legacy
+// Backend field, per the AddBackend invariant), plaintext is the second, and
+// "gitlab" lives in the second one while "github" takes the default.
+func multiIndex() Index {
+	return Index{
+		V:        IndexVersion,
+		Backend:  "keyring",
+		Backends: []string{"plaintext"},
+		Entries: []Entry{
+			{Name: "github"},
+			{Name: "gitlab", Backend: "plaintext"},
+		},
+	}
+}
+
+// storeSwitch builds a WithOpenStore that resolves each backend name to its own
+// fake vault, which is what lets a test prove *which* manager a row was rendered
+// from. An unknown name fails the open, standing in for a manager banshee cannot
+// construct.
+func storeSwitch(stores map[string]*fakeStore) func(string) (secrets.Store, error) {
+	return func(name string) (secrets.Store, error) {
+		s, ok := stores[name]
+		if !ok {
+			return nil, fmt.Errorf("no store for %q", name)
+		}
+		return s, nil
+	}
+}
+
+// rowByID finds one result by ID, so a test asserting on the add row does not
+// have to know how many rows follow it.
+func rowByID(res []providers.Result, id string) (providers.Result, bool) {
+	for _, r := range res {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return providers.Result{}, false
+}
+
 // twoEntryIndex is the fixture the listing tests share: two entries whose
 // names overlap, so a filter can select one of them.
 func twoEntryIndex() Index {
@@ -268,22 +310,22 @@ func TestQueryListing(t *testing.T) {
 	}{
 		{name: "empty query stays silent", query: "", scorer: substringScorer, wantIDs: nil},
 		{
-			name:    "bare trigger lists everything with add last",
+			name:    "bare trigger lists everything with add and the storage hint last",
 			query:   "totp",
 			scorer:  substringScorer,
-			wantIDs: []string{"totp:github", "totp:gitlab", "totp:add"},
+			wantIDs: []string{"totp:github", "totp:gitlab", "totp:add", "totp:setup:more"},
 		},
 		{
 			name:    "trigger remainder filters",
 			query:   "totp lab",
 			scorer:  substringScorer,
-			wantIDs: []string{"totp:gitlab", "totp:add"},
+			wantIDs: []string{"totp:gitlab", "totp:add", "totp:setup:more"},
 		},
 		{
 			name:    "trigger remainder matching nothing keeps add row",
 			query:   "otp nothing",
 			scorer:  substringScorer,
-			wantIDs: []string{"totp:add"},
+			wantIDs: []string{"totp:add", "totp:setup:more"},
 		},
 		{
 			name:    "untriggered fuzzy match has no add row",
@@ -336,6 +378,9 @@ func TestQueryEntryRowShape(t *testing.T) {
 		Score:    100,
 		Action:   providers.Action{Kind: ActTOTPCopy, Argv: []string{"github"}},
 		Expiry:   time.Unix(fixedUnix+10, 0),
+		// Period rides with Expiry: the UI drains a bar over the window ending
+		// there and cannot know how long that window was without being told.
+		Period: 30 * time.Second,
 	}
 	if !reflect.DeepEqual(res[0], want) {
 		t.Errorf("Query() = %+v, want %+v", res[0], want)
@@ -420,42 +465,96 @@ func TestQueryAuthBackendRow(t *testing.T) {
 	}
 }
 
+// nameField and secretField are the two fields every add form starts with, so
+// the table below only spells out what the manager configuration adds.
+func nameField() providers.FormField {
+	return providers.FormField{Key: "name", Label: "Name", Placeholder: "github", Required: true}
+}
+
+func secretField() providers.FormField {
+	return providers.FormField{Key: "secret", Label: "Secret", Placeholder: "base32 seed or otpauth:// URI", Required: true, Secret: true}
+}
+
+// TestQueryAddRowForm pins the add form against every manager configuration,
+// which is where the two rules that depend on it live: the Storage dropdown
+// (present only when there is a choice to make, first option = the index's
+// default) and the credential field (required for a single per-access manager,
+// present-but-optional as soon as the manager is a dropdown choice, because
+// which one needs a password is not known until the user picks).
 func TestQueryAddRowForm(t *testing.T) {
 	tests := []struct {
-		name       string
-		auth       bool
+		name string
+		idx  Index
+		// auth names the backends whose fake store authenticates per access.
+		auth       []string
 		wantFields []providers.FormField
 	}{
 		{
-			name: "local backend",
-			auth: false,
+			name:       "single local manager",
+			idx:        twoEntryIndex(),
+			wantFields: []providers.FormField{nameField(), secretField()},
+		},
+		{
+			name: "single per-access manager requires the password",
+			idx:  twoEntryIndex(),
+			auth: []string{"plaintext"},
 			wantFields: []providers.FormField{
-				{Key: "name", Label: "Name", Placeholder: "github", Required: true},
-				{Key: "secret", Label: "Secret", Placeholder: "base32 seed or otpauth:// URI", Required: true, Secret: true},
+				nameField(), secretField(),
+				{Key: "credential", Label: "Password", Required: true, Secret: true},
 			},
 		},
 		{
-			name: "per-access backend also collects the password",
-			auth: true,
+			name: "two local managers get a dropdown and no password",
+			idx:  multiIndex(),
 			wantFields: []providers.FormField{
-				{Key: "name", Label: "Name", Placeholder: "github", Required: true},
-				{Key: "secret", Label: "Secret", Placeholder: "base32 seed or otpauth:// URI", Required: true, Secret: true},
-				{Key: "credential", Label: "Password", Required: true, Secret: true},
+				nameField(), secretField(),
+				{Key: "backend", Label: "Storage", Options: []string{"keyring", "plaintext"}},
+			},
+		},
+		{
+			name: "one per-access manager among several makes the password optional",
+			idx:  multiIndex(),
+			auth: []string{"plaintext"},
+			wantFields: []providers.FormField{
+				nameField(), secretField(),
+				{Key: "backend", Label: "Storage", Options: []string{"keyring", "plaintext"}},
+				{Key: "credential", Label: "Password (plaintext only)", Secret: true},
+			},
+		},
+		{
+			name: "every per-access manager is named in the label",
+			idx:  multiIndex(),
+			auth: []string{"keyring", "plaintext"},
+			wantFields: []providers.FormField{
+				nameField(), secretField(),
+				{Key: "backend", Label: "Storage", Options: []string{"keyring", "plaintext"}},
+				{Key: "credential", Label: "Password (keyring, plaintext only)", Secret: true},
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := stockedStore()
-			store.auth = tt.auth
-			p := newProvider(t, twoEntryIndex(), store, substringScorer)
+			stores := map[string]*fakeStore{}
+			for _, name := range tt.idx.Configured() {
+				s := newFakeStore(name)
+				s.auth = slices.Contains(tt.auth, name)
+				stores[name] = s
+			}
+			p := New(substringScorer,
+				WithIndexPath(writeIndex(t, tt.idx)),
+				WithOpenStore(storeSwitch(stores)),
+				WithNow(fixedNow),
+			)
 			res, err := p.Query(context.Background(), "totp")
 			if err != nil {
 				t.Fatalf("Query() error: %v", err)
 			}
-			row := res[len(res)-1]
-			if row.ID != "totp:add" || row.Score != AddScore {
-				t.Fatalf("last row = %q score %d, want totp:add at %d", row.ID, row.Score, AddScore)
+			row, ok := rowByID(res, "totp:add")
+			if !ok {
+				t.Fatalf("no add row in %v", ids(res))
+			}
+			if row.Score != AddScore {
+				t.Fatalf("add row scores %d, want %d", row.Score, AddScore)
 			}
 			if row.Icon.ThemeName != iconAdd || row.Category != providers.CatTOTP {
 				t.Errorf("icon/category = %q/%d, want %q/%d", row.Icon.ThemeName, row.Category, iconAdd, providers.CatTOTP)
@@ -481,6 +580,284 @@ func TestQueryAddRowForm(t *testing.T) {
 	}
 }
 
+// TestQueryMultiBackend is the routing contract with several managers
+// configured: each entry's code is read from the manager that holds it, each
+// manager's own AuthPerAccess answer shapes only its own rows, and every
+// subtitle says which vault it came from — a code with no attribution is
+// useless when two of them could have answered.
+func TestQueryMultiBackend(t *testing.T) {
+	keyring := newFakeStore("keyring")
+	keyring.values["totp/github"] = testSeed
+	plaintext := newFakeStore("plaintext")
+	plaintext.values["totp/gitlab"] = testSeed
+
+	p := New(substringScorer,
+		WithIndexPath(writeIndex(t, multiIndex())),
+		WithOpenStore(storeSwitch(map[string]*fakeStore{"keyring": keyring, "plaintext": plaintext})),
+		WithNow(fixedNow),
+	)
+	res, err := p.Query(context.Background(), "totp")
+	if err != nil {
+		t.Fatalf("Query() error: %v", err)
+	}
+	wantSubtitles := map[string]string{
+		"totp:github": "324 550 · keyring",
+		"totp:gitlab": "324 550 · plaintext",
+	}
+	for id, want := range wantSubtitles {
+		row, ok := rowByID(res, id)
+		if !ok {
+			t.Fatalf("no row %q in %v", id, ids(res))
+		}
+		if row.Subtitle != want {
+			t.Errorf("%s subtitle = %q, want %q", id, row.Subtitle, want)
+		}
+	}
+	// Each vault answered for its own entry and nothing else: a second read
+	// against either would mean the provider asked the wrong manager first.
+	if len(keyring.creds) != 1 || len(plaintext.creds) != 1 {
+		t.Errorf("reads = keyring %d, plaintext %d, want exactly one each", len(keyring.creds), len(plaintext.creds))
+	}
+
+	t.Run("per-manager auth shapes only its own rows", func(t *testing.T) {
+		locked := newFakeStore("plaintext")
+		locked.auth = true
+		open := newFakeStore("keyring")
+		open.values["totp/github"] = testSeed
+		p := New(substringScorer,
+			WithIndexPath(writeIndex(t, multiIndex())),
+			WithOpenStore(storeSwitch(map[string]*fakeStore{"keyring": open, "plaintext": locked})),
+			WithNow(fixedNow),
+		)
+		res, err := p.Query(context.Background(), "totp")
+		if err != nil {
+			t.Fatalf("Query() error: %v", err)
+		}
+		github, _ := rowByID(res, "totp:github")
+		gitlab, _ := rowByID(res, "totp:gitlab")
+		if github.Subtitle != "324 550 · keyring" || github.Form != nil {
+			t.Errorf("github row = %q form %v, want the code from the non-auth manager", github.Subtitle, github.Form != nil)
+		}
+		if gitlab.Subtitle != "Enter to unlock and copy · plaintext" || gitlab.Form == nil {
+			t.Errorf("gitlab row = %q form %v, want the unlock prompt from the auth manager", gitlab.Subtitle, gitlab.Form != nil)
+		}
+		if len(locked.creds) != 0 {
+			t.Errorf("the per-access manager was read %d times while rendering, want 0", len(locked.creds))
+		}
+	})
+
+	t.Run("a single manager labels nothing", func(t *testing.T) {
+		p := newProvider(t, twoEntryIndex(), stockedStore(), substringScorer)
+		res, err := p.Query(context.Background(), "totp")
+		if err != nil {
+			t.Fatalf("Query() error: %v", err)
+		}
+		row, _ := rowByID(res, "totp:github")
+		if row.Subtitle != "324 550" {
+			t.Errorf("subtitle = %q, want the bare code: one manager's name is on every row and says nothing", row.Subtitle)
+		}
+	})
+}
+
+// TestQueryPeriodFollowsEntry pins Period alongside Expiry: the UI drains a bar
+// over the window ending at Expiry, and a 60-second entry that reported the
+// standard 30 would drain twice as fast as its code actually rotates.
+func TestQueryPeriodFollowsEntry(t *testing.T) {
+	tests := []struct {
+		name   string
+		period int
+		want   time.Duration
+	}{
+		{name: "default period", period: 0, want: 30 * time.Second},
+		{name: "explicit 30s", period: 30, want: 30 * time.Second},
+		{name: "60s", period: 60, want: 60 * time.Second},
+		{name: "15s", period: 15, want: 15 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := Index{
+				V:       IndexVersion,
+				Backend: "plaintext",
+				Entries: []Entry{{Name: "github", Period: tt.period}},
+			}
+			p := newProvider(t, idx, stockedStore(), substringScorer)
+			res, err := p.Query(context.Background(), "totp")
+			if err != nil {
+				t.Fatalf("Query() error: %v", err)
+			}
+			if res[0].Period != tt.want {
+				t.Errorf("Period = %v, want %v", res[0].Period, tt.want)
+			}
+			if res[0].Expiry.IsZero() {
+				t.Error("Expiry is zero, so Period describes a window nothing counts down to")
+			}
+		})
+	}
+}
+
+// TestQuerySetupToken covers "totp setup": the chooser has to be reachable from
+// a typed query, because the provider keeps no state between queries and there
+// is no settings surface. It offers only the managers not configured yet, and
+// once they are all configured it stops shadowing the ordinary listing.
+func TestQuerySetupToken(t *testing.T) {
+	allConfigured := Index{
+		V:        IndexVersion,
+		Backend:  "keyring",
+		Backends: []string{"plaintext", "nimbus"},
+		Entries:  []Entry{{Name: "github"}},
+	}
+	tests := []struct {
+		name    string
+		idx     Index
+		query   string
+		wantIDs []string
+	}{
+		{
+			name:    "one manager configured offers the other two",
+			idx:     twoEntryIndex(), // plaintext
+			query:   "totp setup",
+			wantIDs: []string{"totp:setup:keyring", "totp:setup:nimbus"},
+		},
+		{
+			name:    "the token is case-insensitive",
+			idx:     twoEntryIndex(),
+			query:   "otp SETUP",
+			wantIDs: []string{"totp:setup:keyring", "totp:setup:nimbus"},
+		},
+		{
+			name:    "two configured leave one",
+			idx:     multiIndex(),
+			query:   "totp setup",
+			wantIDs: []string{"totp:setup:nimbus"},
+		},
+		{
+			name:  "all configured falls through to the listing",
+			idx:   allConfigured,
+			query: "totp setup",
+			// No hint row: there is nothing left to add. The entry misses the
+			// "setup" filter, so only the add row survives.
+			wantIDs: []string{"totp:add"},
+		},
+		{
+			name:    "nothing configured ignores the token and offers everything",
+			idx:     Index{V: IndexVersion},
+			query:   "totp setup",
+			wantIDs: []string{"totp:setup:keyring", "totp:setup:plaintext", "totp:setup:nimbus"},
+		},
+		{
+			name:    "the token only works under the trigger",
+			idx:     twoEntryIndex(),
+			query:   "setup",
+			wantIDs: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newProvider(t, tt.idx, stockedStore(), substringScorer)
+			res, err := p.Query(context.Background(), tt.query)
+			if err != nil {
+				t.Fatalf("Query(%q) error: %v", tt.query, err)
+			}
+			if got := ids(res); !reflect.DeepEqual(got, tt.wantIDs) {
+				t.Errorf("Query(%q) ids = %v, want %v", tt.query, got, tt.wantIDs)
+			}
+		})
+	}
+}
+
+// TestQuerySetupMoreRow pins the hint row that leads to the chooser: it appears
+// only under the trigger, only while something is left to configure, and it
+// scores below the add row so it is the last thing in the block.
+func TestQuerySetupMoreRow(t *testing.T) {
+	tests := []struct {
+		name  string
+		idx   Index
+		query string
+		want  bool
+	}{
+		{name: "one manager configured", idx: twoEntryIndex(), query: "totp", want: true},
+		{
+			// Both managers that can actually be configured today. Counting the
+			// chooser's Nimbus row here instead would keep the hint on screen
+			// forever, leading only to a row the setup handler refuses.
+			name:  "every configurable manager configured",
+			idx:   multiIndex(),
+			query: "totp",
+			want:  false,
+		},
+		{
+			name: "a hand-written nimbus entry does not resurrect it",
+			idx: Index{V: IndexVersion, Backend: "keyring", Backends: []string{"plaintext", "nimbus"},
+				Entries: []Entry{{Name: "github"}}},
+			query: "totp",
+			want:  false,
+		},
+		{name: "nothing configured shows the chooser instead", idx: Index{V: IndexVersion}, query: "totp", want: false},
+		{name: "untriggered queries never carry it", idx: twoEntryIndex(), query: "github", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newProvider(t, tt.idx, stockedStore(), substringScorer)
+			res, err := p.Query(context.Background(), tt.query)
+			if err != nil {
+				t.Fatalf("Query(%q) error: %v", tt.query, err)
+			}
+			row, ok := rowByID(res, "totp:setup:more")
+			if ok != tt.want {
+				t.Fatalf("hint row present = %v, want %v (ids %v)", ok, tt.want, ids(res))
+			}
+			if !ok {
+				return
+			}
+			if row.Score != SetupMoreScore || row.Score >= AddScore {
+				t.Errorf("hint row scores %d, want %d and below AddScore %d", row.Score, SetupMoreScore, AddScore)
+			}
+			if row.Action.Kind != ActTOTPSetupMore || row.Category != providers.CatTOTP {
+				t.Errorf("hint row action/category = %q/%d, want %q/CatTOTP", row.Action.Kind, row.Category, ActTOTPSetupMore)
+			}
+			if res[len(res)-1].ID != "totp:setup:more" {
+				t.Errorf("last row = %q, want the hint row emitted last", res[len(res)-1].ID)
+			}
+		})
+	}
+}
+
+// TestQueryUnopenableEntryBackendDegradesRow is the multi-manager blast radius:
+// one manager that will not open must cost exactly its own rows. Failing the
+// whole query instead would blank the codes held in every other vault, which is
+// the opposite of what configuring a second one is for.
+func TestQueryUnopenableEntryBackendDegradesRow(t *testing.T) {
+	keyring := newFakeStore("keyring")
+	keyring.values["totp/github"] = testSeed
+	// plaintext is missing from the map, so opening it fails.
+	p := New(substringScorer,
+		WithIndexPath(writeIndex(t, multiIndex())),
+		WithOpenStore(storeSwitch(map[string]*fakeStore{"keyring": keyring})),
+		WithNow(fixedNow),
+	)
+	res, err := p.Query(context.Background(), "totp")
+	if err != nil {
+		t.Fatalf("Query() error = %v, want the unopenable manager to degrade its own row", err)
+	}
+	github, _ := rowByID(res, "totp:github")
+	if github.Subtitle != "324 550 · keyring" {
+		t.Errorf("github subtitle = %q, want the working manager's code", github.Subtitle)
+	}
+	gitlab, ok := rowByID(res, "totp:gitlab")
+	if !ok {
+		t.Fatalf("the entry in the broken manager vanished from %v", ids(res))
+	}
+	if gitlab.Subtitle != "secrets backend unavailable · plaintext" {
+		t.Errorf("gitlab subtitle = %q, want the failure named against its manager", gitlab.Subtitle)
+	}
+	if !gitlab.Expiry.IsZero() {
+		t.Errorf("Expiry = %v, want zero (nothing is counting down)", gitlab.Expiry)
+	}
+	if gitlab.Action.Kind != ActTOTPCopy {
+		t.Errorf("Action.Kind = %q, want %q (activation may still explain itself)", gitlab.Action.Kind, ActTOTPCopy)
+	}
+}
+
 // keyringIndex is twoEntryIndex under the keyring backend, so a wizard
 // recorded for "keyring" matches the configured backend.
 func keyringIndex() Index {
@@ -489,17 +866,28 @@ func keyringIndex() Index {
 	return idx
 }
 
-// failedState is a SetupState already carrying a failure for backend.
+// failedState is a SetupState already carrying a failure for backend, raised by
+// ordinary use of it.
 func failedState(backend, msg string) *SetupState {
 	s := &SetupState{}
 	s.Fail(backend, errors.New(msg))
 	return s
 }
 
+// failedSetupState is failedState for a failure raised by an explicit attempt to
+// configure backend, which the gate renders even for a manager the index does
+// not list.
+func failedSetupState(backend, msg string) *SetupState {
+	s := &SetupState{}
+	s.FailSetup(backend, errors.New(msg))
+	return s
+}
+
 // TestQueryWizard covers the gate in Query that swaps the ordinary rows for the
 // setup wizard: it must fire only under the trigger, only for the backend the
 // user would actually be using, and only while a failure is recorded — and it
-// must offer the escape row exactly when no backend has been persisted yet.
+// must offer the escape row exactly when the failing manager is not one the user
+// already keeps seeds in (nothing configured, or one being added right now).
 func TestQueryWizard(t *testing.T) {
 	const msg = "keyring probe failed: no session bus"
 	wizardRows := []string{
@@ -544,18 +932,33 @@ func TestQueryWizard(t *testing.T) {
 			wantIDs: []string{"totp:github"},
 		},
 		{
+			// Adding a second manager means probing one that is deliberately not
+			// configured yet, so the "is it still configured" guard would discard
+			// exactly the diagnosis the user is waiting for. The setup flag is what
+			// keeps that report on screen — and the escape row comes with it, because
+			// the manager that failed is not one the user depends on: without it the
+			// trigger would render this wizard for the daemon's lifetime and the codes
+			// already working in the first manager would be unreachable from it.
+			name:        "a failed attempt to add a manager opens the wizard with an escape row",
+			idx:         twoEntryIndex(), // plaintext configured, keyring being added
+			state:       failedSetupState(secrets.BackendKeyring, msg),
+			query:       "totp",
+			wantIDs:     append(append([]string(nil), wizardRows...), "totp:wizard:back"),
+			wantMessage: msg,
+		},
+		{
 			name:    "failure for another backend leaves the rows alone",
 			idx:     twoEntryIndex(), // plaintext
 			state:   failedState(secrets.BackendKeyring, msg),
 			query:   "totp",
-			wantIDs: []string{"totp:github", "totp:gitlab", "totp:add"},
+			wantIDs: []string{"totp:github", "totp:gitlab", "totp:add", "totp:setup:more"},
 		},
 		{
 			name:    "cleared state leaves the rows alone",
 			idx:     keyringIndex(),
 			state:   &SetupState{},
 			query:   "totp",
-			wantIDs: []string{"totp:github", "totp:gitlab", "totp:add"},
+			wantIDs: []string{"totp:github", "totp:gitlab", "totp:add", "totp:setup:more"},
 		},
 		{
 			name:    "no state wired up leaves setup rows alone",
@@ -616,7 +1019,7 @@ func TestQueryWizardClearedMidLife(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query() after Clear error: %v", err)
 	}
-	want := []string{"totp:github", "totp:gitlab", "totp:add"}
+	want := []string{"totp:github", "totp:gitlab", "totp:add", "totp:setup:more"}
 	if got := ids(res); !reflect.DeepEqual(got, want) {
 		t.Errorf("Query() after Clear ids = %v, want %v", got, want)
 	}
@@ -648,8 +1051,8 @@ func TestQueryStoreFailureDegradesRow(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Query() error: %v", err)
 			}
-			if len(res) != 2 {
-				t.Fatalf("Query() rows = %d, want the entry plus the add row", len(res))
+			if len(res) != 3 {
+				t.Fatalf("Query() rows = %d, want the entry plus the add and storage-hint rows", len(res))
 			}
 			if res[0].Subtitle != tt.wantSubtitle {
 				t.Errorf("Subtitle = %q, want %q", res[0].Subtitle, tt.wantSubtitle)
@@ -692,8 +1095,8 @@ func TestQueryBoundsAWedgedBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query() error = %v, want the wedged read to degrade one row", err)
 	}
-	if len(res) != 2 {
-		t.Fatalf("Query() rows = %d, want the entry plus the add row", len(res))
+	if len(res) != 3 {
+		t.Fatalf("Query() rows = %d, want the entry plus the add and storage-hint rows", len(res))
 	}
 	if res[0].Subtitle != "code unavailable" {
 		t.Errorf("Subtitle = %q, want %q", res[0].Subtitle, "code unavailable")

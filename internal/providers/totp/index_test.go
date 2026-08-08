@@ -33,6 +33,21 @@ func TestLoadIndex(t *testing.T) {
 			}}},
 		},
 		{
+			name:  "several managers and a per-entry backend",
+			write: `{"v":1,"backend":"keyring","backends":["plaintext"],"entries":[{"name":"github"},{"name":"aws","backend":"plaintext"}]}`,
+			want: Index{V: 1, Backend: "keyring", Backends: []string{"plaintext"}, Entries: []Entry{
+				{Name: "github"},
+				{Name: "aws", Backend: "plaintext"},
+			}},
+		},
+		{
+			// The shape every index written before multiple managers existed has:
+			// it must load as exactly one configured manager, with no upgrade step.
+			name:  "legacy single-manager file",
+			write: `{"v":1,"backend":"keyring","entries":[{"name":"github"}]}`,
+			want:  Index{V: 1, Backend: "keyring", Entries: []Entry{{Name: "github"}}},
+		},
+		{
 			name:  "unknown fields tolerated",
 			write: `{"v":1,"backend":"plaintext","future":{"nested":true},"entries":[{"name":"a","icon":"x","tags":["y"]}]}`,
 			want:  Index{V: 1, Backend: "plaintext", Entries: []Entry{{Name: "a"}}},
@@ -89,9 +104,9 @@ func TestSaveIndexRoundTrip(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "nested", "banshee")
 	path := filepath.Join(dir, "totp.json")
 
-	idx := Index{V: IndexVersion, Backend: "plaintext", Entries: []Entry{
+	idx := Index{V: IndexVersion, Backend: "plaintext", Backends: []string{"keyring"}, Entries: []Entry{
 		{Name: "github", Issuer: "GitHub", Created: time.Date(2026, 8, 8, 9, 30, 0, 0, time.UTC)},
-		{Name: "aws", Digits: 8, Period: 60, Algorithm: AlgSHA512},
+		{Name: "aws", Digits: 8, Period: 60, Algorithm: AlgSHA512, Backend: "keyring"},
 	}}
 	if err := SaveIndex(path, idx); err != nil {
 		t.Fatalf("SaveIndex: %v", err)
@@ -344,6 +359,157 @@ func TestIndexAdd(t *testing.T) {
 			}
 			if !reflect.DeepEqual(names, tt.wantNames) {
 				t.Fatalf("names = %v, want %v", names, tt.wantNames)
+			}
+		})
+	}
+}
+
+// TestIndexConfigured pins the one place the two manager fields are read
+// together: the default is always first, blanks and duplicates never reach the
+// caller, and a file from before this build reports exactly its one manager —
+// which is what makes every multi-manager path degrade instead of branching.
+func TestIndexConfigured(t *testing.T) {
+	tests := []struct {
+		name string
+		idx  Index
+		want []string
+	}{
+		{name: "empty index", idx: Index{V: 1}, want: nil},
+		{name: "legacy single manager", idx: Index{V: 1, Backend: "keyring"}, want: []string{"keyring"}},
+		{
+			name: "default first, then the rest in order",
+			idx:  Index{V: 1, Backend: "keyring", Backends: []string{"plaintext", "nimbus"}},
+			want: []string{"keyring", "plaintext", "nimbus"},
+		},
+		{
+			name: "a duplicate of the default is dropped",
+			idx:  Index{V: 1, Backend: "keyring", Backends: []string{"keyring", "plaintext"}},
+			want: []string{"keyring", "plaintext"},
+		},
+		{
+			name: "duplicates within the list are dropped",
+			idx:  Index{V: 1, Backend: "keyring", Backends: []string{"plaintext", "plaintext"}},
+			want: []string{"keyring", "plaintext"},
+		},
+		{
+			name: "blanks are dropped and names trimmed",
+			idx:  Index{V: 1, Backend: " keyring ", Backends: []string{"", "  ", "plaintext"}},
+			want: []string{"keyring", "plaintext"},
+		},
+		{
+			// A hand-edited file that emptied "backend" but kept "backends" still
+			// has to name a default, or every entry would route nowhere.
+			name: "an empty default promotes the first of the rest",
+			idx:  Index{V: 1, Backends: []string{"plaintext", "nimbus"}},
+			want: []string{"plaintext", "nimbus"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.idx.Configured()
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("Configured() = %v, want %v", got, tt.want)
+			}
+			wantDefault := ""
+			if len(tt.want) > 0 {
+				wantDefault = tt.want[0]
+			}
+			if got := tt.idx.DefaultBackend(); got != wantDefault {
+				t.Errorf("DefaultBackend() = %q, want %q", got, wantDefault)
+			}
+		})
+	}
+}
+
+// TestIndexAddBackend covers the invariant the on-disk format leans on: the
+// legacy Backend field always holds Configured()[0], so a single-manager index
+// keeps the exact shape an older banshee reads and a save can never delete the
+// only key that says where the seeds are.
+func TestIndexAddBackend(t *testing.T) {
+	tests := []struct {
+		name         string
+		start        Index
+		add          string
+		wantBackend  string
+		wantBackends []string
+	}{
+		{
+			name:  "the first manager lands in the legacy field alone",
+			start: Index{V: 1}, add: "keyring",
+			wantBackend: "keyring",
+		},
+		{name: "the second lands in the list", start: Index{V: 1, Backend: "keyring"}, add: "plaintext",
+			wantBackend: "keyring", wantBackends: []string{"plaintext"}},
+		{
+			name:  "appending is idempotent for the default",
+			start: Index{V: 1, Backend: "keyring", Backends: []string{"plaintext"}}, add: "keyring",
+			wantBackend: "keyring", wantBackends: []string{"plaintext"},
+		},
+		{
+			name:  "appending is idempotent for a listed manager",
+			start: Index{V: 1, Backend: "keyring", Backends: []string{"plaintext"}}, add: "plaintext",
+			wantBackend: "keyring", wantBackends: []string{"plaintext"},
+		},
+		{
+			name:  "a third manager appends in order",
+			start: Index{V: 1, Backend: "keyring", Backends: []string{"plaintext"}}, add: "nimbus",
+			wantBackend: "keyring", wantBackends: []string{"plaintext", "nimbus"},
+		},
+		{
+			// A hand-edited file that dropped "backend": filling it in would move
+			// the default onto the new manager and send every entry that names
+			// none looking in a vault that has never held it.
+			name:  "an empty legacy field is not filled in behind an existing default",
+			start: Index{V: 1, Backends: []string{"plaintext"}}, add: "keyring",
+			wantBackend: "", wantBackends: []string{"plaintext", "keyring"},
+		},
+		{name: "the name is trimmed", start: Index{V: 1}, add: "  keyring  ", wantBackend: "keyring"},
+		{name: "a blank name is ignored", start: Index{V: 1, Backend: "keyring"}, add: "   ", wantBackend: "keyring"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := tt.start
+			idx.AddBackend(tt.add)
+			if idx.Backend != tt.wantBackend {
+				t.Errorf("Backend = %q, want %q", idx.Backend, tt.wantBackend)
+			}
+			if !reflect.DeepEqual(idx.Backends, tt.wantBackends) {
+				t.Errorf("Backends = %v, want %v", idx.Backends, tt.wantBackends)
+			}
+			// The invariant, as far as it can hold: whenever the legacy field is
+			// populated at all it is the default, so an older banshee reading the
+			// file finds the manager new entries go to.
+			if c := idx.Configured(); idx.Backend != "" && (len(c) == 0 || c[0] != idx.Backend) {
+				t.Errorf("INVARIANT broken: Configured() = %v, Backend = %q", c, idx.Backend)
+			}
+			// Adding a manager never re-routes the entries that name none.
+			if before, after := tt.start.DefaultBackend(), idx.DefaultBackend(); before != "" && before != after {
+				t.Errorf("DefaultBackend moved from %q to %q; existing entries would be looked up elsewhere", before, after)
+			}
+		})
+	}
+}
+
+// TestEntryBackendOr pins the fallback every seed read and write goes through: an
+// empty Backend means "the index's default", never "nowhere", which is what keeps
+// entries written before multiple managers existed readable.
+func TestEntryBackendOr(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry Entry
+		def   string
+		want  string
+	}{
+		{name: "empty falls back", entry: Entry{Name: "x"}, def: "keyring", want: "keyring"},
+		{name: "blank falls back", entry: Entry{Name: "x", Backend: "   "}, def: "keyring", want: "keyring"},
+		{name: "explicit wins", entry: Entry{Name: "x", Backend: "plaintext"}, def: "keyring", want: "plaintext"},
+		{name: "explicit is trimmed", entry: Entry{Name: "x", Backend: " plaintext "}, def: "keyring", want: "plaintext"},
+		{name: "no default and no backend routes nowhere", entry: Entry{Name: "x"}, def: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.entry.BackendOr(tt.def); got != tt.want {
+				t.Fatalf("BackendOr(%q) = %q, want %q", tt.def, got, tt.want)
 			}
 		})
 	}

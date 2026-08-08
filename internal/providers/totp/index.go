@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 )
@@ -36,6 +37,12 @@ type Entry struct {
 	Algorithm string `json:"algorithm,omitempty"`
 	// Created records when the entry was added, for display and ordering.
 	Created time.Time `json:"created,omitempty"`
+	// Backend names the secrets manager holding this entry's seed when it is
+	// not the index's default one. Empty means the default, which is why a
+	// user with a single manager never sees this key: per-entry storage only
+	// becomes a question once a second manager is configured, and an index
+	// written before that keeps its byte-for-byte shape.
+	Backend string `json:"backend,omitempty"`
 }
 
 // Params resolves the entry's algorithm parameters, substituting the RFC
@@ -56,17 +63,116 @@ func (e Entry) Params() Params {
 	return p
 }
 
-// Index is the on-disk totp.json: the chosen secrets backend plus the account
-// metadata. Unknown JSON keys are ignored for forward compatibility.
+// Index is the on-disk totp.json: the configured secrets managers plus the
+// account metadata. Unknown JSON keys are ignored for forward compatibility.
 type Index struct {
 	// V is the schema version; see IndexVersion.
 	V int `json:"v"`
 	// Backend names the internal/secrets Store holding the seeds
 	// ("plaintext", "keyring", …). It is persisted here rather than in
 	// banshee.conf because banshee never writes the user's config file.
+	//
+	// With several managers configured it is the first of them — the default
+	// for a new entry — and the rest live in Backends; see AddBackend for why
+	// the split is that way round rather than one list.
 	Backend string `json:"backend,omitempty"`
+	// Backends holds the additional secrets managers configured after the
+	// first, in the order they were added. It exists because seeds may
+	// legitimately live in more than one place at once (an OS keyring for
+	// everyday accounts, a remote vault for shared ones), and an entry names
+	// which one holds it.
+	Backends []string `json:"backends,omitempty"`
 	// Entries is the account list, in insertion order.
 	Entries []Entry `json:"entries,omitempty"`
+}
+
+// Configured returns every secrets manager this index knows about, the default
+// first: the legacy Backend name, then Backends in order, with blanks and
+// duplicates dropped. It is the one place the two fields are read together, so
+// no caller has to know that the first manager is stored apart from the rest.
+//
+// A file written before this build — one bare "backend" — yields exactly that
+// one name, which is what makes every multi-manager code path degrade to the
+// single-manager behavior on an old index instead of special-casing it.
+func (idx Index) Configured() []string {
+	var out []string
+	seen := make(map[string]bool, len(idx.Backends)+1)
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	add(idx.Backend)
+	for _, b := range idx.Backends {
+		add(b)
+	}
+	return out
+}
+
+// DefaultBackend returns the manager new entries go to when the user does not
+// pick one, which is the first configured. Empty means nothing is configured
+// yet — the state the setup chooser exists for.
+func (idx Index) DefaultBackend() string {
+	c := idx.Configured()
+	if len(c) == 0 {
+		return ""
+	}
+	return c[0]
+}
+
+// BackendOr returns the manager holding this entry's seed, falling back to def
+// for an entry that names none. Every read and write of a seed must route
+// through it rather than reading Backend directly, because an empty Backend is
+// the overwhelmingly common case and means "wherever the index defaults to",
+// not "nowhere".
+func (e Entry) BackendOr(def string) string {
+	if b := strings.TrimSpace(e.Backend); b != "" {
+		return b
+	}
+	return def
+}
+
+// AddBackend records name as a configured secrets manager, idempotently: a name
+// already configured (in either field) leaves the index untouched, so the setup
+// handler can run on a manager the user picked twice.
+//
+// INVARIANT: the *first* manager ever configured lands in the legacy Backend
+// field alone, and every later one is appended to Backends — so a
+// single-manager totp.json stays byte-identical to what every earlier build
+// wrote, and stays readable by them, which for an on-disk format that carries no
+// version bump is the whole point. It is also a data-loss defense: mergeKnown
+// deletes a key whose omitempty field sits at its zero value, so putting the
+// first name in Backends instead would strip "backend" from an existing file on
+// the next save and leave an older banshee unable to find any seeds at all. An
+// older build reading a multi-manager file sees only the first manager and
+// reports the entries in the others as having no secret stored — degraded, never
+// lost.
+//
+// The condition is "nothing configured yet" rather than "Backend is empty" for a
+// second reason: on a hand-edited file that emptied "backend" but kept
+// "backends", filling Backend in would move DefaultBackend() to the new manager,
+// and every entry that names none would start being looked up in a vault that has
+// never held it. Adding a manager must never re-route an existing entry.
+//
+// The receiver is a pointer because this mutates the index; callers save it
+// afterwards, exactly as with Add.
+func (idx *Index) AddBackend(name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	configured := idx.Configured()
+	if slices.Contains(configured, name) {
+		return
+	}
+	if len(configured) == 0 {
+		idx.Backend = name
+		return
+	}
+	idx.Backends = append(idx.Backends, name)
 }
 
 // LoadIndex reads the index at path. A missing file is not an error — it is
@@ -121,8 +227,13 @@ func SaveIndex(path string, idx Index) error {
 		return err
 	}
 	// The entry list is dropped from the value handed to mergeKnown and rebuilt
-	// element by element below, so each entry gets its own merge.
-	if top, err = mergeKnown(top, Index{V: idx.V, Backend: idx.Backend}, indexKeys); err != nil {
+	// element by element below, so each entry gets its own merge. Blanking the
+	// field on a copy — rather than restating the other fields in a literal —
+	// keeps this from going stale the way a hand-listed key set would: a field
+	// added to Index is carried here by the same edit that declares it.
+	flat := idx
+	flat.Entries = nil
+	if top, err = mergeKnown(top, flat, indexKeys); err != nil {
 		return err
 	}
 	if len(idx.Entries) > 0 {

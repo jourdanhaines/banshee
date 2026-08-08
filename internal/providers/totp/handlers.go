@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,10 +23,14 @@ const (
 	// demands one.
 	ActTOTPCopy = "totp-copy"
 	// ActTOTPAdd stores a new entry. Values carry the submitted form:
-	// "name", "secret" and optionally "credential".
+	// "name", "secret", optionally "backend" (which secrets manager the seed
+	// goes to, empty for the index's default) and optionally "credential".
 	ActTOTPAdd = "totp-add"
-	// ActTOTPSetup records Argv[0] as the secrets backend to use.
+	// ActTOTPSetup records Argv[0] as a secrets backend to use.
 	ActTOTPSetup = "totp-setup"
+	// ActTOTPSetupMore reopens the launcher on the manager chooser, so a second
+	// secrets backend can be configured alongside the first.
+	ActTOTPSetupMore = "totp-setup-more"
 )
 
 // Timeouts bounding the backend calls the handlers make. They are generous
@@ -204,6 +209,7 @@ func RegisterHandlersWith(dispatch *launch.Dispatcher, deps Deps) {
 	dispatch.Register(ActTOTPCopy, deps.handleCopy)
 	dispatch.Register(ActTOTPAdd, deps.handleAdd)
 	dispatch.Register(ActTOTPSetup, deps.handleSetup)
+	dispatch.Register(ActTOTPSetupMore, deps.handleSetupMore)
 	dispatch.Register(ActTOTPWizardReset, deps.handleWizardReset)
 	dispatch.Register(ActTOTPWizardFix, deps.handleWizardFix)
 }
@@ -238,19 +244,42 @@ func backendUnusable(err error) bool {
 // which is what Deps.State and Deps.Reopen promise for an unwired front-end.
 func (d Deps) wizardWired() bool { return d.State != nil && d.Reopen != nil }
 
-// reportUnusable records a backend failure and puts it in front of the user as
-// wizard rows.
+// reportUnusable records a backend failure met while using a backend — reading
+// a seed, writing one — and puts it in front of the user as wizard rows.
 //
 // It falls back to the toast whenever the wizard would not actually appear: an
 // unwired front-end (a headless caller, or a test that only asserts the old
-// behavior), or a failure the provider's gate would discard — the index names a
-// different backend now, because the user chose one while this call was still
-// waiting on a wedged daemon. Reopening for a wizard that will not render would
-// steal focus and report the failure nowhere at all, so those cases keep the
-// toast, which is what makes a failure visible in every build.
+// behavior), or a failure the provider's gate would discard — the failing
+// manager is not configured any more, because the user reconfigured while this
+// call was still waiting on a wedged daemon. Reopening for a wizard that will not
+// render would steal focus and report the failure nowhere at all, so those cases
+// keep the toast, which is what makes a failure visible in every build.
 func (d Deps) reportUnusable(backend string, err error) {
-	if d.wizardWired() && d.wizardWouldRender(backend) {
-		d.State.Fail(backend, err)
+	d.report(backend, err, false)
+}
+
+// reportSetupFailure is reportUnusable for a failure raised by an explicit setup
+// or repair attempt: a probe of a manager the user just picked, or a wizard fix
+// that did not take.
+//
+// It is separate because such a failure names a manager that is deliberately not
+// configured yet — configuring it is what the attempt was for — so the
+// "is it still configured" guard that discards stale diagnoses would throw away
+// the one report the user is actively waiting for. Marking it instead keeps the
+// guard intact for every other call site.
+func (d Deps) reportSetupFailure(backend string, err error) {
+	d.report(backend, err, true)
+}
+
+// report is the shared body of the two above; fromSetup is passed through to the
+// recorded state so the provider's gate can tell the two apart.
+func (d Deps) report(backend string, err error, fromSetup bool) {
+	if d.wizardWired() && d.wizardWouldRender(backend, fromSetup) {
+		if fromSetup {
+			d.State.FailSetup(backend, err)
+		} else {
+			d.State.Fail(backend, err)
+		}
 		d.Reopen(reopenQuery)
 		return
 	}
@@ -259,14 +288,18 @@ func (d Deps) reportUnusable(backend string, err error) {
 
 // wizardWouldRender answers the provider's gate ahead of time, against the index
 // as it stands now rather than the copy the caller loaded before the backend
-// call it is reporting on. An unreadable index counts as no: the provider's own
+// call it is reporting on. fromSetup mirrors the gate's own exception: a failure
+// raised by an explicit setup attempt renders whether or not the manager is
+// configured.
+//
+// An unreadable index counts as no even for a setup attempt: the provider's own
 // Query would fail on it too, so nothing would be rendered to see.
-func (d Deps) wizardWouldRender(backend string) bool {
+func (d Deps) wizardWouldRender(backend string, fromSetup bool) bool {
 	idx, err := LoadIndex(d.IndexPath)
 	if err != nil {
 		return false
 	}
-	return wizardApplies(idx.Backend, backend)
+	return fromSetup || wizardApplies(idx.Configured(), backend)
 }
 
 // handleWizardReset abandons the wizard and returns the user to the ordinary
@@ -277,6 +310,23 @@ func (d Deps) handleWizardReset(providers.Action) error {
 	if d.Reopen != nil {
 		d.Reopen(reopenQuery)
 	}
+	return nil
+}
+
+// handleSetupMore puts the manager chooser back on screen, which is all the
+// "add another secrets manager" row does: the chooser is a query, so reopening
+// the launcher on reopenSetupQuery is the whole implementation and the provider
+// keeps owning which managers are still on offer.
+//
+// A front-end with no Reopen wired up gets the query named in a notification
+// instead — it is typeable, so the row still leads somewhere — and never an
+// error, because failing a row whose only job is navigation would be noise.
+func (d Deps) handleSetupMore(providers.Action) error {
+	if d.Reopen == nil {
+		d.Notify(fmt.Sprintf("type %q to choose another secrets manager", reopenSetupQuery))
+		return nil
+	}
+	d.Reopen(reopenSetupQuery)
 	return nil
 }
 
@@ -293,6 +343,10 @@ func (d Deps) handleWizardReset(providers.Action) error {
 // the user looked at: a row rendered 29 seconds ago shows a code that is about
 // to expire, and pasting a dead code is the one failure mode that makes a TOTP
 // launcher useless.
+//
+// The seed is read from the manager the entry names, defaulting to the index's
+// first — so a copy keeps working for every entry written before a second
+// manager existed, and reaches the right vault for the ones written after.
 func (d Deps) handleCopy(a providers.Action) error {
 	if len(a.Argv) == 0 || strings.TrimSpace(a.Argv[0]) == "" {
 		return errors.New("totp-copy: no entry name")
@@ -302,14 +356,15 @@ func (d Deps) handleCopy(a providers.Action) error {
 	if err != nil {
 		return err
 	}
-	if idx.Backend == "" {
+	if len(idx.Configured()) == 0 {
 		return errors.New("totp: no secrets backend configured yet")
 	}
 	entry, ok := idx.Find(name)
 	if !ok {
 		return fmt.Errorf("totp: no entry named %q", name)
 	}
-	store, err := d.OpenStore(idx.Backend)
+	backend := entry.BackendOr(idx.DefaultBackend())
+	store, err := d.OpenStore(backend)
 	if err != nil {
 		return err
 	}
@@ -326,12 +381,12 @@ func (d Deps) handleCopy(a providers.Action) error {
 				// First, and not through backendUnusable: a locked collection
 				// is a working backend, and the user needs the password prompt,
 				// not a page of "your keyring is broken" advice.
-				d.Notify(fmt.Sprintf("%s needs your password to unlock %q", idx.Backend, entry.Name))
+				d.Notify(fmt.Sprintf("%s needs your password to unlock %q", backend, entry.Name))
 			case backendUnusable(err):
 				// The entry names itself so the wizard header's subtitle says
 				// which read failed; the secret never reaches this string
 				// because it was never read.
-				d.reportUnusable(idx.Backend, fmt.Errorf("could not read the secret for %q: %w", entry.Name, err))
+				d.reportUnusable(backend, fmt.Errorf("could not read the secret for %q: %w", entry.Name, err))
 			default:
 				d.Notify(fmt.Sprintf("could not read the secret for %q: %v", entry.Name, err))
 			}
@@ -375,6 +430,14 @@ func (d Deps) handleCopy(a providers.Action) error {
 // leaves no index entry pointing at a key that does not exist, and a failed
 // index save after a successful Set is harmless to retry because Set is
 // idempotent — the user simply submits the form again.
+//
+// Values["backend"] is the manager the user picked in the form's Storage
+// dropdown, empty for the single-manager case where there is nothing to pick. It
+// is validated against the configured list rather than trusted: an Action can be
+// minted anywhere, and writing a seed into a vault the user never configured
+// would put it somewhere they would not think to look for it. The name is
+// recorded on the entry only when it is not the default, so a single-manager
+// index gains no new keys at all.
 func (d Deps) handleAdd(a providers.Action) error {
 	rawSecret := strings.TrimSpace(a.Values["secret"])
 	if rawSecret == "" {
@@ -407,13 +470,21 @@ func (d Deps) handleAdd(a providers.Action) error {
 	if err != nil {
 		return err
 	}
-	if idx.Backend == "" {
+	configured := idx.Configured()
+	if len(configured) == 0 {
 		return errors.New("totp: no secrets backend configured yet")
 	}
 	if _, ok := idx.Find(name); ok {
 		return fmt.Errorf("totp: an entry named %q already exists", name)
 	}
-	store, err := d.OpenStore(idx.Backend)
+	backend := strings.TrimSpace(a.Values["backend"])
+	if backend == "" {
+		backend = idx.DefaultBackend()
+	}
+	if !slices.Contains(configured, backend) {
+		return fmt.Errorf("totp: %q is not a configured secrets manager", backend)
+	}
+	store, err := d.OpenStore(backend)
 	if err != nil {
 		return err
 	}
@@ -425,6 +496,9 @@ func (d Deps) handleAdd(a providers.Action) error {
 		Period:    params.Period,
 		Algorithm: params.Algorithm,
 		Created:   d.Now().UTC(),
+	}
+	if backend != idx.DefaultBackend() {
+		entry.Backend = backend
 	}
 	cred := secrets.Credential{Password: a.Values["credential"]}
 	// The seed write and the metadata write are kept apart so a failure can be
@@ -441,7 +515,20 @@ func (d Deps) handleAdd(a providers.Action) error {
 		d.State.Clear()
 		return nil
 	}
+	// The index is re-read here rather than reusing the copy loaded above, for
+	// the reason appendBackend re-reads: on the detached path the store.Set in
+	// between can sit on an unlock prompt for the whole addTimeout, and anything
+	// written to totp.json meanwhile — a second manager, another entry — is
+	// absent from the stale copy. SaveIndex is a merge for keys this build does
+	// not know, not for the ones it does: an omitempty field at its zero value
+	// deletes its key, so saving the stale copy would strip "backends" and drop
+	// the concurrently added entries. Re-reading also re-runs Add's duplicate
+	// check against what is actually on disk.
 	recordEntry := func() error {
+		idx, err := LoadIndex(d.IndexPath)
+		if err != nil {
+			return err
+		}
 		if err := idx.Add(entry); err != nil {
 			return err
 		}
@@ -458,7 +545,7 @@ func (d Deps) handleAdd(a providers.Action) error {
 				// daemon's lifetime.
 				wrapped := fmt.Errorf("could not add %q: %w", name, err)
 				if backendUnusable(err) {
-					d.reportUnusable(idx.Backend, wrapped)
+					d.reportUnusable(backend, wrapped)
 					return
 				}
 				d.Notify(wrapped.Error())
@@ -485,7 +572,7 @@ func (d Deps) handleAdd(a providers.Action) error {
 		// must keep getting the error back from Dispatch — the wizard is the only
 		// other place this failure would be reported.
 		if d.wizardWired() && backendUnusable(err) {
-			d.reportUnusable(idx.Backend, fmt.Errorf("could not add %q: %w", name, err))
+			d.reportUnusable(backend, fmt.Errorf("could not add %q: %w", name, err))
 			return nil
 		}
 		return err
@@ -515,19 +602,25 @@ func (d Deps) probeBackend(ctx context.Context, store secrets.Store, probe bool)
 	return nil
 }
 
-// persistBackend records store as this machine's choice, re-reading the index
-// first so a concurrent add is not clobbered by a stale copy.
+// appendBackend records store among this machine's configured secrets managers,
+// re-reading the index first so a concurrent add is not clobbered by a stale
+// copy.
+//
+// It appends rather than replaces because a user may legitimately keep seeds in
+// several managers at once; AddBackend is idempotent, so re-running setup on a
+// manager already configured (the wizard's Retry row, a second pass through the
+// chooser) leaves the index exactly as it was.
 //
 // It is kept apart from probeBackend because the two fail for entirely different
 // reasons: a failed probe is the definition of an unusable backend and belongs
 // in the wizard, while a failed index write is a disk problem that retrying a
 // keyring probe would never fix.
-func (d Deps) persistBackend(store secrets.Store) error {
+func (d Deps) appendBackend(store secrets.Store) error {
 	idx, err := LoadIndex(d.IndexPath)
 	if err != nil {
 		return err
 	}
-	idx.Backend = store.Name()
+	idx.AddBackend(store.Name())
 	return SaveIndex(d.IndexPath, idx)
 }
 
@@ -548,7 +641,11 @@ func (d Deps) finishSetup(ctx context.Context, backend string, store secrets.Sto
 		// hold seeds", so a probe that could not finish — for any reason,
 		// including an unlock prompt nobody answered — has answered no, and
 		// retrying is the next step either way.
-		d.reportUnusable(backend, err)
+		//
+		// It is reported as a setup failure so the wizard renders even though the
+		// manager is not configured yet, which for a second manager is the normal
+		// state: probing is what happens before it is written down.
+		d.reportSetupFailure(backend, err)
 		return
 	}
 	// Cleared here, before the index write, for the reason handleCopy and
@@ -557,7 +654,7 @@ func (d Deps) finishSetup(ctx context.Context, backend string, store secrets.Sto
 	// Clearing after persist instead would leave a wizard on screen diagnosing a
 	// keyring that demonstrably works, every time the disk refused the write.
 	d.State.Clear()
-	if err := d.persistBackend(store); err != nil {
+	if err := d.appendBackend(store); err != nil {
 		d.Notify(err.Error())
 		return
 	}
@@ -626,7 +723,9 @@ func (d Deps) handleWizardFix(a providers.Action) error {
 		}
 		cancelFix()
 		if err != nil {
-			d.reportUnusable(backend, fmt.Errorf("%s: %w%s", fix.failMsg, err, trimmedOutput(out)))
+			// A repair the user asked for, so it is a setup failure like the probe
+			// below: the manager it repairs is usually not configured yet.
+			d.reportSetupFailure(backend, fmt.Errorf("%s: %w%s", fix.failMsg, err, trimmedOutput(out)))
 			return
 		}
 		// A budget of its own, not what the fix left over: see fixTimeout. It is
@@ -641,7 +740,10 @@ func (d Deps) handleWizardFix(a providers.Action) error {
 	return nil
 }
 
-// handleSetup records which secrets backend holds this machine's seeds.
+// handleSetup adds a secrets backend to the ones holding this machine's seeds.
+// It is both the first-time choice and the "add another secrets manager" flow:
+// the index accumulates managers, so the only difference between the two is how
+// many were already there.
 //
 // A keyring is probed with a throwaway write and delete before being
 // persisted: go-keyring reports success against Secret Service
@@ -689,7 +791,7 @@ func (d Deps) handleSetup(a providers.Action) error {
 	// successful copy or add — the one escape it offers would not work. A failed
 	// persist below still reaches the user, as the dispatcher's own error.
 	d.State.Clear()
-	if err := d.persistBackend(store); err != nil {
+	if err := d.appendBackend(store); err != nil {
 		return err
 	}
 	if d.Reopen != nil {

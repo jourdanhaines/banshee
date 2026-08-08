@@ -3,6 +3,7 @@ package totp
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/jourdanhaines/banshee/internal/providers"
@@ -43,7 +44,8 @@ const (
 	// reading them just reproduces the failure.
 	wizardRetryScore = 820
 	// wizardBackScore puts the escape hatch last — it is the rarest choice,
-	// and only offered at all during first-time setup.
+	// and only offered at all for a manager the user is not relying on yet
+	// (see wizardResults' offerBack).
 	wizardBackScore = 810
 )
 
@@ -95,12 +97,36 @@ type SetupState struct {
 	backend string
 	message string
 	active  bool
+	// fromSetup marks the recorded failure as raised by an explicit setup or
+	// repair attempt rather than by ordinary use of a configured manager. The
+	// provider's gate needs the distinction because the two look identical
+	// otherwise: a failure naming a manager that is not configured is either a
+	// stale diagnosis to discard, or the result of the user trying to configure
+	// that very manager, which is the report they are waiting for.
+	fromSetup bool
 }
 
 // Fail records that backend failed with err, replacing any previous failure —
 // the newest diagnosis is the only one worth showing. A nil err is a no-op, so
 // callers can hand it the result of an operation without branching first.
+//
+// It is the ordinary-use variant: the failure is only rendered while backend is
+// still one of the configured managers. Use FailSetup for a failure raised by an
+// attempt to configure or repair one.
 func (s *SetupState) Fail(backend string, err error) {
+	s.fail(backend, err, false)
+}
+
+// FailSetup is Fail for a failure raised by an explicit setup or repair attempt —
+// a probe of a manager the user just picked, a wizard fix that did not take. The
+// recorded failure is rendered even though the manager is not configured yet,
+// because configuring it is precisely what failed.
+func (s *SetupState) FailSetup(backend string, err error) {
+	s.fail(backend, err, true)
+}
+
+// fail is the shared body of Fail and FailSetup.
+func (s *SetupState) fail(backend string, err error, fromSetup bool) {
 	if s == nil || err == nil {
 		return
 	}
@@ -109,6 +135,7 @@ func (s *SetupState) Fail(backend string, err error) {
 	s.backend = backend
 	s.message = err.Error()
 	s.active = true
+	s.fromSetup = fromSetup
 }
 
 // Clear forgets the recorded failure. Callers invoke it on any successful
@@ -123,32 +150,42 @@ func (s *SetupState) Clear() {
 	s.backend = ""
 	s.message = ""
 	s.active = false
+	s.fromSetup = false
 }
 
-// Snapshot returns the recorded failure. ok is false when nothing is recorded —
-// including on a nil receiver, so an unwired front-end always takes the
-// no-wizard path.
-func (s *SetupState) Snapshot() (backend, message string, ok bool) {
+// Snapshot returns the recorded failure and whether it came from an explicit
+// setup attempt. ok is false when nothing is recorded — including on a nil
+// receiver, so an unwired front-end always takes the no-wizard path.
+//
+// All four values come out under one lock rather than from separate accessors:
+// the gate that reads them decides on the combination, and a torn read could pair
+// one failure's backend with another's setup flag.
+func (s *SetupState) Snapshot() (backend, message string, fromSetup, ok bool) {
 	if s == nil {
-		return "", "", false
+		return "", "", false, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.backend, s.message, s.active
+	return s.backend, s.message, s.fromSetup, s.active
 }
 
 // wizardApplies reports whether a failure recorded against the failed backend
-// still describes the backend the user would be using, given the one persisted
-// in the index. An empty persisted name is first-time setup, where every
-// candidate failure applies; a different name means the user reconfigured out
+// still describes a manager the user would be using, given the ones configured
+// in the index. Nothing configured is first-time setup, where every candidate
+// failure applies; a name that is not among them means the user reconfigured out
 // of band and the recorded diagnosis is stale.
+//
+// It deliberately says nothing about setup attempts: a failure raised while
+// configuring a *new* manager names one that is not configured yet and would be
+// discarded here, which is why the callers treat a setup-flagged failure as
+// applying regardless (see SetupState.fromSetup).
 //
 // It is the one place this rule lives: the provider consults it to decide
 // whether to render the wizard, and the handlers consult it before recording a
 // failure, so a failure that would be discarded is reported as a toast instead
 // of vanishing.
-func wizardApplies(persisted, failed string) bool {
-	return persisted == "" || persisted == failed
+func wizardApplies(configured []string, failed string) bool {
+	return len(configured) == 0 || slices.Contains(configured, failed)
 }
 
 // WithSetupState injects the shared failure state. Without it the provider
@@ -178,15 +215,20 @@ func WithSetupState(s *SetupState) Option {
 // the machine's own account of the failure, while the guidance rows below are
 // distro-neutral best-effort advice.
 //
-// firstTime reports that no backend has been persisted yet, which is the only
-// situation where "choose a different backend" makes sense — once seeds exist
-// under a backend, switching is not a wizard's decision.
+// offerBack asks for the "choose a different backend" escape row. It belongs on
+// a wizard the user can walk away from: first-time setup, where nothing has been
+// persisted yet, and a failed attempt to add a further manager, where the working
+// ones are still there to go back to. It is withheld only when the failing
+// manager is one the user already keeps seeds in — switching that is not a
+// wizard's decision — and withholding it anywhere else would leave the trigger
+// rendering the wizard with no way out, since this row is what clears the
+// recorded failure.
 //
 // lookPath probes for a program on PATH (exec.LookPath in production) and is
 // threaded through rather than called directly so the rendered rows stay a pure
 // function of their inputs, which is what lets a test pin them byte for byte on
 // any machine.
-func wizardResults(backend, message string, firstTime bool, lookPath func(string) (string, error)) []providers.Result {
+func wizardResults(backend, message string, offerBack bool, lookPath func(string) (string, error)) []providers.Result {
 	guidance := wizardGuidance(backend, lookPath)
 	out := make([]providers.Result, 0, len(guidance)+3)
 	out = append(out, providers.Result{
@@ -238,7 +280,7 @@ func wizardResults(backend, message string, firstTime bool, lookPath func(string
 		Score:    wizardRetryScore,
 		Action:   providers.Action{Kind: ActTOTPSetup, Argv: []string{backend}},
 	})
-	if firstTime {
+	if offerBack {
 		out = append(out, providers.Result{
 			ID:       "totp:wizard:back",
 			Title:    "Choose a different backend",
