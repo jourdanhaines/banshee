@@ -73,6 +73,34 @@ type Action struct {
 	ForceNew bool   // session: always spawn a new terminal instead of reusing a client
 
 	Text string // clipboard-copy: the text to copy
+
+	// Values carries a submitted form's field values, keyed by FormField.Key.
+	// Nil for actions that did not come from a form.
+	Values map[string]string
+}
+
+// FormField is one input in a Form. It is purely declarative so the exec
+// plugin protocol can carry it over the wire verbatim.
+type FormField struct {
+	// Key is the submitted-values map key; unique within the form.
+	Key string
+	// Label is shown above the input.
+	Label string
+	// Placeholder is the input's placeholder text.
+	Placeholder string
+	// Required refuses submission while the trimmed value is empty.
+	Required bool
+}
+
+// Form makes a result open a secondary input view inside the launcher
+// instead of dispatching immediately. Fields are declarative; Build is the
+// single non-serializable part and turns the submitted values into the
+// Action to dispatch — for plugin results the host synthesizes it as a
+// values-carrying plugin callback.
+type Form struct {
+	Title  string
+	Fields []FormField
+	Build  func(values map[string]string) (Action, error)
 }
 
 // Result is a single launcher row.
@@ -92,6 +120,11 @@ type Result struct {
 	Accent    string
 	Action    Action
 	AltAction *Action // Tab / Shift+Enter
+	// Form, when non-nil, replaces the primary activation: instead of
+	// dispatching Action, the launcher opens an input form and dispatches
+	// Build's action on submit. AltAction still dispatches directly (or does
+	// nothing when nil), bypassing the form.
+	Form *Form
 }
 
 // Provider is a source of results. Query must honor ctx cancellation: the
