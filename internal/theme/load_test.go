@@ -93,7 +93,7 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window .result-title",
 		"#banshee-window .result-subtitle",
 		"#banshee-window .result-badge",
-		"#banshee-window .empty",
+		"#banshee-window label.empty",
 	}
 
 	css := roundTrip(t, config.Default())

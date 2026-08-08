@@ -332,8 +332,12 @@ window#banshee-window {
 	min-height: 2px;
 }
 
-/* Placeholder shown when a query matches nothing */
-#banshee-window .empty {
+/* Placeholder shown when a query matches nothing. The label element is part
+   of the selector, not decoration: GtkProgressBar toggles an .empty style
+   class on itself whenever its fraction is 0, so a bare ".empty" rule would
+   pad every drained (or opacity-hidden) timer bar out to a phantom
+   row-height slot under the query entry. */
+#banshee-window label.empty {
 	color: rgba(223, 228, 238, 0.35);
 	font-size: 13px;
 	padding: 22px;
