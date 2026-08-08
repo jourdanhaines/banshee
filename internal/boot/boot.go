@@ -34,6 +34,7 @@ import (
 	"github.com/jourdanhaines/banshee/internal/providers/procs"
 	"github.com/jourdanhaines/banshee/internal/providers/repos"
 	"github.com/jourdanhaines/banshee/internal/providers/sessions"
+	"github.com/jourdanhaines/banshee/internal/providers/steam"
 	"github.com/jourdanhaines/banshee/internal/providers/totp"
 	"github.com/jourdanhaines/banshee/internal/session"
 	"github.com/jourdanhaines/banshee/internal/state"
@@ -52,9 +53,10 @@ type Launcher struct {
 	disp *launch.Dispatcher
 
 	// Providers holding reloadable state.
-	host *plugins.Host
-	conn *connectors.Provider
-	apps *apps.Provider
+	host  *plugins.Host
+	conn  *connectors.Provider
+	apps  *apps.Provider
+	steam *steam.Provider
 
 	// totpSetup is the TOTP backend-failure record shared by the totp provider
 	// (which renders the setup wizard from it) and the totp action handlers
@@ -100,6 +102,7 @@ func New(cfg config.Config) *Launcher {
 	b.conn.AddManifests(b.host.URLManifests()...)
 
 	b.apps = apps.New(fuzzy.Score, apps.WithMaxResults(cfg.MaxResults))
+	b.steam = steam.New(fuzzy.Score, steam.WithMaxResults(cfg.MaxResults))
 
 	// Created before the provider is registered, and never replaced: reload
 	// re-runs registerHandlers, which rewires this same pointer into the
@@ -119,6 +122,7 @@ func New(cfg config.Config) *Launcher {
 	b.reg.Register(calc.New())
 	b.reg.Register(totp.New(fuzzy.Score, totp.WithSetupState(b.totpSetup)))
 	b.reg.Register(b.apps)
+	b.reg.Register(b.steam)
 	b.reg.Register(procs.New(fuzzy.Score, procs.WithMaxResults(cfg.MaxResults)))
 	// Exec plugins go through an indirection so `banshee reload` can swap the
 	// whole set: the frozen Registry has no removal.
@@ -298,6 +302,11 @@ func (b *Launcher) reload() error {
 
 	if err := b.apps.Reload(); err != nil {
 		errs = append(errs, fmt.Errorf("apps: %w", err))
+	}
+	// Like apps: a handful of tiny manifest reads, cheap enough for the main
+	// loop.
+	if err := b.steam.Reload(); err != nil {
+		errs = append(errs, fmt.Errorf("steam: %w", err))
 	}
 
 	b.reloadBackground()
