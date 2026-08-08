@@ -174,6 +174,13 @@ type WireFormField struct {
 	// unmasked, and a plugin too old to set it leaves it false — either way
 	// the submitted value is unchanged.
 	Secret bool `json:"secret"`
+	// Options, when non-empty, makes the launcher render the field as a
+	// dropdown over exactly these choices instead of a text entry, and the
+	// submitted value is the chosen one. Degradation is symmetric: a host too
+	// old to know the field ignores it and renders a free-text entry, and a
+	// plugin too old to set it leaves it empty — either way a value comes back
+	// under the same key.
+	Options []string `json:"options,omitempty"`
 }
 
 // toResult converts a wire result into a launcher result, filling icon and
@@ -219,6 +226,7 @@ func wireFormTo(f WireForm, pluginID, resultID string) *providers.Form {
 			Placeholder: wf.Placeholder,
 			Required:    wf.Required,
 			Secret:      wf.Secret,
+			Options:     wf.Options,
 		}
 	}
 	return &providers.Form{

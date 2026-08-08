@@ -11,6 +11,11 @@
 // the built-in TOTP service — additive, zero value inert. A provider that
 // never sets them behaves exactly as before, and a UI that ignores them
 // renders every field unmasked and every row static.
+//
+// Migration 2026-08c: Result.Period and FormField.Options added — additive,
+// zero value inert. Period refines Expiry with the length of the window that
+// ends there, so the UI can show how much of it remains; Options turns a form
+// field into a fixed-choice dropdown.
 package providers
 
 import (
@@ -101,6 +106,12 @@ type FormField struct {
 	// and TOTP seeds typed in front of a screen. It is a display property
 	// only: the submitted value still travels verbatim in Action.Values.
 	Secret bool
+	// Options, when non-empty, renders the field as a fixed-choice dropdown
+	// instead of a text entry: the submitted value is exactly the selected
+	// option string and the first option is preselected, so the field always
+	// submits a value and Required is trivially satisfied. Secret is ignored
+	// on a dropdown — a fixed choice list has nothing to mask.
+	Options []string
 }
 
 // Form makes a result open a secondary input view inside the launcher
@@ -137,11 +148,15 @@ type Result struct {
 	// nothing when nil), bypassing the form.
 	Form *Form
 	// Expiry, when non-zero, marks the row's displayed content as valid only
-	// until that instant — a rotating TOTP code, say. The UI ticks a
-	// countdown suffix onto the subtitle once a second and re-runs the
-	// current query once the instant passes, so the row's text refreshes
-	// without the user touching the keyboard. Zero means a static row.
+	// until that instant — a rotating TOTP code, say. The UI drains a progress
+	// bar toward it and re-runs the current query once it passes, so the row
+	// refreshes without the user touching the keyboard. Zero means a static
+	// row.
 	Expiry time.Time
+	// Period, when non-zero, is the length of the validity window that ends at
+	// Expiry, so the UI can render how much of it remains. Zero on a live row
+	// means the standard 30-second TOTP window; zero on a static row is inert.
+	Period time.Duration
 }
 
 // Provider is a source of results. Query must honor ctx cancellation: the
