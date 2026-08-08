@@ -1,0 +1,64 @@
+name: CI
+
+# The gate CONTRIBUTING.md promises: `make lint` (gofmt + go vet) and
+# `make test`. Both need the GTK4 and gtk4-layer-shell headers, because the
+# module links them through cgo — there is no display involved, and no test in
+# the default suite opens one.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK4 and gtk4-layer-shell
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev
+          # Packaged where it exists; built from source where it does not
+          # (Ubuntu only started shipping the GTK4 flavour recently, and the
+          # GTK3 libgtk-layer-shell-dev is a different library).
+          sudo apt-get install -y --no-install-recommends libgtk4-layer-shell-dev || true
+          if ! pkg-config --exists gtk4-layer-shell-0; then
+            sudo apt-get install -y --no-install-recommends \
+              meson ninja-build libwayland-dev wayland-protocols git
+            git clone --depth 1 --branch v1.3.0 \
+              https://github.com/wmww/gtk4-layer-shell "$RUNNER_TEMP/gtk4-layer-shell"
+            meson setup --prefix=/usr -Dexamples=false -Ddocs=false -Dtests=false \
+              "$RUNNER_TEMP/gtk4-layer-shell/build" "$RUNNER_TEMP/gtk4-layer-shell"
+            sudo meson install -C "$RUNNER_TEMP/gtk4-layer-shell/build"
+            sudo ldconfig
+          fi
+          pkg-config --modversion gtk4 gtk4-layer-shell-0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # Module *and* build cache: the gotk4 cgo tree is a 5-15 minute cold
+          # build, so caching it is what makes this workflow usable at all.
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Lint (gofmt + go vet)
+        run: make lint
+
+      - name: Test
+        run: make test
+
+      - name: Build
+        run: make build

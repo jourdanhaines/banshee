@@ -1,0 +1,7 @@
+# leading comment
+[Desktop Entry]
+Name=Konsole
+GenericName = Terminal
+Keywords=shell;;  prompt ;
+Exec=konsole
+Type=Application

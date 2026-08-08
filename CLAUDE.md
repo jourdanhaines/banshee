@@ -1,0 +1,112 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Build & Development Commands
+
+```bash
+make build       # → ./bin/banshee (CGo mandatory: GTK4 + gtk4-layer-shell are C libraries)
+make test        # go test ./... — no display, tmux server or network needed
+make test-race   # same suite under -race, minus internal/theme (see below)
+make smoke       # go test -tags gtksmoke -run Smoke ./internal/daemon — needs a live Wayland/X session
+make lint        # gofmt -l check, then go vet ./..., then golangci-lint if installed
+make warm        # pre-compile the gotk4 cgo tree: 5–15 min cold, once per machine
+make install     # binary + shell plugins + systemd unit + banshee.conf + example plugin
+make help        # list documented targets
+```
+
+- **`make lint && make test` is the gate** — `.github/workflows/ci.yml` runs that plus `make build` on every push and PR.
+- **Never clear `GOCACHE`** — it holds the warmed gotk4 cgo tree; clearing it costs another `make warm`.
+- **`make test-race` excludes `internal/theme`** — reason in the Makefile's `## test-race` comment block.
+
+## Git Conventions
+
+- **Prefix every subject** with one of `feat`, `fix`, `chore`, `docs`, `refactor` — single word, no scope brackets, subject ≤ 60 chars (`feat: add clipboard-history provider`).
+- **Subject line only** — no commit body unless the *why* is genuinely non-obvious or the user explicitly asks for one.
+- **Never** use `Co-authored-by` trailers.
+
+## Go Code Style (internal/)
+
+- **Provider shape** — a result source is `type Provider struct{…}` in its own package under `internal/providers/<name>/`, built by a `New(...) *Provider` constructor, exposing exactly `Name() string` and `Query(ctx context.Context, q string) ([]providers.Result, error)`. Optional knobs are variadic `Option` funcs (`apps.WithMaxResults`), never extra constructor params. `Query` must honor `ctx` cancellation — the aggregator cancels the previous query on every keystroke.
+- **Extension seams only at declared boundaries** — interfaces: `providers.Provider`, `providers.Aggregator`, `tmux.Runner`, `index.Index`, `daemon.UI`; registration structs: `providers.Registry`, `launch.Dispatcher`; func type: `fuzzy.Scorer`. Everything else is a concrete struct. Never introduce an interface to make a single implementation mockable; use the seam above it.
+- **Action handlers register per-package** — a provider package that emits a new `Action.Kind` ships `Register<Name>Handler(d *launch.Dispatcher)` and `boot.registerHandlers` calls it (`apps.RegisterAppLaunchHandler`, `procs.RegisterKillHandler`, `plugins.RegisterCallbackHandler`, `sessions.RegisterAttachHandler`, `connectors.RegisterLinkHandler`). **No** switch on `Kind` outside `Dispatcher.Dispatch`.
+- **Tests are table-driven** — one `[]struct{name string; …}` per behavior, subtests via `t.Run`. Exceptions: end-to-end flow and process-lifecycle tests (`providers/aggregator_block_test.go`, `plugins/lifecycle_test.go`, `cli/editor_test.go`), which assert one sequence rather than a matrix.
+- **Tests are hermetic** — **no** live tmux server, GTK display, network, or dependence on the developer's `$HOME`. Use `t.TempDir()`, fake procfs trees, `sh -c` stub plugins, and `tmux.Runner` fakes for golden-argv assertions. A test that needs a display goes behind a build tag like `gtksmoke`.
+- **Comments** — godoc on every exported identifier saying what it does and why it exists, never restating its name; plus a rationale comment on any code whose correctness depends on an external constraint (upstream bug, GTK threading, wire compatibility), see `boot.reload` on why the rescan is backgrounded.
+- **Forward compatibility is not optional** — unknown config keys and unknown JSON fields are ignored everywhere. Everything on disk or on the wire carries a `v`: session configs, groups, plugin manifests, per-repo configs, the IPC protocol, the plugin protocol.
+
+## Architecture
+
+banshee is a single Go binary with two front-ends over one core: a GTK4 layer-shell launcher for Hyprland and a tmux session CLI. Dependency direction is strictly downward: `boot` knows every provider, no provider knows `boot`.
+
+- `cmd/banshee/` — dispatch only.
+- `internal/boot/` — assembles registry, aggregator, dispatcher, plugin host, UI constructor.
+- `internal/cli/` — flag parsing, pickers, editor loop, `doctor`, `link`, hidden `_complete` / `_startup-prompt`.
+- `internal/daemon/` — single-instance lock, GTK hosting, IPC op dispatch.
+- `internal/ipc/` — control-socket protocol v1, client and server.
+- `internal/ui/` — GTK4 window, list, rows, mode-aware keymap, debounce, form view (form logic in `formstate.go`, GTK plumbing in `form.go`; a `Result.Form` activation slides the form page in instead of dispatching).
+- `internal/theme/` — CSS generation from accent/opacity/width.
+- `internal/layershell/` — wrapper over the gtk4-layer-shell binding.
+- `internal/hypr/` — minimal Hyprland IPC client (focus the terminal holding a pid).
+- `internal/icons/` — SVGs compiled into the binary (github, railway), accent-tinted.
+- `internal/providers/` — frozen `Provider`/`Result` contract plus the aggregator.
+- `internal/providers/sessions/` — "Open \<repo\> session" (`CatSession`).
+- `internal/providers/lastaction/` — "Resume \<target\>" (`CatSession`).
+- `internal/providers/connectors/` — GitHub, Railway, url plugins (`CatGitHub`/`CatConnector`); also the "Link \<Connector\> project to \<repo\>" form row for the current tmux pane's unbound repo, the `connector-link` action, and the `.banshee/config.json` save path.
+- `internal/providers/repos/` — "Open \<repo\> directory" (`CatDirectory`).
+- `internal/providers/calc/` — inline calculator (`CatCalc`).
+- `internal/providers/apps/` — `.desktop` applications (`CatApp`).
+- `internal/providers/procs/` — "Kill \<process\>" (`CatKill`).
+- `internal/providers/plugins/` — exec-plugin host, protocol v1 (`CatPlugin`).
+- `internal/launch/` — `Action.Kind` → handler dispatch table.
+- `internal/fuzzy/` — `Score(query, candidate) (int, bool)`.
+- `internal/index/` — repo discovery plus cache file.
+- `internal/session/` — session/group JSON schema, validation, resolution.
+- `internal/tmux/` — `Runner` interface plus session builder.
+- `internal/state/` — `last_action` store.
+- `internal/config/` — `banshee.conf` parser, XDG paths, per-repo config.
+
+### Boot flow
+
+`cmd/banshee/main.go` → `cli.Run(os.Args[1:], boot.Hooks())` → `boot.New(cfg)` registers providers into `providers.Registry` and handlers into `launch.Dispatcher` → `daemon.Run(daemon.Options{NewUI: …})` with a UI constructor function.
+
+- **`daemon` never imports `internal/ui`** — it takes a `func(*gtk.Application) daemon.UI`, which is what lets an alternate front-end reuse the daemon.
+- **`cli` never imports GTK** — launcher verbs (`daemon`, `toggle`, `show`, `hide`, `reload`, `quit`) reach it as `cli.Hooks` function values, which is what keeps the CLI testable with no display.
+
+### The two registries
+
+- **`providers.Registry` is append-only** — `Register` appends; there is no removal. Swapping a whole provider set at runtime needs an indirection (see `boot.pluginSet`, which reads through to the plugin host so `banshee reload` can replace every exec plugin).
+- **`launch.Dispatcher` replaces by `Action.Kind`** — `Register` overwrites. Re-running `boot.registerHandlers` is therefore the reload path for a changed `terminal =`.
+
+### Shared-score contract
+
+Every repo-derived provider (sessions, GitHub, connectors, repos) scores the **repo basename** — `fuzzy.Score(query, repo.Name)` — with the same `Scorer`, never its own rendered title. Identical scores let the `Category` tiebreak in the `(-Score, Category, Title)` sort collapse one repo's rows into a fixed-order block; scoring `"Open blacksheep on GitHub"` would scatter it. Asserted end-to-end in `internal/providers/aggregator_block_test.go`; full contract in the `internal/providers/aggregator.go` doc comment. One deliberate exception: the connectors provider's link row is connector-derived and scores the connector name/id (rationale on `linkResults`).
+
+Results at `CatApp` or lower priority (apps, procs, plugins) are dropped below `MinScore` on non-empty queries so weak matches cannot outrank a repo block. Empty queries are never thresholded.
+
+### Frozen contracts
+
+These files define cross-package boundaries and change **only** by a deliberate migration that touches every consumer — never a drive-by edit.
+
+- `internal/providers/provider.go` — `Result`, `Action`, `Icon`, `Category`, `Form`, `FormField`, `Provider`, `Registry`. (Migration 2026-08: `Result.Form` and `Action.Values` added for in-launcher forms — additive, zero value inert.)
+- `internal/providers/aggregate.go` — `Aggregator`.
+- `internal/ipc/proto.go` — protocol v1, socket and lock paths.
+- `internal/config/config.go` — `Config`, defaults, XDG paths.
+- `internal/config/repoconf.go` — per-repo `.banshee/config.json`.
+- `internal/session/schema.go` — `Session`, `Window`, `Pane`, `Group`.
+- `internal/tmux/runner.go` — `Runner`, `ExecRunner`, `SessionName`.
+- `internal/index/index.go` — `Index`, `Repo`.
+- `internal/launch/dispatch.go` — `Dispatcher`.
+- `internal/layershell/layershell.go` — `Setup`, `SetKeyboardMode`, `Supported`.
+
+## Plugins
+
+- **Manifest** — every plugin is a directory `<plugins-dir>/<id>/manifest.json` (schema `v: 1`); `config.PluginsDir()` resolves the location. The directory name is cosmetic — the manifest `id` is the identity. A malformed manifest disables only its own plugin and is reported by `banshee doctor`.
+- **Two types** — `"url"` is a declarative connector (a URL template plus optional binding from the repo's `.banshee/config.json`, no Go at all); `"exec"` is a long-running child process speaking newline-delimited JSON, protocol v1, on stdin/stdout.
+- **Source of truth** — `internal/providers/plugins/proto.go` for the wire format, event set and the exec process contract (cwd, `BANSHEE_PLUGIN_*` env, stdout hygiene); `internal/providers/plugins/exec.go` for the lifecycle and timing constants (soft timeout, crash backoff, disable-until-reload, shutdown grace); `internal/providers/connectors/manifest.go` for the manifest schema of both types, plus the URL placeholders and binding rule; `plugins/example/` for a complete commented exec plugin. Do not restate any of it elsewhere.
+
+## Gotchas
+
+- **Never connect `gtk.CSSProvider`'s `parsing-error` signal** — under gotk4 `pkg/v0.4.0` the generated marshaller double-frees the `GError` and aborts the process when it fires. GTK already logs parse errors through GLib. `internal/theme/load_test.go` validates the generated stylesheet instead by parsing it with GTK's own engine and asserting every selector and declaration survives the round trip.
+- **Test the launcher from a fresh shell** — stale shell state (an old `banshee` on `$PATH`, a running daemon from a previous build, a sourced shell plugin) produces errors that look like code bugs. A new session, after `make install`, is the only reliable check.
+- **GTK is single-threaded** — everything in `internal/ui` runs on the GTK main loop, and the daemon's socket goroutine marshals every op through `glib.IdleAdd` (5 s timeout). Providers run off the main loop concurrently; action handlers run on it, after the window is hidden, and must spawn and return rather than block.

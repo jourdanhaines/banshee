@@ -1,0 +1,17 @@
+[Desktop Entry]
+Version=1.0
+Name=Firefox
+Name[de]=Feuerfuchs
+GenericName=Web Browser
+GenericName[de]=Webbrowser
+Comment=Browse the World Wide Web
+Keywords=Internet;WWW;Browser;Web;
+Exec=firefox %u
+Terminal=false
+Type=Application
+SomeFutureKey=ignored
+
+[Desktop Action new-window]
+Name=New Window
+GenericName=Not This One
+Exec=firefox --new-window
