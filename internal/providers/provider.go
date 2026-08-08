@@ -16,6 +16,10 @@
 // zero value inert. Period refines Expiry with the length of the window that
 // ends there, so the UI can show how much of it remains; Options turns a form
 // field into a fixed-choice dropdown.
+//
+// Migration 2026-08d: CatSteamPlay, CatSteamLibrary, CatSteamStorePage,
+// CatSteamDB, CatSteamStore and CatSteamSearch added for the built-in Steam
+// provider — additive, zero value inert.
 package providers
 
 import (
@@ -37,8 +41,18 @@ const (
 	CatCalc      Category = 35 // inline calculator answer
 	CatTOTP      Category = 37 // inline TOTP code rows; sits above CatApp so the MinScore threshold never drops them
 	CatApp       Category = 40 // installed applications
-	CatKill      Category = 50 // "Kill <proc>"
-	CatPlugin    Category = 60 // exec-plugin results
+	// The four Steam block categories collapse one installed game's rows into a
+	// fixed-order block, exactly like the repo block: all four rows carry the
+	// game's shared score and the Category tiebreak orders them. They sit above
+	// CatApp so weak game matches are MinScore-thresholded like apps.
+	CatSteamPlay      Category = 41 // "Play <game>"
+	CatSteamLibrary   Category = 42 // "Open <game> in Steam library"
+	CatSteamStorePage Category = 43 // "View <game> on Steam store"
+	CatSteamDB        Category = 44 // "View <game> on SteamDB"
+	CatSteamStore     Category = 45 // live Steam store search result
+	CatSteamSearch    Category = 46 // "Search Steam store for '<q>'"
+	CatKill           Category = 50 // "Kill <proc>"
+	CatPlugin         Category = 60 // exec-plugin results
 )
 
 // Icon identifies how the UI should resolve a result's icon. Exactly one
