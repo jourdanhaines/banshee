@@ -120,6 +120,11 @@ type ExecSpec struct {
 
 var idRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
+// ValidIdentifier reports whether id is a well-formed connector/plugin id.
+// Callers without a loaded manifest set (the CLI link verb) use it to accept
+// any plausible id rather than only the builtins.
+func ValidIdentifier(id string) bool { return idRe.MatchString(id) }
+
 // ParseManifest decodes a manifest.json body loaded from dir and validates it.
 // dir may be empty for manifests that are not backed by a directory.
 func ParseManifest(data []byte, dir string) (Manifest, error) {

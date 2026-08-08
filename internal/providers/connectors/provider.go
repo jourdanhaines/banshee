@@ -21,9 +21,10 @@ type Scorer = func(query, candidate string) (int, bool)
 // aggregator groups them into a fixed-order block under the repo's session and
 // directory results.
 type Provider struct {
-	idx    index.Index
-	score  Scorer
-	origin OriginResolver
+	idx         index.Index
+	score       Scorer
+	origin      OriginResolver
+	currentRepo CurrentRepoFunc // immutable after construction; nil disables link rows
 
 	mu        sync.RWMutex
 	manifests []Manifest
@@ -32,15 +33,25 @@ type Provider struct {
 	confs   *repoConfCache
 }
 
+// Option configures optional Provider behavior.
+type Option func(*Provider)
+
+// WithCurrentRepo enables "Link <Connector> project to <repo>" results for
+// the repo under the most recently active tmux pane. Without it the provider
+// emits no link rows (tests, front-ends without tmux).
+func WithCurrentRepo(fn CurrentRepoFunc) Option {
+	return func(p *Provider) { p.currentRepo = fn }
+}
+
 // New returns a Provider seeded with the compiled-in connectors (Builtins).
 // idx supplies the repositories to match against; score ranks repo basenames.
-func New(idx index.Index, score Scorer) *Provider {
-	return NewWith(idx, score, Builtins())
+func New(idx index.Index, score Scorer, opts ...Option) *Provider {
+	return NewWith(idx, score, Builtins(), opts...)
 }
 
 // NewWith returns a Provider using exactly the given manifests. Non-url
 // manifests are ignored.
-func NewWith(idx index.Index, score Scorer, manifests []Manifest) *Provider {
+func NewWith(idx index.Index, score Scorer, manifests []Manifest, opts ...Option) *Provider {
 	p := &Provider{
 		idx:       idx,
 		score:     score,
@@ -49,6 +60,9 @@ func NewWith(idx index.Index, score Scorer, manifests []Manifest) *Provider {
 	}
 	p.origins = newOriginCache(DeriveOrigin)
 	p.origin = p.origins.get
+	for _, opt := range opts {
+		opt(p)
+	}
 	return p
 }
 
@@ -160,6 +174,97 @@ func (p *Provider) Query(ctx context.Context, q string) ([]providers.Result, err
 				Action:   providers.Action{Kind: providers.ActURL, URL: target},
 			})
 		}
+	}
+	links, err := p.linkResults(ctx, q, manifests, origin)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, links...), nil
+}
+
+// linkResults emits one "Link <Name> project to <repo>" row per
+// requires_binding url connector whose name or id fuzzy-matches q, when the
+// repo under the most recently active tmux pane has no binding for it — and,
+// for DeriveOrigin connectors, no derivable origin: the exact complement of
+// the skip in the open-row loop above, so the two rows never coexist.
+//
+// Shared-score contract note: this row is connector-derived, not
+// repo-derived — it is scored against the connector name/id rather than a
+// repo basename, and therefore deliberately sits outside any repo block. It
+// only appears when the query matches a connector name ("railway"), and at
+// CatConnector it is exempt from the aggregator's MinScore threshold.
+func (p *Provider) linkResults(ctx context.Context, q string, manifests []Manifest, origin OriginResolver) ([]providers.Result, error) {
+	if p.currentRepo == nil {
+		return nil, nil
+	}
+	// Collect matching candidates before touching tmux, so keystrokes that
+	// match no connector name cost nothing.
+	type candidate struct {
+		m     Manifest
+		score int
+	}
+	var cands []candidate
+	for _, m := range manifests {
+		if m.Type != TypeURL || m.URL == nil || !m.URL.RequiresBinding {
+			continue
+		}
+		best, ok := p.score(q, m.Name)
+		if s, idOK := p.score(q, m.ID); idOK && (!ok || s > best) {
+			best, ok = s, true
+		}
+		if ok {
+			cands = append(cands, candidate{m: m, score: best})
+		}
+	}
+	if len(cands) == 0 {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	root, name, ok := p.currentRepo(ctx)
+	if !ok {
+		return nil, nil
+	}
+	conf := p.confs.get(root)
+	var out []providers.Result
+	for _, c := range cands {
+		m := c.m
+		binding := conf.Connectors[m.ID]
+		if binding == "" && m.DeriveOrigin && origin != nil {
+			if u, ok := origin(root); ok {
+				binding = u
+			}
+		}
+		if binding != "" {
+			continue
+		}
+		id, repoRoot := m.ID, root
+		out = append(out, providers.Result{
+			ID:       "connector-link:" + m.ID + ":" + root,
+			Title:    "Link " + m.Name + " project to " + name,
+			Subtitle: root,
+			Icon:     ResolveIcon(m.Icon, m.Dir),
+			Category: m.Category,
+			Score:    c.score,
+			Accent:   m.Accent,
+			Form: &providers.Form{
+				Title: "Link " + m.Name + " to " + name,
+				Fields: []providers.FormField{{
+					Key:         "binding",
+					Label:       m.Name + " project URL or ID",
+					Placeholder: m.URL.Template,
+					Required:    true,
+				}},
+				Build: func(values map[string]string) (providers.Action, error) {
+					b := strings.TrimSpace(values["binding"])
+					if b == "" {
+						return providers.Action{}, errBindingRequired
+					}
+					return providers.Action{Kind: ActConnectorLink, Argv: []string{id, repoRoot, b}}, nil
+				},
+			},
+		})
 	}
 	return out, nil
 }

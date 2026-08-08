@@ -88,7 +88,8 @@ func New(cfg config.Config) *Launcher {
 		logger.Printf("plugins: %v", err)
 	}
 
-	b.conn = connectors.New(b.idx, fuzzy.Score)
+	b.conn = connectors.New(b.idx, fuzzy.Score,
+		connectors.WithCurrentRepo(connectors.TmuxCurrentRepo(tmux.ExecRunner{})))
 	b.conn.AddManifests(b.host.URLManifests()...)
 
 	b.apps = apps.New(fuzzy.Score, apps.WithMaxResults(cfg.MaxResults))
@@ -122,6 +123,7 @@ func (b *Launcher) registerHandlers() {
 	apps.RegisterAppLaunchHandler(b.disp)
 	procs.RegisterKillHandler(b.disp)
 	plugins.RegisterCallbackHandler(b.disp, b.host)
+	connectors.RegisterLinkHandler(b.disp)
 
 	// ActSession: attach in the most recently active tmux client (raising its
 	// terminal via Hyprland when possible), else spawn a terminal running the
