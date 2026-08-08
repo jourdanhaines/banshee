@@ -237,6 +237,24 @@ func (p *ExecPlugin) Activate(resultID string) error {
 	return p.write(stdin, ev)
 }
 
+// Submit sends a form result's submitted values to the plugin. Like Activate
+// it is fire-and-forget — with the same caveat: a plugin that has crashed
+// since emitting the result is restarted here and has no memory of the
+// result id, so the values are silently dropped. An acknowledged submit
+// would need a second pending slot and is left as future work.
+func (p *ExecPlugin) Submit(resultID string, values map[string]string) error {
+	p.mu.Lock()
+	if err := p.ensureStartedLocked(); err != nil {
+		p.mu.Unlock()
+		return err
+	}
+	p.seq++
+	ev := Event{V: ProtoVersion, Event: EventSubmit, Seq: p.seq, ID: resultID, Values: values}
+	stdin := p.stdin
+	p.mu.Unlock()
+	return p.write(stdin, ev)
+}
+
 // Shutdown asks the plugin to exit, kills its process group if it does not,
 // and gives up waiting rather than blocking the caller forever.
 //

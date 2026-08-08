@@ -61,6 +61,13 @@ emit_results() {
     printf '"subtitle":"exec-detach demo","score":70,'
     printf '"action":{"kind":"exec-detach","argv":["notify-send","banshee example","it works"]}}'
 
+    # 4. A form result: activating it opens an input view inside the launcher;
+    #    the submitted values come back as a "submit" event (see handle_submit).
+    printf ',{"id":"greet","title":"Send a custom greeting",'
+    printf '"subtitle":"form demo","score":60,'
+    printf '"form":{"title":"Custom greeting","fields":['
+    printf '{"key":"name","label":"Who to greet","placeholder":"world","required":true}]}}'
+
     printf ']}\n'
 }
 
@@ -72,6 +79,21 @@ handle_activate() {
                 notify-send "banshee example" "callback for '$1' received"
             else
                 printf '%s activated\n' "$1" >>"${TMPDIR:-/tmp}/banshee-example.log"
+            fi
+            ;;
+    esac
+}
+
+# handle_submit <result-id> <line> — a form result was submitted. The values
+# arrive as {"values":{"<key>":"<value>",...}} on the event line.
+handle_submit() {
+    case "$1" in
+        greet)
+            name=$(printf '%s' "$2" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')
+            if command -v notify-send >/dev/null 2>&1; then
+                notify-send "banshee example" "hello, ${name:-world}!"
+            else
+                printf 'greet submitted: %s\n' "${name:-world}" >>"${TMPDIR:-/tmp}/banshee-example.log"
             fi
             ;;
     esac
@@ -93,6 +115,9 @@ while IFS= read -r line; do
             handle_activate "$(str_field "$line" id)"
             # Acknowledgement is optional; banshee does not wait for it.
             printf '{"v":1,"seq":%s,"event":"activated"}\n' "$seq"
+            ;;
+        submit)
+            handle_submit "$(str_field "$line" id)" "$line"
             ;;
         shutdown)
             exit 0

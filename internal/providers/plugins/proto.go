@@ -11,10 +11,18 @@
 // # The exec protocol
 //
 // One JSON object per line, in both directions, every message stamped with
-// "v": ProtoVersion. The host sends EventQuery, EventActivate and
-// EventShutdown (see Event); the plugin answers with EventResults and the
+// "v": ProtoVersion. The host sends EventQuery, EventActivate, EventSubmit
+// and EventShutdown (see Event); the plugin answers with EventResults and the
 // optional EventActivated (see Message). Unknown events and unknown fields are
 // ignored on both sides, so new kinds can be added without breaking either.
+//
+// A result may declare a "form" (see WireForm): activating it opens an input
+// view inside the launcher instead of dispatching, and submission arrives as
+// EventSubmit carrying the values keyed by field key. Degradation is
+// symmetric and safe: a host too old to know forms drops the "form" field and
+// activation falls back to a plain activate event, while a plugin too old to
+// know EventSubmit ignores it. When "form" is present the result's "action"
+// is ignored — submission always comes back as EventSubmit.
 //
 // Every query carries a Seq, and a plugin must echo the seq it is answering:
 // the host drops any message whose seq is not the query it is still waiting
@@ -63,6 +71,9 @@ const (
 	EventQuery = "query"
 	// EventActivate tells the plugin a result of its was activated.
 	EventActivate = "activate"
+	// EventSubmit delivers a form result's submitted values. Like activate it
+	// is fire-and-forget: the host does not wait for a reply.
+	EventSubmit = "submit"
 	// EventShutdown asks the plugin to exit; the host closes stdin after it.
 	EventShutdown = "shutdown"
 )
@@ -100,8 +111,10 @@ type Event struct {
 	Seq uint64 `json:"seq,omitempty"`
 	// Query is the user's query with the plugin's prefix stripped (query).
 	Query string `json:"query,omitempty"`
-	// ID is the activated result's id (activate).
+	// ID is the result's id (activate, submit).
 	ID string `json:"id,omitempty"`
+	// Values are the submitted form values keyed by field key (submit).
+	Values map[string]string `json:"values,omitempty"`
 }
 
 // Message is one plugin → host message, read as a single JSON line. Unknown
@@ -130,6 +143,9 @@ type WireResult struct {
 	// Score ranks the row; omitted or zero means DefaultScore.
 	Score  int         `json:"score"`
 	Action *WireAction `json:"action"`
+	// Form, when present, makes activation open an in-launcher input view;
+	// the submitted values come back as an EventSubmit. Action is ignored.
+	Form *WireForm `json:"form"`
 }
 
 // WireAction is the action attached to a plugin result.
@@ -138,6 +154,21 @@ type WireAction struct {
 	URL  string   `json:"url"`
 	Argv []string `json:"argv"`
 	Text string   `json:"text"`
+}
+
+// WireForm is a declarative input form attached to a plugin result.
+type WireForm struct {
+	Title  string          `json:"title"`
+	Fields []WireFormField `json:"fields"`
+}
+
+// WireFormField is one input in a WireForm.
+type WireFormField struct {
+	// Key keys the submitted value in EventSubmit's values map.
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	Placeholder string `json:"placeholder"`
+	Required    bool   `json:"required"`
 }
 
 // toResult converts a wire result into a launcher result, filling icon and
@@ -155,7 +186,7 @@ func (w WireResult) toResult(m connectors.Manifest) providers.Result {
 	if w.Icon != "" {
 		icon = w.Icon
 	}
-	return providers.Result{
+	res := providers.Result{
 		ID:       "plugin:" + m.ID + ":" + w.ID,
 		Title:    w.Title,
 		Subtitle: w.Subtitle,
@@ -164,6 +195,37 @@ func (w WireResult) toResult(m connectors.Manifest) providers.Result {
 		Score:    score,
 		Accent:   accent,
 		Action:   wireActionTo(w.Action, m.ID, w.ID),
+	}
+	if w.Form != nil {
+		res.Form = wireFormTo(*w.Form, m.ID, w.ID)
+	}
+	return res
+}
+
+// wireFormTo converts a declarative wire form into a providers.Form whose
+// Build sends the submitted values back to the plugin: the host-synthesized
+// counterpart of a Go provider's Build closure.
+func wireFormTo(f WireForm, pluginID, resultID string) *providers.Form {
+	fields := make([]providers.FormField, len(f.Fields))
+	for i, wf := range f.Fields {
+		fields[i] = providers.FormField{
+			Key:         wf.Key,
+			Label:       wf.Label,
+			Placeholder: wf.Placeholder,
+			Required:    wf.Required,
+		}
+	}
+	return &providers.Form{
+		Title:  f.Title,
+		Fields: fields,
+		Build: func(values map[string]string) (providers.Action, error) {
+			return providers.Action{
+				Kind:     providers.ActPluginCallback,
+				PluginID: pluginID,
+				ResultID: resultID,
+				Values:   values,
+			}, nil
+		},
 	}
 }
 

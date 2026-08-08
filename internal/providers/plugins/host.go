@@ -158,6 +158,17 @@ func (h *Host) Activate(pluginID, resultID string) error {
 	return p.Activate(resultID)
 }
 
+// Submit forwards a form result's submitted values to the owning plugin.
+func (h *Host) Submit(pluginID, resultID string, values map[string]string) error {
+	h.mu.RLock()
+	p := h.byID[pluginID]
+	h.mu.RUnlock()
+	if p == nil {
+		return fmt.Errorf("plugins: unknown plugin %q", pluginID)
+	}
+	return p.Submit(resultID, values)
+}
+
 // Shutdown stops every running exec plugin.
 func (h *Host) Shutdown() {
 	h.mu.RLock()
