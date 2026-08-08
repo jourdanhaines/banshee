@@ -56,9 +56,12 @@ type harness struct {
 	runErr error
 	// ranInput records every RunInput call the fix handler makes: the argv and
 	// exactly what was piped to the command's stdin, so a test can prove the
-	// password went to stdin and nowhere else. Answers with runOut/runErr like
-	// recordRun does.
-	ranInput chan runInputCall
+	// password went to stdin and nowhere else. Answers with runInputOut and
+	// runInputErr, which are separate from Run's so a test can fail the two
+	// steps of a chained fix independently.
+	ranInput    chan runInputCall
+	runInputOut []byte
+	runInputErr error
 }
 
 // runInputCall is one recorded Deps.RunInput invocation.
@@ -81,7 +84,7 @@ func (h *harness) recordRun() func(context.Context, []string) ([]byte, error) {
 func (h *harness) recordRunInput() func(context.Context, []string, string) ([]byte, error) {
 	return func(_ context.Context, argv []string, input string) ([]byte, error) {
 		h.ranInput <- runInputCall{argv: append([]string(nil), argv...), input: input}
-		return h.runOut, h.runErr
+		return h.runInputOut, h.runInputErr
 	}
 }
 
@@ -1109,6 +1112,10 @@ func keyringFixAction() providers.Action {
 // reason as daemonFixArgv.
 var createFixArgv = []string{"gnome-keyring-daemon", "--unlock"}
 
+// createFixThenArgv is the create fix's follow-up: the daemon restart that
+// makes the running Secret Service load the keyring --unlock just wrote.
+var createFixThenArgv = []string{"systemctl", "--user", "restart", "gnome-keyring-daemon"}
+
 // createFixAction is what the create-keyring form's Build emits: the fix key
 // plus the submitted password riding Values.
 func createFixAction(password string) providers.Action {
@@ -1142,6 +1149,11 @@ func TestWizardFixStdinPipesPassword(t *testing.T) {
 			t.Fatalf("password appeared on argv: %v", call.argv)
 		}
 	}
+	// The follow-up restart runs second, without stdin, so the running Secret
+	// Service loads the keyring --unlock just created.
+	if argv := h.waitRan(t); !reflect.DeepEqual(argv, createFixThenArgv) {
+		t.Errorf("follow-up ran %v, want %v", argv, createFixThenArgv)
+	}
 	if q := h.waitReopened(t); q != "totp" {
 		t.Errorf("reopened on %q, want the provider's trigger", q)
 	}
@@ -1173,11 +1185,36 @@ func TestWizardFixStdinPasswordVariants(t *testing.T) {
 		h.waitReopened(t)
 	})
 
+	t.Run("a failed follow-up restart re-arms the wizard", func(t *testing.T) {
+		store := newFakeStore("keyring")
+		h := newWizardHarness(t, Index{V: IndexVersion}, store)
+		// The unlock succeeds (runInputErr nil) but the daemon restart fails.
+		h.runErr = errors.New("exit status 5")
+		h.runOut = []byte("Failed to restart gnome-keyring-daemon.service")
+		if err := h.disp.Dispatch(createFixAction("hunter2")); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		h.waitRanInput(t)
+		if argv := h.waitRan(t); !reflect.DeepEqual(argv, createFixThenArgv) {
+			t.Errorf("follow-up ran %v, want %v", argv, createFixThenArgv)
+		}
+		if q := h.waitReopened(t); q != "totp" {
+			t.Errorf("reopened on %q", q)
+		}
+		_, msg, ok := h.state.Snapshot()
+		if !ok || !strings.Contains(msg, "could not create or unlock the login keyring") {
+			t.Errorf("Snapshot = (%q, %v), want the create failMsg recorded", msg, ok)
+		}
+		if got := h.index(t).Backend; got != "" {
+			t.Errorf("persisted backend = %q, want untouched", got)
+		}
+	})
+
 	t.Run("a failed create never leaks the password", func(t *testing.T) {
 		store := newFakeStore("keyring")
 		h := newWizardHarness(t, Index{V: IndexVersion}, store)
-		h.runErr = errors.New("exit status 1")
-		h.runOut = []byte("couldn't unlock the login keyring")
+		h.runInputErr = errors.New("exit status 1")
+		h.runInputOut = []byte("couldn't unlock the login keyring")
 		if err := h.disp.Dispatch(createFixAction("hunter2")); err != nil {
 			t.Fatalf("Dispatch: %v", err)
 		}

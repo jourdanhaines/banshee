@@ -619,6 +619,11 @@ func (d Deps) handleWizardFix(a providers.Action) error {
 		} else {
 			out, err = d.Run(fixCtx, fix.argv)
 		}
+		// The follow-up step shares the fix's time budget: both commands
+		// together are "the repair", and the probe below still gets its own.
+		if err == nil && len(fix.then) > 0 {
+			out, err = d.Run(fixCtx, fix.then)
+		}
 		cancelFix()
 		if err != nil {
 			d.reportUnusable(backend, fmt.Errorf("%s: %w%s", fix.failMsg, err, trimmedOutput(out)))

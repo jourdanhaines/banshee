@@ -395,6 +395,10 @@ type wizardFix struct {
 	// same channel the clipboard and the secret stores use, because a password
 	// on argv would sit in the process list.
 	stdin bool
+	// then is an optional second command run after argv succeeds, sharing its
+	// failMsg on failure. It never receives stdin: a follow-up is plumbing
+	// (reloading a daemon), not another secret entry.
+	then []string
 }
 
 // wizardFixes is the complete set of commands ActTOTPWizardFix may run, keyed
@@ -418,8 +422,18 @@ var wizardFixes = map[string]map[string]wizardFix{
 		// tty logins). Correctness does not hinge on this command's exit
 		// status: the setup probe that follows is what actually proves the
 		// keyring took the password and can store secrets.
+		//
+		// The restart afterwards is load-bearing: with a socket-activated
+		// daemon already running, --unlock spawns a second instance that
+		// writes login.keyring to disk without the running daemon ever
+		// loading it — SetAlias then fails with "collection does not exist"
+		// and the probe keeps failing against an empty Secret Service. A
+		// restart makes the daemon load the new collection and its default
+		// alias (verified against gnome-keyring 50: collection appears,
+		// aliased, unlocked).
 		"keyring:create": {
 			argv:    []string{"gnome-keyring-daemon", "--unlock"},
+			then:    []string{"systemctl", "--user", "restart", "gnome-keyring-daemon"},
 			failMsg: "could not create or unlock the login keyring",
 			stdin:   true,
 		},
