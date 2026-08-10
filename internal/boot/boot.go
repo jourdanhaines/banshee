@@ -9,10 +9,13 @@
 package boot
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -24,10 +27,12 @@ import (
 	"github.com/jourdanhaines/banshee/internal/fuzzy"
 	"github.com/jourdanhaines/banshee/internal/hypr"
 	"github.com/jourdanhaines/banshee/internal/index"
+	"github.com/jourdanhaines/banshee/internal/ipc"
 	"github.com/jourdanhaines/banshee/internal/launch"
 	"github.com/jourdanhaines/banshee/internal/providers"
 	"github.com/jourdanhaines/banshee/internal/providers/apps"
 	"github.com/jourdanhaines/banshee/internal/providers/calc"
+	"github.com/jourdanhaines/banshee/internal/providers/cliphist"
 	"github.com/jourdanhaines/banshee/internal/providers/connectors"
 	"github.com/jourdanhaines/banshee/internal/providers/lastaction"
 	"github.com/jourdanhaines/banshee/internal/providers/plugins"
@@ -62,6 +67,14 @@ type Launcher struct {
 	// (which renders the setup wizard from it) and the totp action handlers
 	// (which record failures into it). One instance for the daemon's lifetime.
 	totpSetup *totp.SetupState
+
+	// clips is the session-only clipboard history shared by the watcher (which
+	// appends), the cliphist provider (which reads) and the clip handlers
+	// (which re-copy and delete). clipWatch owns the wl-paste child; it is
+	// started by run — never by New, so building a Launcher in tests spawns
+	// nothing — and cycled by reload when clipboard_history is toggled.
+	clips     *cliphist.Store
+	clipWatch *cliphist.Watcher
 
 	// win is the launcher window, created on the GTK main loop when the
 	// application activates and only ever touched from that loop.
@@ -112,6 +125,20 @@ func New(cfg config.Config) *Launcher {
 	// the old instance and freeze the wizard on screen.
 	b.totpSetup = &totp.SetupState{}
 
+	// The store always exists and the provider is always registered (the
+	// Registry has no removal); with the watcher off the store stays empty and
+	// the provider renders nothing. Image capture needs the runtime dir — on
+	// failure the history degrades to text-only rather than writing payloads
+	// anywhere less private than tmpfs.
+	var clipOpts []cliphist.StoreOption
+	if dir, err := ipc.RuntimeDir(); err == nil {
+		clipOpts = append(clipOpts, cliphist.WithImageDir(filepath.Join(dir, "clips")))
+	} else {
+		logger.Printf("cliphist: no runtime dir, image capture disabled: %v", err)
+	}
+	b.clips = cliphist.NewStore(clipOpts...)
+	b.clipWatch = cliphist.NewWatcher(b.clips, cliphist.WatcherOptions{Log: logger.Printf})
+
 	// Registration order is documentation only — the aggregator sorts by
 	// (-Score, Category, Title). It is kept in category order so this list
 	// reads the way the launcher looks.
@@ -121,6 +148,7 @@ func New(cfg config.Config) *Launcher {
 	b.reg.Register(repos.New(b.idx))
 	b.reg.Register(calc.New())
 	b.reg.Register(totp.New(fuzzy.Score, totp.WithSetupState(b.totpSetup)))
+	b.reg.Register(cliphist.New(b.clips, fuzzy.Score))
 	b.reg.Register(b.apps)
 	b.reg.Register(b.steam)
 	b.reg.Register(procs.New(fuzzy.Score, procs.WithMaxResults(cfg.MaxResults)))
@@ -153,10 +181,36 @@ func (b *Launcher) registerHandlers() {
 	// handler records the failure, then re-shows the launcher so the provider
 	// can render it. Everything else (index path, backend resolution, clock)
 	// keeps its production default.
+	//
+	// Copy is where TOTP codes are kept out of the clipboard history: the
+	// store is told to drop the next capture matching the code's hash (only
+	// the hash ever leaves the copy path), and the copy itself carries the
+	// wl-copy sensitive hint so even a suppression miss lands masked.
 	totp.RegisterHandlersWith(b.disp, totp.Deps{
-		Copy:   func(text string) error { return launch.CopyToClipboard(opts, text) },
+		Copy: func(text string) error {
+			b.clips.SuppressNext(sha256.Sum256([]byte(text)))
+			return launch.CopyToClipboardSensitive(opts, text)
+		},
 		Notify: b.notifyUser,
 		State:  b.totpSetup,
+		Reopen: b.reopenLauncher,
+	})
+
+	// Clip re-copies run a clipboard tool round trip off the main loop and
+	// report failures after the window has hidden, so they get the UI
+	// notifier too; Reopen re-shows the pruned list after a delete.
+	cliphist.RegisterHandlersWith(b.disp, cliphist.Deps{
+		Store: b.clips,
+		CopyText: func(text string, sensitive bool) error {
+			if sensitive {
+				return launch.CopyToClipboardSensitive(opts, text)
+			}
+			return launch.CopyToClipboard(opts, text)
+		},
+		CopyStream: func(mime string, r io.Reader, sensitive bool) error {
+			return launch.CopyToClipboardMIME(opts, mime, r, sensitive)
+		},
+		Notify: b.notifyUser,
 		Reopen: b.reopenLauncher,
 	})
 
@@ -250,6 +304,16 @@ func (b *Launcher) Run() error { return b.run(nil) }
 func (b *Launcher) RunWithLock(lock *daemon.Lock) error { return b.run(lock) }
 
 func (b *Launcher) run(lock *daemon.Lock) error {
+	// The clipboard watcher belongs to the daemon's lifetime, not the
+	// Launcher's: starting it here (not in New) keeps tests that build the
+	// object graph from spawning wl-paste. Start reports an environment where
+	// history cannot work (no Wayland, no wl-clipboard); that is a log line,
+	// not a failure — the launcher runs fine without it.
+	if b.cfg.ClipboardHistory {
+		if err := b.clipWatch.Start(); err != nil {
+			b.log.Printf("%v", err)
+		}
+	}
 	err := daemon.Run(daemon.Options{
 		NewUI:    b.newUI,
 		OnReload: b.reload,
@@ -261,6 +325,10 @@ func (b *Launcher) run(lock *daemon.Lock) error {
 	b.waitBackground()
 	// The plugin host owns child processes; they must not outlive the daemon.
 	b.host.Shutdown()
+	// The watcher owns the wl-paste child, and Clear drops the history's
+	// runtime image files with the session that captured them.
+	b.clipWatch.Shutdown()
+	b.clips.Clear()
 	return err
 }
 
@@ -297,6 +365,19 @@ func (b *Launcher) reload() error {
 		b.registerHandlers()
 		if b.win != nil {
 			b.win.SetConfig(cfg)
+		}
+		// clipboard_history toggles the watcher. Start on a running watcher is
+		// a no-op, and Start after a crash-limit disable is the recovery path;
+		// turning the key off also forgets everything captured so far — that
+		// is what "off" means for a privacy switch. Shutdown joins the watcher
+		// goroutine, but the child dies by SIGKILL so the wait is bounded.
+		if cfg.ClipboardHistory {
+			if err := b.clipWatch.Start(); err != nil {
+				b.log.Printf("%v", err)
+			}
+		} else {
+			b.clipWatch.Shutdown()
+			b.clips.Clear()
 		}
 	}
 

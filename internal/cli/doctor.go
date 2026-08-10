@@ -61,6 +61,13 @@ func (a *App) doctor() error {
 	} else {
 		check(false, false, "git", "not found")
 	}
+	// Clipboard history needs wl-clipboard's watcher; without it the launcher
+	// still runs, the `clip` trigger just stays empty.
+	if path, err := exec.LookPath("wl-paste"); err == nil {
+		check(true, false, "wl-clipboard", path)
+	} else {
+		check(false, false, "wl-clipboard", "not found — clipboard history is unavailable (install wl-clipboard)")
+	}
 
 	term, termErr := launch.ResolveTerminal(launch.Options{Terminal: a.Cfg.Terminal})
 	if termErr == nil {

@@ -60,7 +60,7 @@ func TestNewWiring(t *testing.T) {
 	t.Cleanup(b.host.Shutdown)
 
 	t.Run("every provider is registered", func(t *testing.T) {
-		want := []string{"lastaction", "sessions", "connectors", "repos", "calc", "totp", "apps", "procs", "plugins"}
+		want := []string{"lastaction", "sessions", "connectors", "repos", "calc", "totp", "clipboard", "apps", "procs", "plugins"}
 		got := map[string]bool{}
 		for _, p := range b.reg.Providers() {
 			got[p.Name()] = true
@@ -90,6 +90,8 @@ func TestNewWiring(t *testing.T) {
 			"totp-wizard-reset",
 			"totp-wizard-fix",
 			"totp-setup-more",
+			"clip-copy",
+			"clip-delete",
 		}
 		for _, kind := range kinds {
 			// Dispatch with an empty payload: a registered handler rejects it
