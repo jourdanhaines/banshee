@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
+	"github.com/diamondburned/gotk4/pkg/gdkpixbuf/v2"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
@@ -27,6 +28,12 @@ import (
 //	   │  ├─ Label .result-subtitle          ellipsized, optional
 //	   │  └─ ProgressBar .code-timer.row-timer  optional, non-standard periods
 //	   └─ Label .result-badge                right-aligned, optional
+//
+// A Result.Preview that resolves to a decodable image grows the row a second
+// storey — the horizontal line above becomes the header of a vertical box
+// with a large Picture .result-preview below it. The panel height never
+// changes (min == max resultsHeight is on the scroller); a tall row just
+// occupies more of the scrolled range.
 func (l *Launcher) newRow(r providers.Result) *gtk.ListBoxRow {
 	row := gtk.NewListBoxRow()
 
@@ -73,8 +80,81 @@ func (l *Launcher) newRow(r providers.Result) *gtk.ListBoxRow {
 		box.Append(badge)
 	}
 
-	row.SetChild(box)
+	if pic := l.previewPicture(r.Preview); pic != nil {
+		outer := gtk.NewBox(gtk.OrientationVertical, 0)
+		outer.Append(box)
+		outer.Append(pic)
+		row.SetChild(outer)
+	} else {
+		row.SetChild(box)
+	}
 	return row
+}
+
+// previewMaxHeight caps a preview image's rendered height. It must sit
+// comfortably under resultsHeight (420): scrollToRow clamps the viewport to
+// the selected row's extent, and a row taller than the viewport could never
+// be brought fully into view — 240 keeps the selected preview plus at least
+// one neighbouring row visible.
+const previewMaxHeight = 240
+
+// previewPicture renders a Result.Preview path as the large lower-storey
+// image, or nil when the row should stay single-storey: no preview, a
+// non-absolute path (same rule ResolveIcon applies to Icon.Path), or a file
+// that is gone or undecodable — never GTK's broken-image placeholder, the
+// same contract newIconWidget keeps.
+func (l *Launcher) previewPicture(path string) *gtk.Picture {
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return nil
+	}
+	tex := l.previewTexture(path)
+	if tex == nil {
+		return nil
+	}
+	pic := gtk.NewPictureForPaintable(tex)
+	// ScaleDown + CanShrink: an over-wide texture shrinks to the row's width
+	// keeping its aspect, a small one renders at natural size — never
+	// upscaled into a blur. The height cap is baked into the texture itself
+	// (previewTexture downscales at decode time) because GTK4 CSS has no
+	// max-height and a Picture's natural request would otherwise set the row
+	// height.
+	pic.SetContentFit(gtk.ContentFitScaleDown)
+	pic.SetCanShrink(true)
+	pic.SetHAlign(gtk.AlignStart)
+	pic.AddCSSClass("result-preview")
+	return pic
+}
+
+// previewTexture decodes a preview image, downscaled to previewMaxHeight when
+// taller, and caches the result by path. Rows are rebuilt on every keystroke;
+// decoding a full-size clipboard PNG per keystroke would be far more visible
+// than the SVG case builtinTexture exists for. Cached textures are already
+// capped, so the cache stays small; Hide and Reload drop it because the
+// backing files (clipboard-history tmpfs payloads) can be deleted behind it.
+func (l *Launcher) previewTexture(path string) *gdk.Texture {
+	if tex, ok := l.previews[path]; ok {
+		return tex
+	}
+	var tex *gdk.Texture
+	if pb, err := gdkpixbuf.NewPixbufFromFile(path); err == nil {
+		if h := pb.Height(); h > previewMaxHeight && h > 0 {
+			w := pb.Width() * previewMaxHeight / h
+			if w < 1 {
+				w = 1
+			}
+			if scaled := pb.ScaleSimple(w, previewMaxHeight, gdkpixbuf.InterpBilinear); scaled != nil {
+				pb = scaled
+			}
+		}
+		tex = gdk.NewTextureForPixbuf(pb)
+	} else {
+		log.Printf("ui: preview %q failed to decode: %v", path, err)
+	}
+	if l.previews == nil {
+		l.previews = make(map[string]*gdk.Texture)
+	}
+	l.previews[path] = tex // negative results cached too — no retry per row
+	return tex
 }
 
 // newEllipsizedLabel returns a left-aligned label that truncates rather than

@@ -295,6 +295,15 @@ window#banshee-window {
 	font-weight: bold;
 }
 
+/* Large image preview under a row's title/subtitle (clipboard-history image
+   rows). Only spacing and corner rounding live here — the height cap cannot:
+   GTK4 CSS has no max-height, so the UI bakes it into the texture at decode
+   time. */
+#banshee-window .result-preview {
+	margin-top: 6px;
+	border-radius: 6px;
+}
+
 /* TOTP drain bars. The shared bar sits under the query entry and stands in for
    every standard-window code on screen; .row-timer is the thinner per-row
    variant a non-standard period gets. GtkProgressBar draws through

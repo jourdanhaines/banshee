@@ -93,6 +93,7 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window .result-title",
 		"#banshee-window .result-subtitle",
 		"#banshee-window .result-badge",
+		"#banshee-window .result-preview",
 		"#banshee-window label.empty",
 	}
 

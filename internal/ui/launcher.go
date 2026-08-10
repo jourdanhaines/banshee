@@ -97,6 +97,12 @@ type Launcher struct {
 	// tint bakes the accent in, so Reload drops the cache alongside the theme.
 	builtins map[string]*gdk.Texture
 
+	// previews caches height-capped textures for Result.Preview images, keyed
+	// by path. Hide and Reload both drop it: the backing files are
+	// clipboard-history tmpfs payloads that get deleted on eviction, so a
+	// per-showing cache stays both fresh and bounded.
+	previews map[string]*gdk.Texture
+
 	// shiftClick mirrors the Shift modifier of the most recent list click, so
 	// row-activated (which GTK fires without event state) can honor
 	// shift-click as the alternate action the way Shift+Enter does.
@@ -363,6 +369,9 @@ func (l *Launcher) Hide() {
 	if l.sharedBar != nil {
 		l.sharedBar.SetOpacity(0)
 	}
+	// Preview textures are only worth holding while their rows are on screen;
+	// the files behind them may be evicted before the next show.
+	l.previews = nil
 	l.win.SetVisible(false)
 	l.visible = false
 }
@@ -376,6 +385,7 @@ func (l *Launcher) Visible() bool { return l.visible }
 func (l *Launcher) Reload() {
 	l.apps = nil
 	l.builtins = nil
+	l.previews = nil
 	l.applyTheme()
 	if l.visible {
 		l.debounce.Fire(func() { l.runQuery(l.entry.Text()) })
