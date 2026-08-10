@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
@@ -22,9 +23,10 @@ import (
 //	└─ Box (horizontal)
 //	   ├─ Image .result-icon        24px
 //	   ├─ Box (vertical, hexpand)
-//	   │  ├─ Label .result-title    ellipsized
-//	   │  └─ Label .result-subtitle ellipsized, optional
-//	   └─ Label .result-badge       right-aligned, optional
+//	   │  ├─ Label .result-title             ellipsized
+//	   │  ├─ Label .result-subtitle          ellipsized, optional
+//	   │  └─ ProgressBar .code-timer.row-timer  optional, non-standard periods
+//	   └─ Label .result-badge                right-aligned, optional
 func (l *Launcher) newRow(r providers.Result) *gtk.ListBoxRow {
 	row := gtk.NewListBoxRow()
 
@@ -43,6 +45,18 @@ func (l *Launcher) newRow(r providers.Result) *gtk.ListBoxRow {
 		sub := newEllipsizedLabel(r.Subtitle)
 		sub.AddCSSClass("result-subtitle")
 		text.Append(sub)
+	}
+
+	// A live row on a non-standard window drains a bar of its own: the shared
+	// bar under the query speaks only for the standard unix%30 window, and a
+	// 60-second entry would be misrepresented by it.
+	if !r.Expiry.IsZero() && !IsStandard(r.Period) {
+		bar := gtk.NewProgressBar()
+		bar.AddCSSClass("code-timer")
+		bar.AddCSSClass("row-timer")
+		bar.SetFraction(Fraction(r.Expiry, r.Period, time.Now()))
+		l.liveRows = append(l.liveRows, liveRow{bar: bar, expiry: r.Expiry, period: r.Period})
+		text.Append(bar)
 	}
 	box.Append(text)
 

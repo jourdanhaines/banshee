@@ -6,11 +6,26 @@
 // This file is a frozen Phase-0 contract. Changing any exported type here
 // requires touching every provider — prefer adding new optional fields over
 // modifying existing ones.
+//
+// Migration 2026-08b: CatTOTP, FormField.Secret and Result.Expiry added for
+// the built-in TOTP service — additive, zero value inert. A provider that
+// never sets them behaves exactly as before, and a UI that ignores them
+// renders every field unmasked and every row static.
+//
+// Migration 2026-08c: Result.Period and FormField.Options added — additive,
+// zero value inert. Period refines Expiry with the length of the window that
+// ends there, so the UI can show how much of it remains; Options turns a form
+// field into a fixed-choice dropdown.
+//
+// Migration 2026-08d: CatSteamPlay, CatSteamLibrary, CatSteamStorePage,
+// CatSteamDB, CatSteamStore and CatSteamSearch added for the built-in Steam
+// provider — additive, zero value inert.
 package providers
 
 import (
 	"context"
 	"syscall"
+	"time"
 )
 
 // Category orders results in the launcher list. Lower value = higher priority
@@ -24,9 +39,20 @@ const (
 	CatConnector Category = 20 // "Open <repo> on <Connector>"
 	CatDirectory Category = 30 // "Open <repo> directory"
 	CatCalc      Category = 35 // inline calculator answer
+	CatTOTP      Category = 37 // inline TOTP code rows; sits above CatApp so the MinScore threshold never drops them
 	CatApp       Category = 40 // installed applications
-	CatKill      Category = 50 // "Kill <proc>"
-	CatPlugin    Category = 60 // exec-plugin results
+	// The four Steam block categories collapse one installed game's rows into a
+	// fixed-order block, exactly like the repo block: all four rows carry the
+	// game's shared score and the Category tiebreak orders them. They sit above
+	// CatApp so weak game matches are MinScore-thresholded like apps.
+	CatSteamPlay      Category = 41 // "Play <game>"
+	CatSteamLibrary   Category = 42 // "Open <game> in Steam library"
+	CatSteamStorePage Category = 43 // "View <game> on Steam store"
+	CatSteamDB        Category = 44 // "View <game> on SteamDB"
+	CatSteamStore     Category = 45 // live Steam store search result
+	CatSteamSearch    Category = 46 // "Search Steam store for '<q>'"
+	CatKill           Category = 50 // "Kill <proc>"
+	CatPlugin         Category = 60 // exec-plugin results
 )
 
 // Icon identifies how the UI should resolve a result's icon. Exactly one
@@ -90,6 +116,16 @@ type FormField struct {
 	Placeholder string
 	// Required refuses submission while the trimmed value is empty.
 	Required bool
+	// Secret renders the input masked (no echoed characters), for passwords
+	// and TOTP seeds typed in front of a screen. It is a display property
+	// only: the submitted value still travels verbatim in Action.Values.
+	Secret bool
+	// Options, when non-empty, renders the field as a fixed-choice dropdown
+	// instead of a text entry: the submitted value is exactly the selected
+	// option string and the first option is preselected, so the field always
+	// submits a value and Required is trivially satisfied. Secret is ignored
+	// on a dropdown — a fixed choice list has nothing to mask.
+	Options []string
 }
 
 // Form makes a result open a secondary input view inside the launcher
@@ -125,6 +161,16 @@ type Result struct {
 	// Build's action on submit. AltAction still dispatches directly (or does
 	// nothing when nil), bypassing the form.
 	Form *Form
+	// Expiry, when non-zero, marks the row's displayed content as valid only
+	// until that instant — a rotating TOTP code, say. The UI drains a progress
+	// bar toward it and re-runs the current query once it passes, so the row
+	// refreshes without the user touching the keyboard. Zero means a static
+	// row.
+	Expiry time.Time
+	// Period, when non-zero, is the length of the validity window that ends at
+	// Expiry, so the UI can render how much of it remains. Zero on a live row
+	// means the standard 30-second TOTP window; zero on a static row is inert.
+	Period time.Duration
 }
 
 // Provider is a source of results. Query must honor ctx cancellation: the

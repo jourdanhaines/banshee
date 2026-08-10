@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
 	"github.com/jourdanhaines/banshee/internal/config"
@@ -33,6 +34,8 @@ import (
 	"github.com/jourdanhaines/banshee/internal/providers/procs"
 	"github.com/jourdanhaines/banshee/internal/providers/repos"
 	"github.com/jourdanhaines/banshee/internal/providers/sessions"
+	"github.com/jourdanhaines/banshee/internal/providers/steam"
+	"github.com/jourdanhaines/banshee/internal/providers/totp"
 	"github.com/jourdanhaines/banshee/internal/session"
 	"github.com/jourdanhaines/banshee/internal/state"
 	"github.com/jourdanhaines/banshee/internal/tmux"
@@ -50,9 +53,15 @@ type Launcher struct {
 	disp *launch.Dispatcher
 
 	// Providers holding reloadable state.
-	host *plugins.Host
-	conn *connectors.Provider
-	apps *apps.Provider
+	host  *plugins.Host
+	conn  *connectors.Provider
+	apps  *apps.Provider
+	steam *steam.Provider
+
+	// totpSetup is the TOTP backend-failure record shared by the totp provider
+	// (which renders the setup wizard from it) and the totp action handlers
+	// (which record failures into it). One instance for the daemon's lifetime.
+	totpSetup *totp.SetupState
 
 	// win is the launcher window, created on the GTK main loop when the
 	// application activates and only ever touched from that loop.
@@ -93,6 +102,15 @@ func New(cfg config.Config) *Launcher {
 	b.conn.AddManifests(b.host.URLManifests()...)
 
 	b.apps = apps.New(fuzzy.Score, apps.WithMaxResults(cfg.MaxResults))
+	b.steam = steam.New(fuzzy.Score, steam.WithMaxResults(cfg.MaxResults))
+
+	// Created before the provider is registered, and never replaced: reload
+	// re-runs registerHandlers, which rewires this same pointer into the
+	// handlers' Deps, so a wizard raised before `banshee reload` is still the
+	// one the already-registered provider reads afterwards. Allocating a fresh
+	// state here (or in registerHandlers) would silently strand the provider on
+	// the old instance and freeze the wizard on screen.
+	b.totpSetup = &totp.SetupState{}
 
 	// Registration order is documentation only — the aggregator sorts by
 	// (-Score, Category, Title). It is kept in category order so this list
@@ -102,7 +120,9 @@ func New(cfg config.Config) *Launcher {
 	b.reg.Register(b.conn)
 	b.reg.Register(repos.New(b.idx))
 	b.reg.Register(calc.New())
+	b.reg.Register(totp.New(fuzzy.Score, totp.WithSetupState(b.totpSetup)))
 	b.reg.Register(b.apps)
+	b.reg.Register(b.steam)
 	b.reg.Register(procs.New(fuzzy.Score, procs.WithMaxResults(cfg.MaxResults)))
 	// Exec plugins go through an indirection so `banshee reload` can swap the
 	// whole set: the frozen Registry has no removal.
@@ -119,11 +139,26 @@ func New(cfg config.Config) *Launcher {
 // Register replaces by kind, so this doubles as the reload path for a changed
 // `terminal =`.
 func (b *Launcher) registerHandlers() {
-	launch.RegisterBuiltins(b.disp, launch.Options{Terminal: b.cfg.Terminal})
+	opts := launch.Options{Terminal: b.cfg.Terminal}
+	launch.RegisterBuiltins(b.disp, opts)
 	apps.RegisterAppLaunchHandler(b.disp)
 	procs.RegisterKillHandler(b.disp)
 	plugins.RegisterCallbackHandler(b.disp, b.host)
 	connectors.RegisterLinkHandler(b.disp)
+
+	// The TOTP handlers read a vault off the main loop and report failures
+	// after the window has hidden, so they get the UI notifier rather than
+	// RegisterHandlers' log-only default. State and Reopen turn an unusable
+	// backend from a dead-end toast into the in-launcher setup wizard: the
+	// handler records the failure, then re-shows the launcher so the provider
+	// can render it. Everything else (index path, backend resolution, clock)
+	// keeps its production default.
+	totp.RegisterHandlersWith(b.disp, totp.Deps{
+		Copy:   func(text string) error { return launch.CopyToClipboard(opts, text) },
+		Notify: b.notifyUser,
+		State:  b.totpSetup,
+		Reopen: b.reopenLauncher,
+	})
 
 	// ActSession: attach in the most recently active tmux client (raising its
 	// terminal via Hyprland when possible), else spawn a terminal running the
@@ -150,6 +185,50 @@ func (b *Launcher) registerHandlers() {
 		},
 		Focus: (&hypr.Ctl{}).FocusTerminalOf,
 		Log:   b.log.Printf,
+	})
+}
+
+// notifyUser surfaces a message from an action handler that failed after
+// Dispatch already returned — by then the window is hidden and there is no
+// error left to propagate, so a desktop notification is the only channel back.
+//
+// It is called from detached handler goroutines, so the hop through
+// glib.IdleAdd is mandatory: ui.Launcher touches GTK and GIO and must only be
+// entered from the main loop. b.win is read inside that hop for the same
+// reason — it is written there by newUI — and is nil for every message raised
+// before the application activates, which falls back to the daemon log.
+func (b *Launcher) notifyUser(msg string) {
+	glib.IdleAdd(func() {
+		if b.win == nil {
+			b.log.Printf("%s", msg)
+			return
+		}
+		b.win.Notify(msg)
+	})
+}
+
+// reopenLauncher shows the launcher again on query. It is how a TOTP action
+// handler that has recorded a backend failure gets the setup wizard in front of
+// the user: Show resets the window to the results view and re-runs the query,
+// so the provider re-renders and the wizard rows replace what was there.
+//
+// Like notifyUser it is called from detached handler goroutines — after
+// Dispatch returned and the window hid — so the hop through glib.IdleAdd is
+// mandatory, and b.win is read inside that hop because that is where newUI
+// writes it. A message raised before the application activates finds no window
+// and falls back to the daemon log.
+//
+// It deliberately calls b.win.Show rather than the reindexOnShow wrapper the
+// daemon holds: that wrapper exists to rescan repos when the user summons the
+// launcher, and a wizard reopen is banshee re-showing its own diagnosis, not a
+// fresh search worth a filesystem walk.
+func (b *Launcher) reopenLauncher(query string) {
+	glib.IdleAdd(func() {
+		if b.win == nil {
+			b.log.Printf("totp: launcher not ready; cannot reopen with %q", query)
+			return
+		}
+		b.win.Show(query)
 	})
 }
 
@@ -223,6 +302,11 @@ func (b *Launcher) reload() error {
 
 	if err := b.apps.Reload(); err != nil {
 		errs = append(errs, fmt.Errorf("apps: %w", err))
+	}
+	// Like apps: a handful of tiny manifest reads, cheap enough for the main
+	// loop.
+	if err := b.steam.Reload(); err != nil {
+		errs = append(errs, fmt.Errorf("steam: %w", err))
 	}
 
 	b.reloadBackground()

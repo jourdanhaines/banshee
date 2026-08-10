@@ -6,7 +6,7 @@ import (
 )
 
 func TestHas(t *testing.T) {
-	for _, name := range []string{"github", "railway"} {
+	for _, name := range []string{"github", "railway", "steam"} {
 		if !Has(name) {
 			t.Errorf("Has(%q) = false", name)
 		}

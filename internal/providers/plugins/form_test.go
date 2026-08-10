@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +25,7 @@ while IFS= read -r line; do
       continue ;;
   esac
   seq=$(printf '%s' "$line" | sed -n 's/.*"seq":\([0-9]*\).*/\1/p')
-  printf '{"v":1,"seq":%s,"event":"results","results":[{"id":"f1","title":"form demo","form":{"title":"Demo","fields":[{"key":"name","label":"Name","required":true}]}}],"done":true}\n' "$seq"
+  printf '{"v":1,"seq":%s,"event":"results","results":[{"id":"f1","title":"form demo","form":{"title":"Demo","fields":[{"key":"name","label":"Name","required":true},{"key":"size","label":"Size","options":["small","large"]}]}}],"done":true}\n' "$seq"
 done
 `
 
@@ -37,13 +38,14 @@ func TestWireFormToResult(t *testing.T) {
 			Fields: []WireFormField{
 				{Key: "ssid", Label: "SSID", Placeholder: "network name", Required: true},
 				{Key: "pass", Label: "Password"},
+				{Key: "band", Label: "Band", Options: []string{"2.4 GHz", "5 GHz"}},
 			},
 		}}
 		res := w.toResult(m)
 		if res.Form == nil {
 			t.Fatal("Form is nil")
 		}
-		if res.Form.Title != "Join network" || len(res.Form.Fields) != 2 {
+		if res.Form.Title != "Join network" || len(res.Form.Fields) != 3 {
 			t.Fatalf("form = %+v", res.Form)
 		}
 		f0 := res.Form.Fields[0]
@@ -52,6 +54,9 @@ func TestWireFormToResult(t *testing.T) {
 		}
 		if res.Form.Fields[1].Required {
 			t.Error("field 1 should be optional")
+		}
+		if f2 := res.Form.Fields[2]; len(f2.Options) != 2 || f2.Options[1] != "5 GHz" {
+			t.Errorf("field 2 = %+v", f2)
 		}
 		act, err := res.Form.Build(map[string]string{"ssid": "home", "pass": "hunter2"})
 		if err != nil {
@@ -89,6 +94,133 @@ func TestWireFormToResult(t *testing.T) {
 	})
 }
 
+// TestWireFormFieldSecret pins the "secret" flag's trip across the wire: a
+// plugin that sets it gets a masked field, and one that predates the flag
+// keeps the unmasked default (symmetric degradation).
+func TestWireFormFieldSecret(t *testing.T) {
+	m := connectors.Manifest{ID: "vault", Dir: "/plugins/vault"}
+
+	tests := []struct {
+		name string
+		json string
+		want []bool // Secret per field, in order
+	}{
+		{
+			name: `"secret": true survives the conversion`,
+			json: `{"id":"r","title":"R","form":{"title":"Unlock","fields":[{"key":"pass","label":"Password","secret":true}]}}`,
+			want: []bool{true},
+		},
+		{
+			name: "absent secret stays false",
+			json: `{"id":"r","title":"R","form":{"title":"Unlock","fields":[{"key":"user","label":"User"}]}}`,
+			want: []bool{false},
+		},
+		{
+			name: `explicit "secret": false stays false`,
+			json: `{"id":"r","title":"R","form":{"title":"Unlock","fields":[{"key":"user","label":"User","secret":false}]}}`,
+			want: []bool{false},
+		},
+		{
+			name: "mixed fields keep their own flag",
+			json: `{"id":"r","title":"R","form":{"title":"Login","fields":[{"key":"user","label":"User"},{"key":"pass","label":"Password","secret":true},{"key":"note","label":"Note"}]}}`,
+			want: []bool{false, true, false},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var w WireResult
+			if err := json.Unmarshal([]byte(tt.json), &w); err != nil {
+				t.Fatal(err)
+			}
+			res := w.toResult(m)
+			if res.Form == nil {
+				t.Fatal("Form is nil")
+			}
+			if len(res.Form.Fields) != len(tt.want) {
+				t.Fatalf("got %d fields, want %d", len(res.Form.Fields), len(tt.want))
+			}
+			for i, want := range tt.want {
+				if got := res.Form.Fields[i].Secret; got != want {
+					t.Errorf("field %d (%s) Secret = %v, want %v",
+						i, res.Form.Fields[i].Key, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestWireFormFieldOptions pins the "options" list's trip across the wire: a
+// plugin that sets it gets a dropdown over exactly those choices in that
+// order, and one that omits it (or sends an empty list) keeps the free-text
+// entry. The contract keys off the option count, so absent and empty are the
+// same answer — both leave nothing to choose from.
+func TestWireFormFieldOptions(t *testing.T) {
+	m := connectors.Manifest{ID: "vault", Dir: "/plugins/vault"}
+
+	tests := []struct {
+		name string
+		json string
+		want [][]string // Options per field, in order
+	}{
+		{
+			name: `"options" survives the conversion in order`,
+			json: `{"id":"r","title":"R","form":{"title":"Store","fields":[{"key":"backend","label":"Storage","options":["keyring","plaintext","nimbus"]}]}}`,
+			want: [][]string{{"keyring", "plaintext", "nimbus"}},
+		},
+		{
+			name: "absent options stays empty",
+			json: `{"id":"r","title":"R","form":{"title":"Store","fields":[{"key":"name","label":"Name"}]}}`,
+			want: [][]string{{}},
+		},
+		{
+			name: `explicit "options": [] stays empty`,
+			json: `{"id":"r","title":"R","form":{"title":"Store","fields":[{"key":"name","label":"Name","options":[]}]}}`,
+			want: [][]string{{}},
+		},
+		{
+			name: "mixed fields keep their own list",
+			json: `{"id":"r","title":"R","form":{"title":"Store","fields":[{"key":"name","label":"Name"},{"key":"backend","label":"Storage","options":["keyring","nimbus"]},{"key":"pass","label":"Password","secret":true}]}}`,
+			want: [][]string{{}, {"keyring", "nimbus"}, {}},
+		},
+		{
+			name: "a single option is still a dropdown",
+			json: `{"id":"r","title":"R","form":{"title":"Store","fields":[{"key":"backend","label":"Storage","options":["keyring"]}]}}`,
+			want: [][]string{{"keyring"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var w WireResult
+			if err := json.Unmarshal([]byte(tt.json), &w); err != nil {
+				t.Fatal(err)
+			}
+			res := w.toResult(m)
+			if res.Form == nil {
+				t.Fatal("Form is nil")
+			}
+			if len(res.Form.Fields) != len(tt.want) {
+				t.Fatalf("got %d fields, want %d", len(res.Form.Fields), len(tt.want))
+			}
+			for i, want := range tt.want {
+				got := res.Form.Fields[i].Options
+				if len(got) != len(want) {
+					t.Errorf("field %d (%s) Options = %q, want %q",
+						i, res.Form.Fields[i].Key, got, want)
+					continue
+				}
+				for j := range want {
+					if got[j] != want[j] {
+						t.Errorf("field %d (%s) Options[%d] = %q, want %q",
+							i, res.Form.Fields[i].Key, j, got[j], want[j])
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestExecPluginSubmit(t *testing.T) {
 	p := newScriptPlugin(t, "demo", formScript, "", Options{Timeout: 2 * time.Second})
 	got, err := p.Query(context.Background(), "hello")
@@ -97,6 +229,12 @@ func TestExecPluginSubmit(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Form == nil {
 		t.Fatalf("results = %+v, want one form result", got)
+	}
+	// The dropdown field proves options survive the real stdout → decode path,
+	// not just an in-process struct literal.
+	if fields := got[0].Form.Fields; len(fields) != 2 ||
+		len(fields[1].Options) != 2 || fields[1].Options[0] != "small" {
+		t.Fatalf("form fields = %+v", got[0].Form.Fields)
 	}
 
 	if err := p.Submit("f1", map[string]string{"name": "tea"}); err != nil {

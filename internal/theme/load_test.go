@@ -42,6 +42,9 @@ func TestGeneratedCSSParses(t *testing.T) {
 		{"icon size", "-gtk-icon-size: 24px"},
 		{"row transition", "transition-duration: 90ms"},
 		{"undershoot suppressed", "background-image: none"},
+		{"drain bar thickness", "min-height: 3px"},
+		{"per-row drain bar thickness", "min-height: 2px"},
+		{"per-row drain bar accent", "background-color: rgba(122,162,247,0.75)"},
 	}
 
 	css := roundTrip(t, config.Default())
@@ -69,6 +72,18 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window .form-title",
 		"#banshee-window .form-label",
 		"#banshee-window .form-hint",
+		"#banshee-window dropdown.form-field",
+		"#banshee-window dropdown.form-field > button",
+		"#banshee-window dropdown.form-field > button:hover",
+		"#banshee-window dropdown.form-field > popover > contents",
+		"#banshee-window dropdown.form-field > popover listview > row",
+		"#banshee-window dropdown.form-field > popover listview > row:selected",
+		"#banshee-window progressbar.code-timer",
+		"#banshee-window progressbar.code-timer > trough",
+		"#banshee-window progressbar.code-timer > trough > progress",
+		"#banshee-window progressbar.row-timer",
+		"#banshee-window progressbar.row-timer > trough",
+		"#banshee-window progressbar.row-timer > trough > progress",
 		"#banshee-window scrolledwindow.results-scroll",
 		"#banshee-window list.results",
 		"#banshee-window list.results > row",
@@ -78,7 +93,7 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window .result-title",
 		"#banshee-window .result-subtitle",
 		"#banshee-window .result-badge",
-		"#banshee-window .empty",
+		"#banshee-window label.empty",
 	}
 
 	css := roundTrip(t, config.Default())

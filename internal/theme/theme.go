@@ -183,6 +183,53 @@ window#banshee-window {
 	margin-top: 10px;
 }
 
+/* A fixed-choice form field (FormField.Options). GtkDropDown renders as a
+   button plus a popover, so the button carries the entry look and the popover
+   is themed separately — it is its own GtkNative and inherits nothing from the
+   panel. */
+#banshee-window dropdown.form-field {
+	margin-bottom: 8px;
+}
+
+#banshee-window dropdown.form-field > button {
+	background-color: rgba(255, 255, 255, 0.04);
+	background-image: none;
+	border: 1px solid {{ alpha .AccentRGB 0.22 }};
+	border-radius: 10px;
+	padding: 8px 12px;
+	min-height: 28px;
+	color: #e6e9f0;
+	font-size: 15px;
+	box-shadow: none;
+}
+
+#banshee-window dropdown.form-field > button:focus,
+#banshee-window dropdown.form-field > button:focus-within,
+#banshee-window dropdown.form-field > button:hover {
+	border-color: {{ alpha .AccentRGB 0.6 }};
+	background-color: rgba(255, 255, 255, 0.06);
+}
+
+#banshee-window dropdown.form-field > popover > contents {
+	background-color: rgba({{ .PanelRGB }}, 0.98);
+	border: 1px solid {{ alpha .AccentRGB 0.35 }};
+	border-radius: 10px;
+	padding: 4px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+#banshee-window dropdown.form-field > popover listview > row {
+	border-radius: 8px;
+	padding: 6px 10px;
+	color: #dfe4ee;
+	font-size: 14px;
+}
+
+#banshee-window dropdown.form-field > popover listview > row:selected {
+	background-color: {{ alpha .AccentRGB 0.16 }};
+	color: #f2f5fb;
+}
+
 /* Results list */
 #banshee-window scrolledwindow.results-scroll,
 #banshee-window scrolledwindow.results-scroll > viewport,
@@ -248,8 +295,49 @@ window#banshee-window {
 	font-weight: bold;
 }
 
-/* Placeholder shown when a query matches nothing */
-#banshee-window .empty {
+/* TOTP drain bars. The shared bar sits under the query entry and stands in for
+   every standard-window code on screen; .row-timer is the thinner per-row
+   variant a non-standard period gets. GtkProgressBar draws through
+   progressbar > trough > progress, so both nodes need styling. */
+#banshee-window progressbar.code-timer > trough {
+	background-color: rgba(255, 255, 255, 0.06);
+	border: none;
+	border-radius: 999px;
+	min-height: 3px;
+}
+
+#banshee-window progressbar.code-timer > trough > progress {
+	background-color: {{ .Accent }};
+	background-image: none;
+	border: none;
+	border-radius: 999px;
+	min-height: 3px;
+}
+
+#banshee-window progressbar.code-timer {
+	margin: 0 2px 8px 2px;
+}
+
+#banshee-window progressbar.row-timer {
+	margin: 3px 0 0 0;
+}
+
+#banshee-window progressbar.row-timer > trough {
+	background-color: rgba(255, 255, 255, 0.04);
+	min-height: 2px;
+}
+
+#banshee-window progressbar.row-timer > trough > progress {
+	background-color: {{ alpha .AccentRGB 0.75 }};
+	min-height: 2px;
+}
+
+/* Placeholder shown when a query matches nothing. The label element is part
+   of the selector, not decoration: GtkProgressBar toggles an .empty style
+   class on itself whenever its fraction is 0, so a bare ".empty" rule would
+   pad every drained (or opacity-hidden) timer bar out to a phantom
+   row-height slot under the query entry. */
+#banshee-window label.empty {
 	color: rgba(223, 228, 238, 0.35);
 	font-size: 13px;
 	padding: 22px;

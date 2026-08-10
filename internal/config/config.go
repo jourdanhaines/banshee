@@ -85,6 +85,21 @@ func RepoCachePath() string  { return filepath.Join(DataDir(), "repo_cache") }
 func LastActionPath() string { return filepath.Join(DataDir(), "last_action") }
 func DaemonLogPath() string  { return filepath.Join(StateDir(), "daemon.log") }
 
+// TOTPIndexPath returns the TOTP metadata index. It lives beside the other
+// user-editable config because it holds only names, issuers and digit counts —
+// never secret material, which goes through a secrets store instead.
+func TOTPIndexPath() string { return filepath.Join(ConfigDir(), "totp.json") }
+
+// SecretsDir returns the directory a local secrets backend owns. It is under
+// the data dir, not the config dir, because its contents are machine-local
+// material a user never hand-edits or copies between hosts.
+func SecretsDir() string { return filepath.Join(DataDir(), "secrets") }
+
+// PlaintextSecretsPath returns the file backing the plaintext secrets store —
+// the fallback backend for machines with no OS keyring. It is deliberately a
+// single 0600 file so its permissions are easy to audit.
+func PlaintextSecretsPath() string { return filepath.Join(SecretsDir(), "plaintext.json") }
+
 // ExpandPath expands a leading ~ or ~/ to the user's home directory.
 func ExpandPath(p string) string {
 	if p == "~" {
