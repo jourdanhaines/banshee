@@ -34,21 +34,26 @@ type Config struct {
 	Accent        string  // CSS color, default #7aa2f7
 	WindowOpacity float64 // panel alpha, default 0.92
 	KeyboardMode  string  // "exclusive" (default) | "on-demand"
+
+	// Migration 2026-08e: ClipboardHistory added — additive; the zero value
+	// disables the watcher, Default() turns it on.
+	ClipboardHistory bool // clipboard-history watcher + provider, default true
 }
 
 // Default returns a Config populated with defaults (no file read).
 func Default() Config {
 	return Config{
-		SearchPaths:   []string{"~/dev", "~/projects", "~/src"},
-		MaxDepth:      5,
-		Keybind:       "ctrl-f",
-		CacheTTL:      300,
-		StartupPrompt: true,
-		LauncherWidth: 640,
-		MaxResults:    0,
-		Accent:        "#7aa2f7",
-		WindowOpacity: 0.92,
-		KeyboardMode:  "exclusive",
+		SearchPaths:      []string{"~/dev", "~/projects", "~/src"},
+		MaxDepth:         5,
+		Keybind:          "ctrl-f",
+		CacheTTL:         300,
+		StartupPrompt:    true,
+		LauncherWidth:    640,
+		MaxResults:       0,
+		Accent:           "#7aa2f7",
+		WindowOpacity:    0.92,
+		KeyboardMode:     "exclusive",
+		ClipboardHistory: true,
 	}
 }
 

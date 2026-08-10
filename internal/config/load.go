@@ -94,6 +94,9 @@ func applyKey(cfg *Config, key, value string) {
 		if f, err := strconv.ParseFloat(value, 64); err == nil {
 			cfg.WindowOpacity = f
 		}
+	case "clipboard_history":
+		// Parity with startup_prompt: anything other than "true" is false.
+		cfg.ClipboardHistory = value == "true"
 	case "keyboard_mode":
 		switch value {
 		case KeyboardModeExclusive, KeyboardModeOnDemand:

@@ -138,6 +138,24 @@ func TestLoadFileKeys(t *testing.T) {
 			},
 		},
 		{
+			name: "clipboard_history defaults on and only false for non-true",
+			body: "clipboard_history = false\n",
+			check: func(t *testing.T, c Config) {
+				if c.ClipboardHistory {
+					t.Error("ClipboardHistory should be false")
+				}
+			},
+		},
+		{
+			name: "clipboard_history garbage is false",
+			body: "clipboard_history = on\n",
+			check: func(t *testing.T, c Config) {
+				if c.ClipboardHistory {
+					t.Error("ClipboardHistory should be false")
+				}
+			},
+		},
+		{
 			name: "invalid numbers keep defaults",
 			body: "max_depth = deep\ncache_ttl = soon\nwindow_opacity = opaque\n",
 			check: func(t *testing.T, c Config) {
