@@ -42,9 +42,10 @@ JSON-described tmux session, exactly as it always has.
   draining toward the next rotation; Enter copies a freshly computed one. Seeds
   go to the OS keyring, or across several secret managers at once.
 - **Clipboard history** — type `clip` (or `cb`) for everything you copied this
-  session: text, files and images (with a thumbnail). Enter re-copies, Tab
-  deletes an entry. Secret-looking text and password-manager copies show up
-  masked, and the history lives only in memory — nothing survives a restart.
+  session: text, files and images (shown as a large inline preview). Enter
+  re-copies, Tab deletes an entry. Secret-looking text and password-manager
+  copies show up masked, and the history lives only in memory — nothing
+  survives a restart.
 - **Connectors and plugins** — GitHub and Railway are built in; add your own
   declarative URL connectors or long-running exec plugins.
 
@@ -224,10 +225,18 @@ session, newest first:
 ├──────────────────────────────────────────────┤
 │  ▎ deploy notes for tuesday       just now   │
 │    ghp•••••          hidden — GitHub token   │
-│  ▣ Copied image           PNG · 341 KiB · 2m │
+│    Copied image      PNG · 341 KiB · 2m ago  │
+│    ┌────────────────────────────┐            │
+│    │                            │            │
+│    │      (the image itself)    │            │
+│    │                            │            │
+│    └────────────────────────────┘            │
 │    report final.pdf +1 more    2 files · 5m  │
 └──────────────────────────────────────────────┘
 ```
+
+Image rows render the copied image inline — a large aspect-correct preview
+(up to ~240px tall, never upscaled) under the title, not just a row icon.
 
 **Enter re-copies** an entry (images and file lists included, under their
 original type), **Tab deletes** it. Add a filter after the trigger
