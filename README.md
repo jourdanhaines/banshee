@@ -41,6 +41,10 @@ JSON-described tmux session, exactly as it always has.
 - **TOTP codes** — type `totp` for your two-factor codes under a progress bar
   draining toward the next rotation; Enter copies a freshly computed one. Seeds
   go to the OS keyring, or across several secret managers at once.
+- **Clipboard history** — type `clip` (or `cb`) for everything you copied this
+  session: text, files and images (with a thumbnail). Enter re-copies, Tab
+  deletes an entry. Secret-looking text and password-manager copies show up
+  masked, and the history lives only in memory — nothing survives a restart.
 - **Connectors and plugins** — GitHub and Railway are built in; add your own
   declarative URL connectors or long-running exec plugins.
 
@@ -50,7 +54,7 @@ JSON-described tmux session, exactly as it always has.
 |---|---|
 | **Required** | Go 1.23+, `gtk4`, `gtk4-layer-shell`, `pkgconf`, `make` |
 | **Compositor** | Hyprland (or any `wlr-layer-shell` compositor; banshee falls back to a normal window elsewhere) |
-| **Recommended** | `tmux` (session features), `fzf` (nicer CLI picker), `git` (GitHub connector), `wl-clipboard` (calculator copy; `xclip`/`xsel` on X11) |
+| **Recommended** | `tmux` (session features), `fzf` (nicer CLI picker), `git` (GitHub connector), `wl-clipboard` (clipboard history and calculator copy; `xclip`/`xsel` cover copying on X11) |
 
 On Arch, the lot:
 `sudo pacman -S --needed go gtk4 gtk4-layer-shell pkgconf make tmux fzf git`
@@ -141,6 +145,7 @@ place. `banshee reload` applies changes to a running daemon.
 | `~/.local/share/banshee/last_action` | What `banshee -r` replays |
 | `~/.local/state/banshee/daemon.log` | Daemon log |
 | `$XDG_RUNTIME_DIR/banshee/banshee.sock` | Control socket (+ `.lock`) |
+| `$XDG_RUNTIME_DIR/banshee/clips/` | Clipboard-history image payloads (tmpfs — gone at logout) |
 
 ## TOTP codes
 
@@ -206,6 +211,46 @@ The seed is written to the chosen manager first and the index entry second, so
 a failed write never leaves you with an entry that has no seed behind it. There
 is no delete row — remove an entry by editing `totp.json` and clearing its key
 from the manager holding it.
+
+## Clipboard history
+
+Type `clip` (or keep going — every prefix of `clipboard` from `clip` up
+triggers, as does the short alias `cb`) to browse everything you copied this
+session, newest first:
+
+```
+┌──────────────────────────────────────────────┐
+│  clip                                        │
+├──────────────────────────────────────────────┤
+│  ▎ deploy notes for tuesday       just now   │
+│    ghp•••••          hidden — GitHub token   │
+│  ▣ Copied image           PNG · 341 KiB · 2m │
+│    report final.pdf +1 more    2 files · 5m  │
+└──────────────────────────────────────────────┘
+```
+
+**Enter re-copies** an entry (images and file lists included, under their
+original type), **Tab deletes** it. Add a filter after the trigger
+(`clip report`) to narrow by content or file name; `clip image` narrows to
+pictures. Copying the same thing repeatedly collapses into one entry with a
+`×3`-style counter.
+
+What you should know about how it treats your data:
+
+- **Session-only.** The history is capped at 1,000 entries, lives in daemon
+  memory, and vanishes when the daemon exits. Image payloads go to
+  `$XDG_RUNTIME_DIR/banshee/clips` (tmpfs, private to you, wiped at logout) so
+  a thumbnail can render — nothing is ever written to disk proper.
+- **Sensitive content shows up masked.** Copies marked by a password manager
+  (KeePassXC and friends set `x-kde-passwordManagerHint`) render as `••••••••`;
+  text that *looks* like a secret — API keys, tokens, JWTs, private keys,
+  high-entropy strings — keeps three characters and masks the rest. Masked
+  entries still re-copy their real content, but never match a filter, so their
+  value cannot be probed query by query.
+- **banshee's own TOTP copies never enter the history**, and re-copying a
+  masked entry re-marks it sensitive for other clipboard managers.
+- Watching requires Wayland and `wl-clipboard`; turn the feature off entirely
+  with `clipboard_history = false`.
 
 ## Sessions
 
