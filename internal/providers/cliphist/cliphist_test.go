@@ -115,12 +115,16 @@ func TestQueryBareTrigger(t *testing.T) {
 	if res[3].Title != "Copied image" || !strings.Contains(res[3].Subtitle, "PNG") {
 		t.Errorf("image row = %q / %q", res[3].Title, res[3].Subtitle)
 	}
-	if res[3].Icon.Path == "" {
-		t.Errorf("image row icon = %+v, want thumbnail path", res[3].Icon)
+	if res[3].Icon.ThemeName != iconImage || res[3].Icon.Path != "" {
+		t.Errorf("image row icon = %+v, want generic %s (the image renders via Preview)", res[3].Icon, iconImage)
+	}
+	if res[3].Preview == "" {
+		t.Errorf("image row Preview empty, want the image path")
 	}
 
-	// Every row: category, copy action, delete alt-action, ID-only payloads.
-	for _, r := range res {
+	// Every row: category, copy action, delete alt-action, ID-only payloads;
+	// only the image row carries a large preview.
+	for i, r := range res {
 		if r.Category != providers.CatClipboard {
 			t.Errorf("category = %v", r.Category)
 		}
@@ -130,6 +134,31 @@ func TestQueryBareTrigger(t *testing.T) {
 		if r.AltAction == nil || r.AltAction.Kind != ActClipDelete {
 			t.Errorf("alt action = %+v", r.AltAction)
 		}
+		if i != 3 && r.Preview != "" {
+			t.Errorf("non-image row %d has Preview %q", i, r.Preview)
+		}
+	}
+}
+
+func TestSensitiveImageStaysMasked(t *testing.T) {
+	// A password-manager-hinted image must render the lock icon and no large
+	// preview — at preview size the pixels are exactly what the mask hides.
+	s := NewStore(WithImageDir(t.TempDir()))
+	s.Add(KindImage, "image/png", []byte("secret-qr"), true, MaskReasonHint)
+	p := New(s, fuzzy.Score)
+
+	res, err := p.Query(context.Background(), "clip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("len = %d, want 1", len(res))
+	}
+	if res[0].Preview != "" {
+		t.Errorf("sensitive image row has Preview %q", res[0].Preview)
+	}
+	if res[0].Icon.ThemeName != iconSensitive || res[0].Icon.Path != "" {
+		t.Errorf("sensitive image icon = %+v, want %s", res[0].Icon, iconSensitive)
 	}
 }
 

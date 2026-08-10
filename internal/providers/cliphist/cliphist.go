@@ -26,9 +26,10 @@ type Scorer func(query, candidate string) (int, bool)
 // CatApp-and-later categories.
 const TriggerScore = 800
 
-// Icon theme names for rows that do not carry their own thumbnail.
+// Icon theme names by row kind.
 const (
 	iconText      = "edit-copy-symbolic"
+	iconImage     = "image-x-generic-symbolic"
 	iconFiles     = "folder-symbolic"
 	iconSensitive = "dialog-password-symbolic"
 )
@@ -122,6 +123,12 @@ func (p *Provider) entryResult(e Entry, score int, now time.Time) providers.Resu
 			Argv: []string{strconv.FormatUint(e.ID, 10)},
 		},
 	}
+	// Image rows carry the copied image itself as a large preview — but never
+	// a sensitive one: a hinted image at preview size would disclose exactly
+	// what the mask exists to hide.
+	if e.Kind == KindImage && !e.Sensitive {
+		res.Preview = e.ImagePath
+	}
 	return res
 }
 
@@ -175,15 +182,16 @@ func entrySubtitle(e Entry, now time.Time) string {
 	return strings.Join(parts, " · ")
 }
 
-// entryIcon picks the row icon: the image itself for image entries (the
-// launcher scales any absolute Icon.Path to the 24px slot — the Steam
-// librarycache precedent), theme icons otherwise.
+// entryIcon picks the row's 24px icon — always a themed generic, never the
+// copied image itself: the image renders once, large, via Result.Preview, and
+// a second copy squeezed into the icon slot reads as clutter. Sensitive wins
+// over everything — a hinted image must render the lock, not its own pixels.
 func entryIcon(e Entry) providers.Icon {
 	switch {
-	case e.Kind == KindImage:
-		return providers.Icon{Path: e.ImagePath}
 	case e.Sensitive:
 		return providers.Icon{ThemeName: iconSensitive}
+	case e.Kind == KindImage:
+		return providers.Icon{ThemeName: iconImage}
 	case e.Kind == KindFiles:
 		return providers.Icon{ThemeName: iconFiles}
 	default:
