@@ -22,6 +22,8 @@ func CategoryLabel(c providers.Category) string {
 		return "connector"
 	case providers.CatDirectory:
 		return "directory"
+	case providers.CatClipboard:
+		return "clipboard"
 	case providers.CatApp:
 		return "app"
 	case providers.CatKill:

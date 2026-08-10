@@ -20,6 +20,9 @@
 // Migration 2026-08d: CatSteamPlay, CatSteamLibrary, CatSteamStorePage,
 // CatSteamDB, CatSteamStore and CatSteamSearch added for the built-in Steam
 // provider — additive, zero value inert.
+//
+// Migration 2026-08e: CatClipboard added for the built-in clipboard-history
+// provider — additive, zero value inert.
 package providers
 
 import (
@@ -40,6 +43,7 @@ const (
 	CatDirectory Category = 30 // "Open <repo> directory"
 	CatCalc      Category = 35 // inline calculator answer
 	CatTOTP      Category = 37 // inline TOTP code rows; sits above CatApp so the MinScore threshold never drops them
+	CatClipboard Category = 38 // clipboard-history rows; above CatApp for the same reason as CatTOTP — the provider self-thresholds
 	CatApp       Category = 40 // installed applications
 	// The four Steam block categories collapse one installed game's rows into a
 	// fixed-order block, exactly like the repo block: all four rows carry the
