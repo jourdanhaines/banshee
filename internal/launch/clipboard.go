@@ -57,6 +57,53 @@ func CopyToClipboard(opts Options, text string) error {
 	return nil
 }
 
+// CopyToClipboardSensitive is CopyToClipboard for secret material (TOTP codes,
+// re-copied masked history entries). When the resolved tool is wl-copy it adds
+// --sensitive, which offers the x-kde-passwordManagerHint type alongside the
+// text so clipboard managers (including banshee's own history watcher) mask or
+// skip the capture. xclip/xsel have no equivalent, so there the call degrades
+// to a plain copy — banshee's watcher only runs under Wayland anyway.
+func CopyToClipboardSensitive(opts Options, text string) error {
+	argv, err := ResolveClipboard(opts)
+	if err != nil {
+		return err
+	}
+	if argv[0] == "wl-copy" {
+		argv = append(argv[:len(argv):len(argv)], "--sensitive")
+	}
+	if err := opts.runStdin(argv, strings.NewReader(text)); err != nil {
+		return fmt.Errorf("clipboard: %s: %w", argv[0], err)
+	}
+	return nil
+}
+
+// CopyToClipboardMIME writes r to the clipboard under an explicit MIME type —
+// the re-copy path for clipboard-history images and text/uri-list file lists.
+// Only wl-copy (-t/--sensitive) and xclip (-t) can offer a declared type; xsel
+// cannot, and returns an error naming the tool rather than silently pasting
+// image bytes as text. The payload rides on stdin, never argv.
+func CopyToClipboardMIME(opts Options, mime string, r io.Reader, sensitive bool) error {
+	argv, err := ResolveClipboard(opts)
+	if err != nil {
+		return err
+	}
+	switch argv[0] {
+	case "wl-copy":
+		argv = append(argv[:len(argv):len(argv)], "--type", mime)
+		if sensitive {
+			argv = append(argv, "--sensitive")
+		}
+	case "xclip":
+		argv = append(argv[:len(argv):len(argv)], "-t", mime)
+	default:
+		return fmt.Errorf("clipboard: %s cannot offer MIME type %s", argv[0], mime)
+	}
+	if err := opts.runStdin(argv, r); err != nil {
+		return fmt.Errorf("clipboard: %s: %w", argv[0], err)
+	}
+	return nil
+}
+
 // runStdinCmd runs argv to completion with stdin fed from r, bounded by
 // clipboardTimeout.
 func runStdinCmd(argv []string, stdin io.Reader) error {
