@@ -23,6 +23,10 @@
 //
 // Migration 2026-08e: CatClipboard added for the built-in clipboard-history
 // provider — additive, zero value inert.
+//
+// Migration 2026-08f: Result.Preview added for large clipboard image rows —
+// additive, zero value inert. A UI that ignores it renders the row exactly as
+// before.
 package providers
 
 import (
@@ -175,6 +179,13 @@ type Result struct {
 	// Expiry, so the UI can render how much of it remains. Zero on a live row
 	// means the standard 30-second TOTP window; zero on a static row is inert.
 	Period time.Duration
+	// Preview, when non-empty, is an absolute path to an image the UI renders
+	// as a large aspect-preserving preview under the title and subtitle —
+	// clipboard-history image rows use it to show the copied image itself.
+	// It complements Icon rather than replacing it: the icon slot still
+	// renders. A path that does not exist or fails to decode leaves the row
+	// exactly as it would be with Preview empty.
+	Preview string
 }
 
 // Provider is a source of results. Query must honor ctx cancellation: the
