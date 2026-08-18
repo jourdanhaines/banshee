@@ -124,7 +124,7 @@ install-config:
 		echo "installed $(CONFIGDIR)/banshee.conf"; \
 	fi
 
-## install-plugins — the example exec plugin, only when it is not already there.
+## install-plugins — the bundled plugins, each only when not already there.
 install-plugins:
 	@if [ -d $(CONFIGDIR)/plugins/example ]; then \
 		echo "keeping existing $(CONFIGDIR)/plugins/example"; \
@@ -133,6 +133,16 @@ install-plugins:
 		install -m 0644 plugins/example/manifest.json $(CONFIGDIR)/plugins/example/manifest.json; \
 		install -m 0755 plugins/example/plugin.sh     $(CONFIGDIR)/plugins/example/plugin.sh; \
 		echo "installed example plugin to $(CONFIGDIR)/plugins/example"; \
+	fi
+	@if [ -d $(CONFIGDIR)/plugins/claude-code ]; then \
+		echo "keeping existing $(CONFIGDIR)/plugins/claude-code"; \
+	else \
+		mkdir -p $(CONFIGDIR)/plugins/claude-code; \
+		install -m 0644 plugins/claude-code/manifest.json $(CONFIGDIR)/plugins/claude-code/manifest.json; \
+		install -m 0755 plugins/claude-code/plugin.sh     $(CONFIGDIR)/plugins/claude-code/plugin.sh; \
+		install -m 0755 plugins/claude-code/hook.sh       $(CONFIGDIR)/plugins/claude-code/hook.sh; \
+		install -m 0644 plugins/claude-code/config        $(CONFIGDIR)/plugins/claude-code/config; \
+		echo "installed claude-code plugin to $(CONFIGDIR)/plugins/claude-code"; \
 	fi
 
 uninstall:

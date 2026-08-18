@@ -1,0 +1,11 @@
+{
+    "v": 1,
+    "id": "claude-code",
+    "name": "Claude Code",
+    "icon": "dialog-question-symbolic",
+    "type": "exec",
+    "exec": {
+        "bin": "./plugin.sh",
+        "background": true
+    }
+}

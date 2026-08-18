@@ -1,0 +1,14 @@
+# banshee claude-code plugin — user-editable options, sourced as sh.
+# Edit and run `banshee reload` to apply.
+
+# true: the notification stays on screen until you dismiss or click it.
+# false: it expires after TIMEOUT_SECONDS.
+REQUIRE_INPUT=true
+
+# Seconds to show the notification when REQUIRE_INPUT=false.
+TIMEOUT_SECONDS=10
+
+# Space-separated Claude Code hook events to notify on. "Notification" fires
+# when Claude needs your input (permission prompts, plan approval, questions);
+# "Stop" fires when Claude finishes responding.
+EVENTS="Notification Stop"
