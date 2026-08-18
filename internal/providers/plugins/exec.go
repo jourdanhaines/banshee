@@ -64,6 +64,14 @@ type Options struct {
 	CrashLimit int
 	// Stderr receives plugin stderr; nil discards it.
 	Stderr io.Writer
+	// Notify receives EventNotify messages plugins push (icon already
+	// resolved against the plugin dir). respond sends the matching
+	// notify-action / notify-closed event back to the plugin; it is safe to
+	// call from any goroutine and after the plugin restarted (the event is
+	// then fire-and-forget into a process that may not know the id, the
+	// Submit caveat). nil drops notifications — which is also how a
+	// `notifications = false` config is enforced.
+	Notify func(pluginID string, n WireNotify, respond func(action string, closed bool, reason int))
 }
 
 func (o Options) withDefaults() Options {
@@ -460,6 +468,14 @@ func (p *ExecPlugin) readLoop(gen uint64, cmd *exec.Cmd, stdout io.Reader, readD
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			continue // malformed lines are ignored, never fatal
 		}
+		if msg.Event == EventNotify {
+			// Out of band: notifications carry no seq and may arrive at any
+			// time, including while no query is pending.
+			if msg.Notify != nil {
+				p.handleNotify(gen, *msg.Notify)
+			}
+			continue
+		}
 		if msg.Event != "" && msg.Event != EventResults {
 			continue // activated / unknown events carry no results
 		}
@@ -499,6 +515,61 @@ func (p *ExecPlugin) deliver(gen uint64, msg Message) {
 	if msg.Done {
 		cur.finish()
 	}
+}
+
+// handleNotify forwards a plugin-pushed notification to the host's sink.
+// Gen-gated like deliver so a superseded process that is dying cannot post,
+// but the respond closure deliberately is not: by the time the user clicks,
+// the plugin may have restarted, and the event is fire-and-forget either way.
+func (p *ExecPlugin) handleNotify(gen uint64, n WireNotify) {
+	sink := p.opts.Notify
+	if sink == nil || n.ID == "" || n.Summary == "" {
+		return
+	}
+	p.mu.Lock()
+	if gen != p.gen {
+		p.mu.Unlock()
+		return
+	}
+	m := p.m
+	p.mu.Unlock()
+
+	n.Icon = resolveNotifyIcon(n.Icon, m)
+	id := n.ID
+	respond := func(action string, closed bool, reason int) {
+		p.mu.Lock()
+		stdin := p.stdin
+		p.mu.Unlock()
+		ev := Event{V: ProtoVersion, ID: id}
+		if closed {
+			ev.Event = EventNotifyClosed
+			ev.Reason = reason
+		} else {
+			ev.Event = EventNotifyAction
+			ev.Action = action
+		}
+		_ = p.write(stdin, ev)
+	}
+	sink(m.ID, n, respond)
+}
+
+// resolveNotifyIcon maps a wire icon to what a notification daemon accepts:
+// a theme name, or an absolute path (relative paths resolve against the
+// plugin dir). Empty falls back to the manifest icon. Unlike result icons
+// there is no builtin set here — compiled-in SVGs cannot cross the bus by
+// name.
+func resolveNotifyIcon(icon string, m connectors.Manifest) string {
+	icon = strings.TrimSpace(icon)
+	if icon == "" {
+		icon = strings.TrimSpace(m.Icon)
+	}
+	if icon == "" || !strings.ContainsAny(icon, "/.") {
+		return icon
+	}
+	if !filepath.IsAbs(icon) && m.Dir != "" {
+		icon = filepath.Join(m.Dir, icon)
+	}
+	return icon
 }
 
 func (p *ExecPlugin) waitLoop(gen uint64, cmd *exec.Cmd, exited, readDone chan struct{}) {
