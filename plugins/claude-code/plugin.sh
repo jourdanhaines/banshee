@@ -17,7 +17,7 @@ DIR="${BANSHEE_PLUGIN_DIR:-$(dirname "$0")}"
 [ -f "$DIR/config" ] && . "$DIR/config"
 REQUIRE_INPUT="${REQUIRE_INPUT:-true}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10}"
-EVENTS="${EVENTS:-Notification Stop}"
+EVENTS="${EVENTS:-Notification PermissionRequest Stop}"
 SOUND_FILE="${SOUND_FILE:-}"
 
 RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/banshee"
@@ -60,17 +60,20 @@ handle_hook() {
 
     sid=$(str_field "$line" session_id)
     message=$(str_field "$line" message)
+    tool=$(str_field "$line" tool_name)
     cwd=$(str_field "$line" cwd)
     ppid=$(num_field "$line" ppid)
     id="claude:${sid:-default}"
     [ -n "$ppid" ] && printf '%s %s\n' "$id" "$ppid" >> "$STATE"
 
     case "$event" in
-        Notification) summary="Claude Code needs input" ;;
-        Stop)         summary="Claude Code finished" ;;
-        *)            summary="Claude Code: $event" ;;
+        Notification)      summary="Claude Code needs input" ;;
+        PermissionRequest) summary="Claude Code awaiting approval" ;;
+        Stop)              summary="Claude Code finished" ;;
+        *)                 summary="Claude Code: $event" ;;
     esac
-    body="${message:-$event}"
+    # PermissionRequest carries no message field; the tool name is the payload.
+    body="${message:-${tool:-$event}}"
     [ -n "$cwd" ] && body="$body — $cwd"
 
     if [ "$REQUIRE_INPUT" = "true" ]; then

@@ -4,6 +4,10 @@
 #
 #   {
 #     "hooks": {
+#       "PermissionRequest": [
+#         { "hooks": [ { "type": "command",
+#             "command": "~/.config/banshee/plugins/claude-code/hook.sh" } ] }
+#       ],
 #       "Notification": [
 #         { "hooks": [ { "type": "command",
 #             "command": "~/.config/banshee/plugins/claude-code/hook.sh" } ] }
@@ -14,6 +18,11 @@
 #       ]
 #     }
 #   }
+#
+# PermissionRequest fires immediately for tool approvals and plan approval;
+# Notification covers the delayed prompts (idle, ~6 s permission reminder).
+# This script never writes stdout, so registering it under PermissionRequest
+# emits no permission decision — the prompt behaves exactly as without it.
 #
 # Claude Code passes the hook event as JSON on stdin. This script appends the
 # hook's parent pid (so a notification click can focus the terminal running

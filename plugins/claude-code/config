@@ -8,10 +8,11 @@ REQUIRE_INPUT=true
 # Seconds to show the notification when REQUIRE_INPUT=false.
 TIMEOUT_SECONDS=10
 
-# Space-separated Claude Code hook events to notify on. "Notification" fires
-# when Claude needs your input (permission prompts, plan approval, questions);
+# Space-separated Claude Code hook events to notify on. "PermissionRequest"
+# fires the moment a permission prompt appears (tool approval, plan approval);
+# "Notification" covers the delayed prompts (idle, ~6 s permission reminder);
 # "Stop" fires when Claude finishes responding.
-EVENTS="Notification Stop"
+EVENTS="Notification PermissionRequest Stop"
 
 # Audio file played when the notification fires. An absolute path, or a path
 # relative to this plugin's directory (e.g. alert.wav). Empty = silent.
