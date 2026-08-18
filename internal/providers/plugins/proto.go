@@ -24,6 +24,16 @@
 // know EventSubmit ignores it. When "form" is present the result's "action"
 // is ignored — submission always comes back as EventSubmit.
 //
+// A plugin may also push a desktop notification at any time by writing an
+// EventNotify message (see WireNotify) — the one plugin-initiated message in
+// the protocol. It carries no seq: the host handles it out of band, and a
+// host too old to know it discards it silently. When the user invokes one of
+// the notification's actions or the notification closes, the host sends the
+// fire-and-forget EventNotifyAction / EventNotifyClosed events back, keyed by
+// the notification's id. (Migration 2026-08g: EventNotify, EventNotifyAction,
+// EventNotifyClosed, Message.Notify, Event.Action and Event.Reason added for
+// the notification plugin system — additive, unknown-ignored both ways.)
+//
 // Every query carries a Seq, and a plugin must echo the seq it is answering:
 // the host drops any message whose seq is not the query it is still waiting
 // on. Results for one seq may be split across several messages; the host
@@ -76,6 +86,14 @@ const (
 	EventSubmit = "submit"
 	// EventShutdown asks the plugin to exit; the host closes stdin after it.
 	EventShutdown = "shutdown"
+	// EventNotifyAction reports that an action on a notification the plugin
+	// raised was invoked; Event.ID is the notification id, Event.Action the
+	// action key. Fire-and-forget, like activate.
+	EventNotifyAction = "notify-action"
+	// EventNotifyClosed reports that a notification the plugin raised closed;
+	// Event.ID is the notification id, Event.Reason the daemon's reason code
+	// (1 expired, 2 dismissed, 3 closed by call, 4 undefined).
+	EventNotifyClosed = "notify-closed"
 )
 
 // Events a plugin writes to stdout.
@@ -85,6 +103,9 @@ const (
 	// EventActivated acknowledges an activate event. Purely informational —
 	// the host does not wait for it.
 	EventActivated = "activated"
+	// EventNotify asks the host to raise a desktop notification (see
+	// WireNotify). It carries no seq and may be sent at any time.
+	EventNotify = "notify"
 )
 
 // Action kinds a plugin may put on a result. They map onto the frozen
@@ -115,6 +136,10 @@ type Event struct {
 	ID string `json:"id,omitempty"`
 	// Values are the submitted form values keyed by field key (submit).
 	Values map[string]string `json:"values,omitempty"`
+	// Action is the invoked action's key (notify-action).
+	Action string `json:"action,omitempty"`
+	// Reason is the daemon's close reason code (notify-closed).
+	Reason int `json:"reason,omitempty"`
 }
 
 // Message is one plugin → host message, read as a single JSON line. Unknown
@@ -128,6 +153,39 @@ type Message struct {
 	Results []WireResult `json:"results"`
 	Done    bool         `json:"done"`
 	Error   string       `json:"error"`
+	// Notify is the notification payload of an EventNotify message.
+	Notify *WireNotify `json:"notify,omitempty"`
+}
+
+// WireNotify is a desktop notification requested by a plugin. ID and Summary
+// are required; a message missing either is dropped. Re-sending the same ID
+// replaces the notification on screen rather than stacking a new one.
+type WireNotify struct {
+	// ID keys the notification for replacement and for the notify-action /
+	// notify-closed events coming back.
+	ID      string `json:"id"`
+	Summary string `json:"summary"`
+	Body    string `json:"body"`
+	// Icon is an icon-theme name, or a path relative to the plugin dir.
+	// Empty falls back to the manifest icon.
+	Icon string `json:"icon"`
+	// Urgency is "low", "normal" or "critical"; empty means normal.
+	Urgency string `json:"urgency"`
+	// RequireInput keeps the notification on screen until the user acts on
+	// it (never expires, critical urgency unless Urgency says otherwise).
+	RequireInput bool `json:"require_input"`
+	// TimeoutMS expires the notification after that many milliseconds.
+	// Ignored when RequireInput is set; zero means the daemon's default.
+	TimeoutMS int `json:"timeout_ms"`
+	// Actions are the notification's buttons; the key "default" is the
+	// body-click action. Invocations come back as notify-action events.
+	Actions []WireNotifyAction `json:"actions"`
+}
+
+// WireNotifyAction is one button on a plugin notification.
+type WireNotifyAction struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
 }
 
 // WireResult is a result as serialized by a plugin.
