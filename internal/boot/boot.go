@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
@@ -29,6 +30,7 @@ import (
 	"github.com/jourdanhaines/banshee/internal/index"
 	"github.com/jourdanhaines/banshee/internal/ipc"
 	"github.com/jourdanhaines/banshee/internal/launch"
+	"github.com/jourdanhaines/banshee/internal/notify"
 	"github.com/jourdanhaines/banshee/internal/providers"
 	"github.com/jourdanhaines/banshee/internal/providers/apps"
 	"github.com/jourdanhaines/banshee/internal/providers/calc"
@@ -76,6 +78,14 @@ type Launcher struct {
 	clips     *cliphist.Store
 	clipWatch *cliphist.Watcher
 
+	// notifier sends plugin desktop notifications over the session bus. It
+	// dials lazily, so constructing it here costs nothing; notifyOn gates it
+	// and is flipped by reload when the `notifications` key changes —
+	// atomically, because pluginNotify runs on plugin readLoop goroutines
+	// while reload runs on the GTK main loop.
+	notifier *notify.Notifier
+	notifyOn atomic.Bool
+
 	// win is the launcher window, created on the GTK main loop when the
 	// application activates and only ever touched from that loop.
 	win *ui.Launcher
@@ -105,7 +115,13 @@ func New(cfg config.Config) *Launcher {
 		logger.Printf("index: %v", err)
 	}
 
-	b.host = plugins.NewHost(config.PluginsDir(), plugins.Options{Stderr: os.Stderr})
+	b.notifier = notify.New(notify.Options{Log: logger.Printf})
+	b.notifyOn.Store(cfg.Notifications)
+
+	b.host = plugins.NewHost(config.PluginsDir(), plugins.Options{
+		Stderr: os.Stderr,
+		Notify: b.pluginNotify,
+	})
 	if err := b.host.Load(); err != nil {
 		logger.Printf("plugins: %v", err)
 	}
@@ -242,6 +258,38 @@ func (b *Launcher) registerHandlers() {
 	})
 }
 
+// pluginNotify is the plugin host's notification sink: it maps a plugin's
+// wire notification onto a notify.Request and routes the daemon's
+// action/close signals back to the plugin through respond. It runs on plugin
+// readLoop goroutines and the notifier's signal goroutine — never the GTK
+// main loop — which is why it talks to the bus directly instead of going
+// anywhere near notifyUser.
+func (b *Launcher) pluginNotify(pluginID string, n plugins.WireNotify, respond func(action string, closed bool, reason int)) {
+	if !b.notifyOn.Load() {
+		return
+	}
+	req := notify.Request{
+		// Namespacing by plugin id keeps two plugins that both picked the
+		// notification id "status" from replacing each other.
+		Key:          pluginID + "/" + n.ID,
+		Summary:      n.Summary,
+		Body:         n.Body,
+		Icon:         n.Icon,
+		Urgency:      notify.ParseUrgency(n.Urgency),
+		RequireInput: n.RequireInput,
+		TimeoutMS:    n.TimeoutMS,
+		OnEvent: func(e notify.Event) {
+			respond(e.ActionKey, e.Closed, e.Reason)
+		},
+	}
+	for _, a := range n.Actions {
+		req.Actions = append(req.Actions, notify.Action{Key: a.Key, Label: a.Label})
+	}
+	if err := b.notifier.Send(req); err != nil {
+		b.log.Printf("notify: plugin %s: %v", pluginID, err)
+	}
+}
+
 // notifyUser surfaces a message from an action handler that failed after
 // Dispatch already returned — by then the window is hidden and there is no
 // error left to propagate, so a desktop notification is the only channel back.
@@ -314,6 +362,10 @@ func (b *Launcher) run(lock *daemon.Lock) error {
 			b.log.Printf("%v", err)
 		}
 	}
+	// Background plugins also belong to the daemon's lifetime: starting them
+	// here (not in New) keeps tests and `banshee doctor` from spawning them,
+	// and arms every future Host.Load to restart them.
+	b.host.StartBackground()
 	err := daemon.Run(daemon.Options{
 		NewUI:    b.newUI,
 		OnReload: b.reload,
@@ -325,6 +377,9 @@ func (b *Launcher) run(lock *daemon.Lock) error {
 	b.waitBackground()
 	// The plugin host owns child processes; they must not outlive the daemon.
 	b.host.Shutdown()
+	// After the host, so plugins have stopped pushing before the bus
+	// connection and the action callbacks go away.
+	b.notifier.Close()
 	// The watcher owns the wl-paste child, and Clear drops the history's
 	// runtime image files with the session that captured them.
 	b.clipWatch.Shutdown()
@@ -379,6 +434,9 @@ func (b *Launcher) reload() error {
 			b.clipWatch.Shutdown()
 			b.clips.Clear()
 		}
+		// The gate is all a notifications toggle needs: background plugins
+		// keep running either way, their pushes are just dropped at the sink.
+		b.notifyOn.Store(cfg.Notifications)
 	}
 
 	if err := b.apps.Reload(); err != nil {
