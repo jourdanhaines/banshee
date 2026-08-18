@@ -9,6 +9,7 @@ import (
 	"github.com/jourdanhaines/banshee/internal/index"
 	"github.com/jourdanhaines/banshee/internal/ipc"
 	"github.com/jourdanhaines/banshee/internal/launch"
+	"github.com/jourdanhaines/banshee/internal/notify"
 )
 
 // HyprlandSnippet is the Hyprland configuration banshee needs: blur for the
@@ -67,6 +68,14 @@ func (a *App) doctor() error {
 		check(true, false, "wl-clipboard", path)
 	} else {
 		check(false, false, "wl-clipboard", "not found — clipboard history is unavailable (install wl-clipboard)")
+	}
+	// Plugin notifications need a freedesktop notification daemon on the
+	// session bus; without one the launcher runs, pushes are just dropped.
+	if server, err := notify.Probe(); err == nil {
+		check(true, false, "notifications", server)
+	} else {
+		check(false, false, "notifications",
+			"no org.freedesktop.Notifications daemon — plugin notifications are unavailable")
 	}
 
 	term, termErr := launch.ResolveTerminal(launch.Options{Terminal: a.Cfg.Terminal})
