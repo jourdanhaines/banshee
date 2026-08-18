@@ -21,7 +21,7 @@ while IFS= read -r line; do
   case "$line" in
     *'"event":"query"'*)
       seq=$(printf '%s' "$line" | sed -n 's/.*"seq":\([0-9]*\).*/\1/p')
-      printf '{"v":1,"event":"notify","notify":{"id":"n1","summary":"Needs input","body":"b","icon":"icon.png","urgency":"critical","require_input":true,"timeout_ms":0,"actions":[{"key":"default","label":"Focus"}]}}\n'
+      printf '{"v":1,"event":"notify","notify":{"id":"n1","summary":"Needs input","body":"b","icon":"icon.png","sound":"alert.wav","urgency":"critical","require_input":true,"timeout_ms":0,"actions":[{"key":"default","label":"Focus"}]}}\n'
       printf '{"v":1,"seq":%s,"event":"results","results":[],"done":true}\n' "$seq"
       ;;
   esac
@@ -78,9 +78,13 @@ func TestExecPluginNotifySink(t *testing.T) {
 	if len(n.Actions) != 1 || n.Actions[0].Key != "default" || n.Actions[0].Label != "Focus" {
 		t.Errorf("actions = %+v", n.Actions)
 	}
-	// A relative icon resolves against the plugin dir before the sink sees it.
+	// Relative icon and sound paths resolve against the plugin dir before
+	// the sink sees them.
 	if want := filepath.Join(p.m.Dir, "icon.png"); n.Icon != want {
 		t.Errorf("icon = %q, want %q", n.Icon, want)
+	}
+	if want := filepath.Join(p.m.Dir, "alert.wav"); n.Sound != want {
+		t.Errorf("sound = %q, want %q", n.Sound, want)
 	}
 
 	// respond routes the daemon's signals back onto the plugin's stdin.
@@ -101,6 +105,29 @@ func TestExecPluginNotifySink(t *testing.T) {
 			t.Fatalf("respond events never reached the plugin:\n%s", s)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestResolveNotifySound(t *testing.T) {
+	m := connectors.Manifest{Dir: "/plug/dir"}
+	home, _ := os.UserHomeDir()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty is silent", "", ""},
+		{"whitespace is silent", "  ", ""},
+		{"relative resolves against plugin dir", "alert.wav", "/plug/dir/alert.wav"},
+		{"absolute passes through", "/sounds/beep.wav", "/sounds/beep.wav"},
+		{"tilde expands", "~/beep.wav", filepath.Join(home, "beep.wav")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveNotifySound(tt.in, m); got != tt.want {
+				t.Errorf("resolveNotifySound(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 

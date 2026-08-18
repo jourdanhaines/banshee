@@ -306,6 +306,60 @@ func TestCallFailureDropsConn(t *testing.T) {
 	}
 }
 
+func TestSoundPlayback(t *testing.T) {
+	t.Run("played on success", func(t *testing.T) {
+		bus := newFakeBus()
+		var played []string
+		n := New(Options{
+			Connect: func() (*Conn, error) { return bus.conn(), nil },
+			Play:    func(path string) { played = append(played, path) },
+		})
+		defer n.Close()
+		if err := n.Send(Request{Summary: "s", SoundPath: "/tmp/beep.wav"}); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if len(played) != 1 || played[0] != "/tmp/beep.wav" {
+			t.Errorf("played = %v, want [/tmp/beep.wav]", played)
+		}
+	})
+	t.Run("silent without a sound path", func(t *testing.T) {
+		bus := newFakeBus()
+		var played []string
+		n := New(Options{
+			Connect: func() (*Conn, error) { return bus.conn(), nil },
+			Play:    func(path string) { played = append(played, path) },
+		})
+		defer n.Close()
+		if err := n.Send(Request{Summary: "s"}); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if len(played) != 0 {
+			t.Errorf("played = %v, want none", played)
+		}
+	})
+	t.Run("silent when the send fails", func(t *testing.T) {
+		broken := &Conn{
+			Notify: func(uint32, string, string, string, []string, map[string]dbus.Variant, int32) (uint32, error) {
+				return 0, errors.New("daemon gone")
+			},
+			Signals: make(chan Signal),
+			Close:   func() {},
+		}
+		var played []string
+		n := New(Options{
+			Connect: func() (*Conn, error) { return broken, nil },
+			Play:    func(path string) { played = append(played, path) },
+		})
+		defer n.Close()
+		if err := n.Send(Request{Summary: "s", SoundPath: "/tmp/beep.wav"}); err == nil {
+			t.Fatal("Send succeeded on broken conn")
+		}
+		if len(played) != 0 {
+			t.Errorf("played = %v, want none on a failed send", played)
+		}
+	})
+}
+
 func TestSendAfterClose(t *testing.T) {
 	n := New(Options{Connect: func() (*Conn, error) {
 		t.Fatal("Connect called after Close")

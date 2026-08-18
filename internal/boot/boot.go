@@ -278,6 +278,7 @@ func (b *Launcher) pluginNotify(pluginID string, n plugins.WireNotify, respond f
 		Urgency:      notify.ParseUrgency(n.Urgency),
 		RequireInput: n.RequireInput,
 		TimeoutMS:    n.TimeoutMS,
+		SoundPath:    n.Sound,
 		OnEvent: func(e notify.Event) {
 			respond(e.ActionKey, e.Closed, e.Reason)
 		},

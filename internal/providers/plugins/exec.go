@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jourdanhaines/banshee/internal/config"
 	"github.com/jourdanhaines/banshee/internal/providers"
 	"github.com/jourdanhaines/banshee/internal/providers/connectors"
 )
@@ -536,6 +537,7 @@ func (p *ExecPlugin) handleNotify(gen uint64, n WireNotify) {
 	p.mu.Unlock()
 
 	n.Icon = resolveNotifyIcon(n.Icon, m)
+	n.Sound = resolveNotifySound(n.Sound, m)
 	id := n.ID
 	respond := func(action string, closed bool, reason int) {
 		p.mu.Lock()
@@ -571,6 +573,21 @@ func resolveNotifyIcon(icon string, m connectors.Manifest) string {
 		icon = filepath.Join(m.Dir, icon)
 	}
 	return icon
+}
+
+// resolveNotifySound maps a wire sound to the file path the player needs:
+// ~ expanded, relative resolved against the plugin dir. Unlike icons every
+// non-empty value is a path — there is no theme-name namespace for sounds.
+func resolveNotifySound(sound string, m connectors.Manifest) string {
+	sound = strings.TrimSpace(sound)
+	if sound == "" {
+		return ""
+	}
+	sound = config.ExpandPath(sound)
+	if !filepath.IsAbs(sound) && m.Dir != "" {
+		sound = filepath.Join(m.Dir, sound)
+	}
+	return sound
 }
 
 // StartBackground begins proactive supervision for a background plugin: the

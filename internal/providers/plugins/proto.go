@@ -32,7 +32,8 @@
 // fire-and-forget EventNotifyAction / EventNotifyClosed events back, keyed by
 // the notification's id. (Migration 2026-08g: EventNotify, EventNotifyAction,
 // EventNotifyClosed, Message.Notify, Event.Action and Event.Reason added for
-// the notification plugin system — additive, unknown-ignored both ways.)
+// the notification plugin system; WireNotify.Sound added for per-notification
+// audio — additive, unknown-ignored both ways.)
 //
 // Every query carries a Seq, and a plugin must echo the seq it is answering:
 // the host drops any message whose seq is not the query it is still waiting
@@ -177,6 +178,9 @@ type WireNotify struct {
 	// TimeoutMS expires the notification after that many milliseconds.
 	// Ignored when RequireInput is set; zero means the daemon's default.
 	TimeoutMS int `json:"timeout_ms"`
+	// Sound is an audio file played when the notification fires; a relative
+	// path resolves against the plugin dir, ~ is expanded, empty is silent.
+	Sound string `json:"sound"`
 	// Actions are the notification's buttons; the key "default" is the
 	// body-click action. Invocations come back as notify-action events.
 	Actions []WireNotifyAction `json:"actions"`

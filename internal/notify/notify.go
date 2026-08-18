@@ -15,7 +15,10 @@ package notify
 import (
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"sync"
+	"syscall"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -102,7 +105,13 @@ type Request struct {
 	// TimeoutMS expires the notification after that many milliseconds.
 	// Ignored when RequireInput is set; zero means the daemon's default.
 	TimeoutMS int
-	Actions []Action
+	// SoundPath is an audio file played when the notification is sent
+	// (empty is silent). banshee plays it itself rather than passing the
+	// spec's sound-file hint: the common Wayland daemons (mako, dunst)
+	// ignore the hint, and self-play also cannot double up on a daemon
+	// that honors it. A failed send stays silent.
+	SoundPath string
+	Actions   []Action
 	// OnEvent, when set, is invoked for this notification's action and close
 	// events. It runs on the notifier's signal goroutine — never the GTK main
 	// loop — and is dropped once the notification closes.
@@ -136,6 +145,9 @@ type Conn struct {
 type Options struct {
 	// Connect dials the notification daemon; nil dials the session bus.
 	Connect func() (*Conn, error)
+	// Play plays a notification's SoundPath; nil spawns the first audio
+	// player found on PATH (pw-play, paplay, ffplay). Must not block.
+	Play func(path string)
 	// Log receives diagnostics; nil discards them.
 	Log func(format string, args ...any)
 }
@@ -162,6 +174,10 @@ func New(opts Options) *Notifier {
 	}
 	if opts.Log == nil {
 		opts.Log = func(string, ...any) {}
+	}
+	if opts.Play == nil {
+		log := opts.Log
+		opts.Play = func(path string) { playSound(path, log) }
 	}
 	return &Notifier{
 		opts:     opts,
@@ -239,6 +255,10 @@ func (n *Notifier) Send(req Request) error {
 		}
 	}
 	n.mu.Unlock()
+
+	if req.SoundPath != "" {
+		n.opts.Play(req.SoundPath)
+	}
 	return nil
 }
 
@@ -295,6 +315,44 @@ func (n *Notifier) dispatch(gen uint64, sigs <-chan Signal) {
 			h(Event{ActionKey: s.ActionKey})
 		}
 	}
+}
+
+// players are tried in order for the default Play; the first one on PATH
+// wins. pw-play and paplay cover PipeWire and PulseAudio; ffplay is the
+// catch-all (its flags keep it headless and make it exit at end of file).
+var players = [][]string{
+	{"pw-play"},
+	{"paplay"},
+	{"ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"},
+}
+
+// playSound plays one audio file detached: the process gets /dev/null stdio
+// and its own session, is never waited on, and any failure is a log line —
+// a notification whose sound cannot play is still a delivered notification.
+func playSound(path string, log func(string, ...any)) {
+	var argv []string
+	for _, p := range players {
+		if bin, err := exec.LookPath(p[0]); err == nil {
+			argv = append([]string{bin}, p[1:]...)
+			break
+		}
+	}
+	if argv == nil {
+		log("notify: no audio player on PATH (tried pw-play, paplay, ffplay); sound %q skipped", path)
+		return
+	}
+	cmd := exec.Command(argv[0], append(argv[1:], path)...)
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err == nil {
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = devNull, devNull, devNull
+		defer devNull.Close()
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		log("notify: sound %q: %v", path, err)
+		return
+	}
+	_ = cmd.Process.Release()
 }
 
 // Probe dials the session bus and asks the notification daemon to identify
