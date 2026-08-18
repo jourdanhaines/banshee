@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jourdanhaines/banshee/internal/providers/connectors"
 )
 
 // notifyScript answers every query with empty results and pushes one notify
@@ -129,3 +131,151 @@ func TestExecPluginNotifyNilSinkSafe(t *testing.T) {
 	// Nothing to assert beyond "did not panic": the notify line is dropped.
 }
 
+// newBackgroundPlugin is newScriptPlugin for a background manifest.
+func newBackgroundPlugin(t *testing.T, id, script, prefix string, opts Options) *ExecPlugin {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "plugin.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := connectors.Manifest{
+		V: connectors.ManifestVersion, ID: id, Name: id, Type: connectors.TypeExec, Dir: dir,
+		Exec: &connectors.ExecSpec{Bin: "./plugin.sh", Prefix: prefix, Background: true},
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewExecPlugin(m, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Shutdown)
+	return p
+}
+
+// startCountScript records each start then exits, so supervision restarts it
+// until the crash limit disables it.
+const startCountScript = `#!/bin/sh
+echo start >> "$BANSHEE_PLUGIN_DIR/starts.txt"
+exit 0
+`
+
+func TestExecPluginBackgroundRestartsUntilDisabled(t *testing.T) {
+	p := newBackgroundPlugin(t, "bg", startCountScript, "", Options{
+		RestartBackoff: 5 * time.Millisecond,
+		CrashWindow:    time.Minute,
+		CrashLimit:     3,
+	})
+	p.StartBackground()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !p.Disabled() {
+		if time.Now().After(deadline) {
+			t.Fatal("plugin never hit the crash limit")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	data, err := os.ReadFile(filepath.Join(p.m.Dir, "starts.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "start"); got != 3 {
+		t.Errorf("starts = %d, want 3 (one per crash up to the limit)", got)
+	}
+}
+
+func TestExecPluginStartBackgroundIgnoresNonBackground(t *testing.T) {
+	p := newScriptPlugin(t, "fg", startCountScript, "", Options{})
+	p.StartBackground()
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(p.m.Dir, "starts.txt")); err == nil {
+		t.Fatal("non-background plugin was started by StartBackground")
+	}
+}
+
+func TestHostBackgroundGating(t *testing.T) {
+	dir := t.TempDir()
+	writeBackgroundPlugin(t, dir, "bg")
+
+	h := NewHost(dir, Options{RestartBackoff: 5 * time.Millisecond})
+	t.Cleanup(h.Shutdown)
+	if err := h.Load(); err != nil {
+		t.Fatal(err)
+	}
+	started := filepath.Join(dir, "bg", "starts.txt")
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(started); err == nil {
+		t.Fatal("Load started a background plugin before StartBackground")
+	}
+
+	h.StartBackground()
+	waitForFile(t, started)
+
+	// Load after StartBackground re-spawns: the flag is sticky.
+	if err := os.Remove(started); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Load(); err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, started)
+}
+
+func TestHostProvidersSkipsBackgroundWithoutPrefix(t *testing.T) {
+	dir := t.TempDir()
+	writeBackgroundPlugin(t, dir, "bg")
+	writeManifestPlugin(t, dir, "fg", `{"v":1,"id":"fg","type":"exec","exec":{"bin":"./plugin.sh","prefix":"fg"}}`)
+	writeManifestPlugin(t, dir, "bgq", `{"v":1,"id":"bgq","type":"exec","exec":{"bin":"./plugin.sh","prefix":"bgq","background":true}}`)
+
+	h := NewHost(dir, Options{})
+	t.Cleanup(h.Shutdown)
+	if err := h.Load(); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, p := range h.Providers() {
+		names[p.Name()] = true
+	}
+	if names["plugin:bg"] {
+		t.Error("background plugin without prefix listed as a provider")
+	}
+	if !names["plugin:fg"] || !names["plugin:bgq"] {
+		t.Errorf("providers = %v, want fg and bgq present", names)
+	}
+}
+
+// --- helpers ----------------------------------------------------------------
+
+func writeBackgroundPlugin(t *testing.T, hostDir, id string) {
+	t.Helper()
+	writeManifestPlugin(t, hostDir, id,
+		`{"v":1,"id":"`+id+`","type":"exec","exec":{"bin":"./plugin.sh","background":true}}`)
+}
+
+func writeManifestPlugin(t *testing.T, hostDir, id, manifest string) {
+	t.Helper()
+	dir := filepath.Join(hostDir, id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ManifestName), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plugin.sh"), []byte(startCountScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never appeared", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

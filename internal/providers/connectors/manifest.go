@@ -116,6 +116,13 @@ type ExecSpec struct {
 	// TimeoutMS is the soft per-query timeout in milliseconds. Zero uses the
 	// host default (150ms); anything above MaxExecTimeoutMS is clamped to it.
 	TimeoutMS int `json:"timeout_ms"`
+	// Background starts the plugin when the daemon runs and restarts it
+	// whenever it exits (same backoff and disable-until-reload as lazy
+	// plugins), instead of spawning it on the first matching query. A
+	// background plugin with an empty Prefix receives no queries at all —
+	// it exists to push notifications. (Migration 2026-08g: additive; an
+	// older banshee ignores the key and loads the plugin lazily.)
+	Background bool `json:"background"`
 }
 
 var idRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)

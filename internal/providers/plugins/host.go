@@ -36,6 +36,11 @@ type Host struct {
 	urls  []connectors.Manifest
 	execs []*ExecPlugin
 	byID  map[string]*ExecPlugin
+	// bgEnabled is set by StartBackground and never cleared: once the daemon
+	// is running, every Load (i.e. every reload) re-starts the background
+	// plugins it built. Until then — boot.New, tests, `banshee doctor` —
+	// Load spawns nothing.
+	bgEnabled bool
 }
 
 // NewHost returns a host for the plugin directory dir. Nothing is read until
@@ -117,8 +122,28 @@ func (h *Host) Load() error {
 
 	h.mu.Lock()
 	h.urls, h.execs, h.byID = urls, execs, byID
+	bg := h.bgEnabled
 	h.mu.Unlock()
+	if bg {
+		for _, p := range execs {
+			p.StartBackground()
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// StartBackground starts supervision for every background exec plugin and
+// arms every future Load to do the same. Call it once the daemon is actually
+// running — never from construction paths — so building a Host in tests or
+// for `banshee doctor` spawns no processes.
+func (h *Host) StartBackground() {
+	h.mu.Lock()
+	h.bgEnabled = true
+	execs := append([]*ExecPlugin(nil), h.execs...)
+	h.mu.Unlock()
+	for _, p := range execs {
+		p.StartBackground()
+	}
 }
 
 // URLManifests returns the url-type plugin manifests, in directory order.
@@ -129,12 +154,17 @@ func (h *Host) URLManifests() []connectors.Manifest {
 	return append([]connectors.Manifest(nil), h.urls...)
 }
 
-// Providers returns one providers.Provider per exec plugin.
+// Providers returns one providers.Provider per exec plugin. A background
+// plugin with no prefix is skipped: it exists to push notifications, and with
+// an empty prefix it would receive every keystroke.
 func (h *Host) Providers() []providers.Provider {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	out := make([]providers.Provider, 0, len(h.execs))
 	for _, p := range h.execs {
+		if p.m.Exec.Background && p.prefix == "" {
+			continue
+		}
 		out = append(out, p)
 	}
 	return out

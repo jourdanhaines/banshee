@@ -135,6 +135,7 @@ type ExecPlugin struct {
 	crashes  []time.Time
 	disabled bool
 	nextTry  time.Time
+	bg       bool // a superviseLoop is running; set once by StartBackground
 
 	// wmu serializes stdin writes, which happen without holding mu so a full
 	// pipe can never deadlock against the reader.
@@ -570,6 +571,59 @@ func resolveNotifyIcon(icon string, m connectors.Manifest) string {
 		icon = filepath.Join(m.Dir, icon)
 	}
 	return icon
+}
+
+// StartBackground begins proactive supervision for a background plugin: the
+// process is started now and restarted whenever it exits, instead of lazily
+// on the next query. No-op for non-background plugins, for one already
+// supervised, and for one that was shut down.
+func (p *ExecPlugin) StartBackground() {
+	p.mu.Lock()
+	if p.m.Exec == nil || !p.m.Exec.Background || p.bg || p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.bg = true
+	p.mu.Unlock()
+	go p.superviseLoop()
+}
+
+// superviseLoop keeps a background plugin running: start, wait for exit,
+// start again. All crash accounting is the ordinary ensureStartedLocked path,
+// so backoff, the crash window and disable-until-reload behave exactly as
+// they do for lazily started plugins. The loop ends when the plugin is shut
+// down or disabled; Host.Load builds fresh plugins on reload, which is what
+// re-enables a disabled one.
+func (p *ExecPlugin) superviseLoop() {
+	for {
+		p.mu.Lock()
+		if p.closed || p.disabled {
+			p.mu.Unlock()
+			return
+		}
+		err := p.ensureStartedLocked()
+		var exited chan struct{}
+		var pause time.Duration
+		if err == nil {
+			exited = p.exited
+		} else {
+			pause = time.Until(p.nextTry)
+		}
+		p.mu.Unlock()
+
+		if exited != nil {
+			// Shutdown closes exited once the process is reaped; the
+			// top-of-loop closed check then ends the supervision. A child a
+			// helper keeps unreapable leaks this goroutine too — the same
+			// trade Shutdown already documents.
+			<-exited
+			continue
+		}
+		if pause <= 0 {
+			pause = p.opts.RestartBackoff
+		}
+		time.Sleep(pause)
+	}
 }
 
 func (p *ExecPlugin) waitLoop(gen uint64, cmd *exec.Cmd, exited, readDone chan struct{}) {
