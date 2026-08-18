@@ -97,6 +97,9 @@ func applyKey(cfg *Config, key, value string) {
 	case "clipboard_history":
 		// Parity with startup_prompt: anything other than "true" is false.
 		cfg.ClipboardHistory = value == "true"
+	case "notifications":
+		// Parity with startup_prompt: anything other than "true" is false.
+		cfg.Notifications = value == "true"
 	case "keyboard_mode":
 		switch value {
 		case KeyboardModeExclusive, KeyboardModeOnDemand:

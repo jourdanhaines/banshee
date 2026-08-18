@@ -156,6 +156,33 @@ func TestLoadFileKeys(t *testing.T) {
 			},
 		},
 		{
+			name: "notifications defaults on",
+			body: "",
+			check: func(t *testing.T, c Config) {
+				if !c.Notifications {
+					t.Error("Notifications should default to true")
+				}
+			},
+		},
+		{
+			name: "notifications false",
+			body: "notifications = false\n",
+			check: func(t *testing.T, c Config) {
+				if c.Notifications {
+					t.Error("Notifications should be false")
+				}
+			},
+		},
+		{
+			name: "notifications garbage is false",
+			body: "notifications = yes\n",
+			check: func(t *testing.T, c Config) {
+				if c.Notifications {
+					t.Error("Notifications should be false")
+				}
+			},
+		},
+		{
 			name: "invalid numbers keep defaults",
 			body: "max_depth = deep\ncache_ttl = soon\nwindow_opacity = opaque\n",
 			check: func(t *testing.T, c Config) {

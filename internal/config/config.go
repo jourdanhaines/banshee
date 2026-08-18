@@ -38,6 +38,10 @@ type Config struct {
 	// Migration 2026-08e: ClipboardHistory added — additive; the zero value
 	// disables the watcher, Default() turns it on.
 	ClipboardHistory bool // clipboard-history watcher + provider, default true
+
+	// Migration 2026-08g: Notifications added — additive; the zero value
+	// drops plugin notifications, Default() turns them on.
+	Notifications bool // plugin desktop notifications, default true
 }
 
 // Default returns a Config populated with defaults (no file read).
@@ -54,6 +58,7 @@ func Default() Config {
 		WindowOpacity:    0.92,
 		KeyboardMode:     "exclusive",
 		ClipboardHistory: true,
+		Notifications:    true,
 	}
 }
 
