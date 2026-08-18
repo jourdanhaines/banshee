@@ -12,3 +12,7 @@ TIMEOUT_SECONDS=10
 # when Claude needs your input (permission prompts, plan approval, questions);
 # "Stop" fires when Claude finishes responding.
 EVENTS="Notification Stop"
+
+# Audio file played when the notification fires. An absolute path, or a path
+# relative to this plugin's directory (e.g. alert.wav). Empty = silent.
+SOUND_FILE=""

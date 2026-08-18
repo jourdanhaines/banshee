@@ -18,6 +18,7 @@ DIR="${BANSHEE_PLUGIN_DIR:-$(dirname "$0")}"
 REQUIRE_INPUT="${REQUIRE_INPUT:-true}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10}"
 EVENTS="${EVENTS:-Notification Stop}"
+SOUND_FILE="${SOUND_FILE:-}"
 
 RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/banshee"
 FIFO="$RUNDIR/claude-code.fifo"
@@ -77,6 +78,7 @@ handle_hook() {
     else
         opts='"require_input":false,"timeout_ms":'$((TIMEOUT_SECONDS * 1000))
     fi
+    [ -n "$SOUND_FILE" ] && opts=$opts',"sound":"'$(json_escape "$SOUND_FILE")'"'
     printf '{"v":1,"event":"notify","notify":{"id":"%s","summary":"%s","body":"%s","icon":"dialog-question-symbolic",%s,"actions":[{"key":"default","label":"Focus"}]}}\n' \
         "$(json_escape "$id")" "$(json_escape "$summary")" "$(json_escape "$body")" "$opts"
 }

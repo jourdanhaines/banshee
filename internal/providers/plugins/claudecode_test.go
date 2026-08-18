@@ -94,6 +94,10 @@ func TestClaudeCodePlugin(t *testing.T) {
 		if len(n.Actions) != 1 || n.Actions[0].Key != "default" {
 			t.Errorf("actions = %+v, want the default Focus action", n.Actions)
 		}
+		// The shipped config defaults to SOUND_FILE="" — silent.
+		if n.Sound != "" {
+			t.Errorf("sound = %q, want empty by default", n.Sound)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no notify message reached the sink")
 	}
@@ -125,5 +129,79 @@ func TestClaudeCodePlugin(t *testing.T) {
 	case n := <-sunk:
 		t.Fatalf("filtered event produced a notify: %+v", n)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestClaudeCodePluginSound stages a copy of the shipped plugin with a
+// SOUND_FILE config and asserts the notify message carries the resolved path.
+func TestClaudeCodePluginSound(t *testing.T) {
+	src := claudeCodeDir(t)
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	root := t.TempDir()
+	staged := filepath.Join(root, "claude-code")
+	if err := os.MkdirAll(staged, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"manifest.json", 0o644},
+		{"plugin.sh", 0o755},
+		{"hook.sh", 0o755},
+	} {
+		data, err := os.ReadFile(filepath.Join(src, f.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(staged, f.name), data, f.mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(staged, "config"),
+		[]byte("SOUND_FILE=alert.wav\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sunk := make(chan WireNotify, 2)
+	h := NewHost(root, Options{
+		Timeout: 2 * time.Second,
+		Notify: func(pluginID string, n WireNotify, respond func(string, bool, int)) {
+			sunk <- n
+		},
+	})
+	t.Cleanup(h.Shutdown)
+	if err := h.Load(); err != nil {
+		t.Fatal(err)
+	}
+	h.StartBackground()
+
+	fifo := filepath.Join(runtimeDir, "banshee", "claude-code.fifo")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if fi, err := os.Stat(fifo); err == nil && fi.Mode()&os.ModeNamedPipe != 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("plugin never created its FIFO")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	hook := exec.Command(filepath.Join(staged, "hook.sh"))
+	hook.Stdin = strings.NewReader(
+		`{"hook_event_name":"Notification","message":"m","session_id":"s2"}`)
+	if out, err := hook.CombinedOutput(); err != nil {
+		t.Fatalf("hook.sh: %v: %s", err, out)
+	}
+	select {
+	case n := <-sunk:
+		if want := filepath.Join(staged, "alert.wav"); n.Sound != want {
+			t.Errorf("sound = %q, want %q", n.Sound, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notify message reached the sink")
 	}
 }
