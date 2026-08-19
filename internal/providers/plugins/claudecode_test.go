@@ -102,21 +102,48 @@ func TestClaudeCodePlugin(t *testing.T) {
 		t.Fatal("no notify message reached the sink")
 	}
 
-	// A Stop event notifies too (it is in the default EVENTS list) and reuses
-	// the same session id, which the host will map to the same notification.
-	hook = exec.Command(filepath.Join(src, "hook.sh"))
-	hook.Stdin = strings.NewReader(
-		`{"hook_event_name":"Stop","cwd":"/home/u/dev/x","session_id":"s1"}`)
-	if out, err := hook.CombinedOutput(); err != nil {
-		t.Fatalf("hook.sh: %v: %s", err, out)
-	}
-	select {
-	case n := <-sunk:
-		if n.ID != "claude:s1" || n.Summary != "Claude Code finished" {
-			t.Errorf("stop notify = %+v", n)
+	// Stop is filtered by the default EVENTS list (it fires on every turn
+	// end, even while subagents still run), as are Notification events whose
+	// notification_type is outside NOTIFY_TYPES. The FIFO is ordered, so the
+	// passing events below arriving with the expected summaries proves the
+	// dropped ones sent first never notified.
+	for _, drop := range []string{
+		`{"hook_event_name":"Stop","cwd":"/home/u/dev/x","session_id":"s1"}`,
+		`{"hook_event_name":"Notification","notification_type":"idle_prompt","message":"waiting","session_id":"s1"}`,
+		`{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"needs permission","session_id":"s1"}`,
+	} {
+		hook = exec.Command(filepath.Join(src, "hook.sh"))
+		hook.Stdin = strings.NewReader(drop)
+		if out, err := hook.CombinedOutput(); err != nil {
+			t.Fatalf("hook.sh: %v: %s", err, out)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no notify for the Stop event")
+	}
+	for _, tc := range []struct {
+		payload string
+		summary string
+	}{
+		{`{"hook_event_name":"Notification","notification_type":"agent_needs_input","message":"question","session_id":"s1"}`,
+			"Claude Code needs input"},
+		{`{"hook_event_name":"Notification","notification_type":"agent_completed","message":"done","session_id":"s1"}`,
+			"Claude Code finished"},
+		{`{"hook_event_name":"PermissionRequest","tool_name":"ExitPlanMode","session_id":"s1"}`,
+			"Claude Code plan ready for review"},
+		{`{"hook_event_name":"PermissionRequest","tool_name":"Bash","session_id":"s1"}`,
+			"Claude Code awaiting approval"},
+	} {
+		hook = exec.Command(filepath.Join(src, "hook.sh"))
+		hook.Stdin = strings.NewReader(tc.payload)
+		if out, err := hook.CombinedOutput(); err != nil {
+			t.Fatalf("hook.sh: %v: %s", err, out)
+		}
+		select {
+		case n := <-sunk:
+			if n.ID != "claude:s1" || n.Summary != tc.summary {
+				t.Errorf("notify = %+v, want summary %q", n, tc.summary)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no notify for %s", tc.payload)
+		}
 	}
 
 	// An event outside EVENTS is filtered by the plugin.
@@ -160,8 +187,9 @@ func TestClaudeCodePluginSound(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// EVENTS opts Stop back in, covering the non-default path.
 	if err := os.WriteFile(filepath.Join(staged, "config"),
-		[]byte("SOUND_FILE=alert.wav\n"), 0o644); err != nil {
+		[]byte("SOUND_FILE=alert.wav\nEVENTS=\"Notification PermissionRequest Stop\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -203,5 +231,21 @@ func TestClaudeCodePluginSound(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no notify message reached the sink")
+	}
+
+	// With Stop opted back in via EVENTS, a Stop event notifies again.
+	hook = exec.Command(filepath.Join(staged, "hook.sh"))
+	hook.Stdin = strings.NewReader(
+		`{"hook_event_name":"Stop","session_id":"s2"}`)
+	if out, err := hook.CombinedOutput(); err != nil {
+		t.Fatalf("hook.sh: %v: %s", err, out)
+	}
+	select {
+	case n := <-sunk:
+		if n.Summary != "Claude Code finished" {
+			t.Errorf("stop notify = %+v", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notify for the opted-in Stop event")
 	}
 }

@@ -10,9 +10,19 @@ TIMEOUT_SECONDS=10
 
 # Space-separated Claude Code hook events to notify on. "PermissionRequest"
 # fires the moment a permission prompt appears (tool approval, plan approval);
-# "Notification" covers the delayed prompts (idle, ~6 s permission reminder);
-# "Stop" fires when Claude finishes responding.
-EVENTS="Notification PermissionRequest Stop"
+# "Notification" carries typed notifications, filtered by NOTIFY_TYPES below.
+# "Stop" is deliberately excluded: it fires on every turn end, including while
+# background subagents are still running — add it back for a bubble on every
+# turn at the cost of that noise.
+EVENTS="Notification PermissionRequest"
+
+# Space-separated notification_type allowlist for "Notification" events.
+# Known types: agent_needs_input (Claude asks you a question),
+# agent_completed (task finished, results ready for review),
+# permission_prompt (excluded by default — PermissionRequest already
+# notifies immediately), idle_prompt (excluded — fires while Claude is
+# merely waiting on subagents). An event without the field always notifies.
+NOTIFY_TYPES="agent_needs_input agent_completed"
 
 # Audio file played when the notification fires. An absolute path, or a path
 # relative to this plugin's directory (e.g. alert.wav). Empty = silent.

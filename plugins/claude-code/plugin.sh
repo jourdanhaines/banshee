@@ -17,7 +17,8 @@ DIR="${BANSHEE_PLUGIN_DIR:-$(dirname "$0")}"
 [ -f "$DIR/config" ] && . "$DIR/config"
 REQUIRE_INPUT="${REQUIRE_INPUT:-true}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10}"
-EVENTS="${EVENTS:-Notification PermissionRequest Stop}"
+EVENTS="${EVENTS:-Notification PermissionRequest}"
+NOTIFY_TYPES="${NOTIFY_TYPES:-agent_needs_input agent_completed}"
 SOUND_FILE="${SOUND_FILE:-}"
 
 RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/banshee"
@@ -58,6 +59,21 @@ handle_hook() {
         *) return 0 ;;
     esac
 
+    # Notification events carry a notification_type; only the allowlisted
+    # types are worth a bubble (idle_prompt fires even while the agent is
+    # merely waiting on subagents). An absent type (older Claude Code)
+    # passes through.
+    ntype=""
+    if [ "$event" = "Notification" ]; then
+        ntype=$(str_field "$line" notification_type)
+        if [ -n "$ntype" ]; then
+            case " $NOTIFY_TYPES " in
+                *" $ntype "*) ;;
+                *) return 0 ;;
+            esac
+        fi
+    fi
+
     sid=$(str_field "$line" session_id)
     message=$(str_field "$line" message)
     tool=$(str_field "$line" tool_name)
@@ -67,8 +83,20 @@ handle_hook() {
     [ -n "$ppid" ] && printf '%s %s\n' "$id" "$ppid" >> "$STATE"
 
     case "$event" in
-        Notification)      summary="Claude Code needs input" ;;
-        PermissionRequest) summary="Claude Code awaiting approval" ;;
+        Notification)
+            if [ "$ntype" = "agent_completed" ]; then
+                summary="Claude Code finished"
+            else
+                summary="Claude Code needs input"
+            fi
+            ;;
+        PermissionRequest)
+            if [ "$tool" = "ExitPlanMode" ]; then
+                summary="Claude Code plan ready for review"
+            else
+                summary="Claude Code awaiting approval"
+            fi
+            ;;
         Stop)              summary="Claude Code finished" ;;
         *)                 summary="Claude Code: $event" ;;
     esac

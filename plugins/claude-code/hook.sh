@@ -20,7 +20,11 @@
 #   }
 #
 # PermissionRequest fires immediately for tool approvals and plan approval;
-# Notification covers the delayed prompts (idle, ~6 s permission reminder).
+# Notification carries typed events (questions, completion), which the plugin
+# filters via NOTIFY_TYPES in ./config. Stop is registered here but filtered
+# out by the plugin's default EVENTS — it fires on every turn end, even while
+# subagents still run; keeping it registered lets ./config re-enable it
+# without touching Claude settings.
 # This script never writes stdout, so registering it under PermissionRequest
 # emits no permission decision — the prompt behaves exactly as without it.
 #
