@@ -78,6 +78,14 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window dropdown.form-field > popover > contents",
 		"#banshee-window dropdown.form-field > popover listview > row",
 		"#banshee-window dropdown.form-field > popover listview > row:selected",
+		"#banshee-window button.form-submit",
+		"#banshee-window button.form-back",
+		// GTK serializes pseudo-classes ahead of classes, so
+		// button.form-submit:hover comes back as button:hover.form-submit.
+		"#banshee-window button:focus.form-submit",
+		"#banshee-window button:hover.form-submit",
+		"#banshee-window button:focus.form-back",
+		"#banshee-window button:hover.form-back",
 		"#banshee-window progressbar.code-timer",
 		"#banshee-window progressbar.code-timer > trough",
 		"#banshee-window progressbar.code-timer > trough > progress",

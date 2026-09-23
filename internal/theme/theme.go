@@ -230,6 +230,46 @@ window#banshee-window {
 	color: #f2f5fb;
 }
 
+/* Dedicated form buttons (Form.SubmitLabel), styled like the dropdown button:
+   submit carries the accent, Back stays subtle. */
+#banshee-window button.form-submit,
+#banshee-window button.form-back {
+	background-image: none;
+	border-radius: 10px;
+	padding: 8px 12px;
+	min-height: 28px;
+	font-size: 15px;
+	box-shadow: none;
+}
+
+#banshee-window button.form-submit {
+	margin-top: 12px;
+	background-color: {{ alpha .AccentRGB 0.25 }};
+	border: 1px solid {{ alpha .AccentRGB 0.5 }};
+	color: #f2f5fb;
+	font-weight: bold;
+}
+
+#banshee-window button.form-submit:focus,
+#banshee-window button.form-submit:hover {
+	background-color: {{ alpha .AccentRGB 0.4 }};
+	border-color: {{ alpha .AccentRGB 0.8 }};
+}
+
+#banshee-window button.form-back {
+	margin-top: 6px;
+	background-color: rgba(255, 255, 255, 0.04);
+	border: 1px solid {{ alpha .AccentRGB 0.22 }};
+	color: rgba(223, 228, 238, 0.7);
+}
+
+#banshee-window button.form-back:focus,
+#banshee-window button.form-back:hover {
+	background-color: rgba(255, 255, 255, 0.06);
+	border-color: {{ alpha .AccentRGB 0.6 }};
+	color: #e6e9f0;
+}
+
 /* Results list */
 #banshee-window scrolledwindow.results-scroll,
 #banshee-window scrolledwindow.results-scroll > viewport,

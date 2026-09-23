@@ -464,6 +464,7 @@ func (l *Launcher) openForm(res providers.Result) {
 		return
 	}
 	l.form = newFormView(res)
+	l.form.connectButtons(l.submitForm, func() { l.closeForm(true) })
 
 	for c := l.formBox.FirstChild(); c != nil; c = l.formBox.FirstChild() {
 		l.formBox.Remove(c)
@@ -504,7 +505,13 @@ func (l *Launcher) closeForm(refocus bool) {
 // commits the highlighted option, and stealing it as a submit would make a
 // fixed-choice field unusable from the keyboard. A dropdown that merely holds
 // focus does not withhold Enter; see formView.dropdownListOpen.
+//
+// A form with a submit button (see EnterSubmits) hands every Enter to GTK,
+// which is what routes Enter on the focused button to its clicked handler.
 func (l *Launcher) submitFormOrPass() bool {
+	if l.form != nil && !EnterSubmits(l.form.form) {
+		return false
+	}
 	if l.form != nil && l.form.dropdownListOpen() {
 		return false
 	}

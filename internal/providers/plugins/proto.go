@@ -222,6 +222,12 @@ type WireAction struct {
 type WireForm struct {
 	Title  string          `json:"title"`
 	Fields []WireFormField `json:"fields"`
+	// SubmitLabel, when non-empty, makes the launcher render a submit button
+	// with this label plus a Back button, and only the button submits.
+	// Degradation is symmetric: a host too old to know the field ignores it
+	// and keeps Enter-submits, and a plugin too old to set it leaves it empty
+	// — either way submission arrives as the same EventSubmit.
+	SubmitLabel string `json:"submit_label,omitempty"`
 }
 
 // WireFormField is one input in a WireForm.
@@ -292,8 +298,9 @@ func wireFormTo(f WireForm, pluginID, resultID string) *providers.Form {
 		}
 	}
 	return &providers.Form{
-		Title:  f.Title,
-		Fields: fields,
+		Title:       f.Title,
+		Fields:      fields,
+		SubmitLabel: f.SubmitLabel,
 		Build: func(values map[string]string) (providers.Action, error) {
 			return providers.Action{
 				Kind:     providers.ActPluginCallback,

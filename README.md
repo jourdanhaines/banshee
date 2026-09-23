@@ -282,7 +282,7 @@ The bundled `screenrec` plugin records your screen with `wf-recorder`. Type
 Picking a **Record** row opens a sub-menu with two dropdowns — **Format**
 (MP4 or GIF) and **Audio** (Off or On; it reads `Unavailable (no audio
 source)` when no PulseAudio/PipeWire source is found, and is ignored for GIF).
-Enter starts, Esc goes back. **Region** lets you drag a box with `slurp`,
+**Start Recording** starts, **Back** or Esc goes back. **Region** lets you drag a box with `slurp`,
 **window** is a click-to-pick over the current workspace's windows, and
 **screen** records the focused monitor with no prompt.
 
@@ -296,8 +296,8 @@ opens looping in `mpv`, and a "Recording saved" notification offers
 
 - **Recent recordings** — the newest files list under the Record rows; Enter
   replays one and copies it again.
-- **Clear recordings** — deletes every recording after you type `delete` to
-  confirm.
+- **Clear recordings** — deletes every recording after you type `delete` and
+  press **Delete**.
 - **Where they go** — `~/Videos/Recordings` (`XDG_VIDEOS_DIR` is honored),
   named `screenrec-YYYYMMDD-HHMMSS.<mp4|gif>`.
 - **Options** — `~/.config/banshee/plugins/screenrec/config`: `OUTPUT_DIR`,

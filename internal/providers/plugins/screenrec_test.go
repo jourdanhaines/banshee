@@ -582,8 +582,9 @@ func TestScreenrecIdleRows(t *testing.T) {
 						f.Fields[0].Key != "format" || f.Fields[0].Label != "Format" ||
 						!reflect.DeepEqual(f.Fields[0].Options, []string{"MP4", "GIF"}) ||
 						f.Fields[1].Key != "audio" || f.Fields[1].Label != "Audio" ||
-						!reflect.DeepEqual(f.Fields[1].Options, []string{"Off", "On"}) {
-						t.Errorf("%s form = %+v, want format [MP4 GIF] then audio [Off On]", id, f)
+						!reflect.DeepEqual(f.Fields[1].Options, []string{"Off", "On"}) ||
+						f.SubmitLabel != "Start Recording" {
+						t.Errorf("%s form = %+v, want format [MP4 GIF] then audio [Off On], submit \"Start Recording\"", id, f)
 					}
 				case id == "clear":
 					if !strings.HasPrefix(r.Title, "Clear recordings (2 files, ") || r.Score != 80 {
@@ -591,7 +592,8 @@ func TestScreenrecIdleRows(t *testing.T) {
 					}
 					f := r.Form
 					if f == nil || f.Title != fmt.Sprintf("Delete 2 recordings from %s?", e.outDir) ||
-						len(f.Fields) != 1 || f.Fields[0].Key != "confirm" || !f.Fields[0].Required {
+						len(f.Fields) != 1 || f.Fields[0].Key != "confirm" || !f.Fields[0].Required ||
+						f.SubmitLabel != "Delete" {
 						t.Errorf("clear form = %+v", f)
 					}
 				case strings.HasPrefix(id, "recent:"):

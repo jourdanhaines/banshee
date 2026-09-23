@@ -35,3 +35,10 @@ func FirstMissingRequired(fields []providers.FormField, values map[string]string
 	}
 	return -1, true
 }
+
+// EnterSubmits reports whether Enter inside a form field submits it. A form
+// with a dedicated submit button hands Enter to GTK instead, so a dropdown
+// opens and commits its list and only the button submits.
+func EnterSubmits(form providers.Form) bool {
+	return form.SubmitLabel == ""
+}

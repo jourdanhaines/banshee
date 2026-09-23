@@ -81,3 +81,21 @@ func TestFirstMissingRequired(t *testing.T) {
 		})
 	}
 }
+
+func TestEnterSubmits(t *testing.T) {
+	tests := []struct {
+		name string
+		form providers.Form
+		want bool
+	}{
+		{"no submit label keeps Enter-submits", providers.Form{Title: "T"}, true},
+		{"submit label hands Enter to GTK", providers.Form{SubmitLabel: "Start Recording"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EnterSubmits(tt.form); got != tt.want {
+				t.Errorf("EnterSubmits = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -18,6 +18,9 @@ type formView struct {
 
 	root   *gtk.Box
 	inputs []formInput // parallel to form.Fields
+
+	// submit and back exist only when form.SubmitLabel is set.
+	submit, back *gtk.Button
 }
 
 // formInput is one field's widget, seen only through what the form actually
@@ -102,12 +105,41 @@ func newFormView(res providers.Result) *formView {
 		v.addEntry(f)
 	}
 
+	if v.form.SubmitLabel != "" {
+		v.addButtons()
+		return v
+	}
+
 	hint := gtk.NewLabel("Enter to save · Esc to go back")
 	hint.AddCSSClass("form-hint")
 	hint.SetXAlign(0)
 	v.root.Append(hint)
 
 	return v
+}
+
+// addButtons appends the submit button and the Back button below the fields.
+func (v *formView) addButtons() {
+	v.submit = gtk.NewButtonWithLabel(v.form.SubmitLabel)
+	v.submit.AddCSSClass("form-submit")
+	v.submit.SetHExpand(true)
+	v.root.Append(v.submit)
+
+	v.back = gtk.NewButtonWithLabel("Back")
+	v.back.AddCSSClass("form-back")
+	v.back.SetHExpand(true)
+	v.root.Append(v.back)
+}
+
+// connectButtons wires the submit and Back buttons; a form without them
+// ignores the call.
+func (v *formView) connectButtons(onSubmit, onBack func()) {
+	if v.submit != nil {
+		v.submit.ConnectClicked(onSubmit)
+	}
+	if v.back != nil {
+		v.back.ConnectClicked(onBack)
+	}
 }
 
 // addEntry appends f's text entry to the form and registers it as an input.

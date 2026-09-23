@@ -252,7 +252,7 @@ matches_filter() {
 # format/audio form; submission comes back as a submit event.
 record_row() {
     matches_filter "$2" || return 0
-    ROWS="$ROWS,{\"id\":\"$1\",\"title\":\"$2\",\"subtitle\":\"$3\",\"icon\":\"$4\",\"score\":$5,\"form\":{\"title\":\"$2\",\"fields\":[{\"key\":\"format\",\"label\":\"Format\",\"options\":$FORMAT_OPTS},{\"key\":\"audio\",\"label\":\"Audio\",\"options\":$AUDIO_OPTS}]}}"
+    ROWS="$ROWS,{\"id\":\"$1\",\"title\":\"$2\",\"subtitle\":\"$3\",\"icon\":\"$4\",\"score\":$5,\"form\":{\"title\":\"$2\",\"fields\":[{\"key\":\"format\",\"label\":\"Format\",\"options\":$FORMAT_OPTS},{\"key\":\"audio\",\"label\":\"Audio\",\"options\":$AUDIO_OPTS}],\"submit_label\":\"Start Recording\"}}"
 }
 
 # emit_idle <seq> — record rows, then the clear row and recent recordings.
@@ -291,7 +291,7 @@ emit_idle() {
             if (n > 0) {
                 t = sprintf("Clear recordings (%d files, %.1f MB)", n, total / 1048576)
                 if (f == "" || index(tolower(t), f))
-                    printf ",{\"id\":\"clear\",\"title\":\"%s\",\"icon\":\"user-trash-symbolic\",\"score\":80,\"form\":{\"title\":\"Delete %d recordings from %s?\",\"fields\":[{\"key\":\"confirm\",\"label\":\"Type delete to confirm\",\"placeholder\":\"delete\",\"required\":true}]}}", t, n, dir
+                    printf ",{\"id\":\"clear\",\"title\":\"%s\",\"icon\":\"user-trash-symbolic\",\"score\":80,\"form\":{\"title\":\"Delete %d recordings from %s?\",\"fields\":[{\"key\":\"confirm\",\"label\":\"Type delete to confirm\",\"placeholder\":\"delete\",\"required\":true}],\"submit_label\":\"Delete\"}}", t, n, dir
             }
             printf "%s", rec
         }')"

@@ -27,6 +27,9 @@
 // Migration 2026-08f: Result.Preview added for large clipboard image rows —
 // additive, zero value inert. A UI that ignores it renders the row exactly as
 // before.
+//
+// Migration 2026-09b: Form.SubmitLabel added — additive, zero value inert. A
+// form that leaves it empty keeps Enter-submits and the keyboard hint.
 package providers
 
 import (
@@ -144,7 +147,12 @@ type FormField struct {
 type Form struct {
 	Title  string
 	Fields []FormField
-	Build  func(values map[string]string) (Action, error)
+	// SubmitLabel, when non-empty, gives the form a dedicated submit button
+	// carrying this label plus a Back button, and Enter inside a field no
+	// longer submits — only the button does. Empty keeps Enter-submits and
+	// the keyboard hint, for quick single-field forms.
+	SubmitLabel string
+	Build       func(values map[string]string) (Action, error)
 }
 
 // Result is a single launcher row.

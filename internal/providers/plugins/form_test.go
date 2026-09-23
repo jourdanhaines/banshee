@@ -40,12 +40,13 @@ func TestWireFormToResult(t *testing.T) {
 				{Key: "pass", Label: "Password"},
 				{Key: "band", Label: "Band", Options: []string{"2.4 GHz", "5 GHz"}},
 			},
+			SubmitLabel: "Join",
 		}}
 		res := w.toResult(m)
 		if res.Form == nil {
 			t.Fatal("Form is nil")
 		}
-		if res.Form.Title != "Join network" || len(res.Form.Fields) != 3 {
+		if res.Form.Title != "Join network" || len(res.Form.Fields) != 3 || res.Form.SubmitLabel != "Join" {
 			t.Fatalf("form = %+v", res.Form)
 		}
 		f0 := res.Form.Fields[0]
@@ -78,6 +79,9 @@ func TestWireFormToResult(t *testing.T) {
 		res := w.toResult(m)
 		if res.Form == nil {
 			t.Fatal("Form is nil")
+		}
+		if res.Form.SubmitLabel != "" {
+			t.Errorf("SubmitLabel = %q, want empty when omitted", res.Form.SubmitLabel)
 		}
 		// The launcher never dispatches res.Action while Form is set; the
 		// submit path is the form's Build.
