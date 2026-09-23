@@ -286,8 +286,9 @@ source)` when no PulseAudio/PipeWire source is found, and is ignored for GIF).
 **window** is a click-to-pick over the current workspace's windows, and
 **screen** records the focused monitor with no prompt.
 
-While recording, `rec` shows only **Stop recording**, and a persistent
-"Recording…" notification carries a **Stop** button — either one ends it. On
+While recording, `rec` shows only **Stop recording** (so does `sto` / `stop`
+on its own), and a persistent "Recording…" notification carries a **Stop**
+button — either one ends it. On
 stop, the file's `file://` URI goes on the clipboard as `text/uri-list` (paste
 it into a chat app or file manager and it arrives as a file), the recording
 opens looping in `mpv`, and a "Recording saved" notification offers

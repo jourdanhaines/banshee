@@ -119,6 +119,12 @@ type ExecSpec struct {
 	// means exact Prefix only. (Migration 2026-09: additive; an older
 	// banshee ignores the key and gates on the full Prefix.)
 	PrefixMin int `json:"prefix_min"`
+	// Prefixes are extra gate tokens accepted alongside Prefix, each also
+	// shortenable to PrefixMin, so one plugin can answer a second verb
+	// ("stop" next to "record") without the user typing the primary prefix.
+	// The query event names which one matched. (Migration 2026-09c:
+	// additive; an older banshee ignores the key and gates on prefix alone.)
+	Prefixes []string `json:"prefixes,omitempty"`
 	// TimeoutMS is the soft per-query timeout in milliseconds. Zero uses the
 	// host default (150ms); anything above MaxExecTimeoutMS is clamped to it.
 	TimeoutMS int `json:"timeout_ms"`
@@ -192,10 +198,39 @@ func (m Manifest) Validate() error {
 		case m.Exec.PrefixMin > len(m.Exec.Prefix):
 			return fmt.Errorf("manifest %q: exec.prefix_min %d exceeds the length of exec.prefix %q", m.ID, m.Exec.PrefixMin, m.Exec.Prefix)
 		}
+		if err := m.validatePrefixes(); err != nil {
+			return err
+		}
 	case "":
 		return fmt.Errorf("manifest %q: type is required (%q or %q)", m.ID, TypeURL, TypeExec)
 	default:
 		return fmt.Errorf("manifest %q: unknown type %q", m.ID, m.Type)
+	}
+	return nil
+}
+
+// validatePrefixes checks exec.prefixes: each entry must be a usable gate
+// token distinct from exec.prefix and from every other entry.
+func (m Manifest) validatePrefixes() error {
+	if len(m.Exec.Prefixes) == 0 {
+		return nil
+	}
+	if m.Exec.Prefix == "" {
+		return fmt.Errorf("manifest %q: exec.prefixes requires exec.prefix", m.ID)
+	}
+	seen := map[string]bool{strings.ToLower(m.Exec.Prefix): true}
+	for _, p := range m.Exec.Prefixes {
+		switch {
+		case p == "":
+			return fmt.Errorf("manifest %q: exec.prefixes must not contain an empty entry", m.ID)
+		case strings.ContainsAny(p, " \t"):
+			return fmt.Errorf("manifest %q: exec.prefixes entry %q must not contain spaces", m.ID, p)
+		case m.Exec.PrefixMin > 0 && len(p) < m.Exec.PrefixMin:
+			return fmt.Errorf("manifest %q: exec.prefixes entry %q is shorter than exec.prefix_min %d", m.ID, p, m.Exec.PrefixMin)
+		case seen[strings.ToLower(p)]:
+			return fmt.Errorf("manifest %q: exec.prefixes entry %q duplicates another prefix", m.ID, p)
+		}
+		seen[strings.ToLower(p)] = true
 	}
 	return nil
 }

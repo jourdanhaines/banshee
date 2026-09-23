@@ -68,6 +68,14 @@ done
 // returns a started-on-demand ExecPlugin.
 func newScriptPlugin(t *testing.T, id, script, prefix string, opts Options) *ExecPlugin {
 	t.Helper()
+	return newScriptPluginSpec(t, id, script, connectors.ExecSpec{Prefix: prefix}, opts)
+}
+
+// newScriptPluginSpec is newScriptPlugin with full control over the gate
+// fields of the exec spec; Bin is always the written script.
+func newScriptPluginSpec(t *testing.T, id, script string, spec connectors.ExecSpec, opts Options) *ExecPlugin {
+	t.Helper()
+	spec.Bin = "./plugin.sh"
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plugin.sh")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -75,7 +83,7 @@ func newScriptPlugin(t *testing.T, id, script, prefix string, opts Options) *Exe
 	}
 	m := connectors.Manifest{
 		V: connectors.ManifestVersion, ID: id, Name: id, Type: connectors.TypeExec, Dir: dir,
-		Exec: &connectors.ExecSpec{Bin: "./plugin.sh", Prefix: prefix},
+		Exec: &spec,
 	}
 	if err := m.Validate(); err != nil {
 		t.Fatal(err)
@@ -118,6 +126,52 @@ func TestExecPluginQuery(t *testing.T) {
 	got, err = p.Query(context.Background(), "demo again")
 	if err != nil || len(got) != 1 || got[0].Title != "echo again" {
 		t.Fatalf("second query = (%+v, %v)", got, err)
+	}
+}
+
+// prefixEchoScript answers each query with one result titled after the
+// event's prefix field, and saves the raw query line to query.txt.
+const prefixEchoScript = `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in *'"event":"shutdown"'*) exit 0 ;; esac
+  printf '%s\n' "$line" > "$BANSHEE_PLUGIN_DIR/query.txt"
+  seq=$(printf '%s' "$line" | sed -n 's/.*"seq":\([0-9]*\).*/\1/p')
+  pre=$(printf '%s' "$line" | sed -n 's/.*"prefix":"\([^"]*\)".*/\1/p')
+  printf '{"v":1,"seq":%s,"event":"results","results":[{"id":"r1","title":"prefix=%s"}],"done":true}\n' "$seq" "$pre"
+done
+`
+
+func TestExecPluginQueryCarriesPrefix(t *testing.T) {
+	tests := []struct {
+		name      string
+		spec      connectors.ExecSpec
+		query     string
+		wantTitle string
+		wantKey   bool // whether the raw query line carries a "prefix" key
+	}{
+		{"primary prefix", connectors.ExecSpec{Prefix: "record", PrefixMin: 3, Prefixes: []string{"stop"}}, "REC now", "prefix=record", true},
+		{"alternate prefix shortened", connectors.ExecSpec{Prefix: "record", PrefixMin: 3, Prefixes: []string{"stop"}}, "sto", "prefix=stop", true},
+		{"alternate prefix exact", connectors.ExecSpec{Prefix: "record", PrefixMin: 3, Prefixes: []string{"stop"}}, "Stop", "prefix=stop", true},
+		{"unprefixed plugin", connectors.ExecSpec{}, "hello", "prefix=", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newScriptPluginSpec(t, "demo", prefixEchoScript, tt.spec, Options{Timeout: 2 * time.Second})
+			got, err := p.Query(context.Background(), tt.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ID != "plugin:demo:r1" || got[0].Title != tt.wantTitle {
+				t.Fatalf("results = %+v, want one plugin:demo:r1 titled %q", got, tt.wantTitle)
+			}
+			raw, err := os.ReadFile(filepath.Join(p.m.Dir, "query.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if has := strings.Contains(string(raw), `"prefix"`); has != tt.wantKey {
+				t.Fatalf("query line %q: prefix key present = %v, want %v", raw, has, tt.wantKey)
+			}
+		})
 	}
 }
 

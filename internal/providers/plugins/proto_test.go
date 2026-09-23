@@ -116,40 +116,53 @@ func TestWireResultToResult(t *testing.T) {
 
 func TestMatchQuery(t *testing.T) {
 	tests := []struct {
-		name   string
-		prefix string
-		min    int
-		query  string
-		want   string
-		ok     bool
+		name      string
+		prefix    string
+		prefixes  []string
+		min       int
+		query     string
+		want      string
+		wantMatch string // canonical prefix reported on a match
+		ok        bool
 	}{
-		{"no prefix passes through", "", 0, "blacksh", "blacksh", true},
-		{"no prefix rejects empty", "", 0, "   ", "", false},
-		{"prefix alone", "wifi", 0, "wifi", "", true},
-		{"prefix with argument", "wifi", 0, "wifi home", "home", true},
-		{"prefix case insensitive", "wifi", 0, "WiFi home", "home", true},
-		{"prefix must be followed by space", "wifi", 0, "wifikill", "", false},
-		{"non-matching query", "wifi", 0, "blacksh", "", false},
-		{"shorter than prefix", "wifi", 0, "wi", "", false},
-		{"surrounding whitespace trimmed", "wifi", 0, "  wifi   home  ", "home", true},
-		{"min zero keeps exact only", "record", 0, "rec", "", false},
-		{"min prefix alone", "record", 3, "rec", "", true},
-		{"min prefix case insensitive", "record", 3, "REC", "", true},
-		{"min partial with argument", "record", 3, "reco x", "x", true},
-		{"min one short of full", "record", 3, "recor", "", true},
-		{"min full prefix", "record", 3, "record", "", true},
-		{"min full prefix with arguments", "record", 3, "record foo bar", "foo bar", true},
-		{"min below minimum", "record", 3, "re", "", false},
-		{"min token longer than prefix", "record", 3, "recording", "", false},
-		{"min plural not a prefix", "record", 3, "records", "", false},
-		{"min leading junk", "record", 3, "xrec", "", false},
+		{"no prefix passes through", "", nil, 0, "blacksh", "blacksh", "", true},
+		{"no prefix rejects empty", "", nil, 0, "   ", "", "", false},
+		{"prefix alone", "wifi", nil, 0, "wifi", "", "wifi", true},
+		{"prefix with argument", "wifi", nil, 0, "wifi home", "home", "wifi", true},
+		{"prefix case insensitive", "wifi", nil, 0, "WiFi home", "home", "wifi", true},
+		{"prefix must be followed by space", "wifi", nil, 0, "wifikill", "", "", false},
+		{"non-matching query", "wifi", nil, 0, "blacksh", "", "", false},
+		{"shorter than prefix", "wifi", nil, 0, "wi", "", "", false},
+		{"surrounding whitespace trimmed", "wifi", nil, 0, "  wifi   home  ", "home", "wifi", true},
+		{"min zero keeps exact only", "record", nil, 0, "rec", "", "", false},
+		{"min prefix alone", "record", nil, 3, "rec", "", "record", true},
+		{"min prefix case insensitive", "record", nil, 3, "REC", "", "record", true},
+		{"min partial with argument", "record", nil, 3, "reco x", "x", "record", true},
+		{"min one short of full", "record", nil, 3, "recor", "", "record", true},
+		{"min full prefix", "record", nil, 3, "record", "", "record", true},
+		{"min full prefix with arguments", "record", nil, 3, "record foo bar", "foo bar", "record", true},
+		{"min below minimum", "record", nil, 3, "re", "", "", false},
+		{"min token longer than prefix", "record", nil, 3, "recording", "", "", false},
+		{"min plural not a prefix", "record", nil, 3, "records", "", "", false},
+		{"min leading junk", "record", nil, 3, "xrec", "", "", false},
+		{"alt prefix shortened", "record", []string{"stop"}, 3, "sto", "", "stop", true},
+		{"alt prefix case insensitive", "record", []string{"stop"}, 3, "STOP", "", "stop", true},
+		{"alt prefix with argument", "record", []string{"stop"}, 3, "stop now", "now", "stop", true},
+		{"primary still matches beside alt", "record", []string{"stop"}, 3, "rec", "", "record", true},
+		{"alt prefix below minimum", "record", []string{"stop"}, 3, "st", "", "", false},
+		{"alt prefix token too long", "record", []string{"stop"}, 3, "stopping", "", "", false},
+		{"alt prefix min zero rejects short", "record", []string{"stop"}, 0, "sto", "", "", false},
+		{"alt prefix min zero exact", "record", []string{"stop"}, 0, "stop", "", "stop", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &ExecPlugin{prefix: tt.prefix, prefixMin: tt.min}
-			got, ok := p.MatchQuery(tt.query)
-			if got != tt.want || ok != tt.ok {
-				t.Fatalf("MatchQuery(%q) = (%q, %v), want (%q, %v)", tt.query, got, ok, tt.want, tt.ok)
+			p := &ExecPlugin{prefixMin: tt.min}
+			if tt.prefix != "" {
+				p.prefixes = append([]string{tt.prefix}, tt.prefixes...)
+			}
+			got, pre, ok := p.MatchQuery(tt.query)
+			if got != tt.want || pre != tt.wantMatch || ok != tt.ok {
+				t.Fatalf("MatchQuery(%q) = (%q, %q, %v), want (%q, %q, %v)", tt.query, got, pre, ok, tt.want, tt.wantMatch, tt.ok)
 			}
 		})
 	}

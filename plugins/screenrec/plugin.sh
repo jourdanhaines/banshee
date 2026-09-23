@@ -3,7 +3,8 @@
 # any longer prefix of "record") to record a region, a window or the focused
 # screen (MP4 or GIF, optional audio), stop it again, and replay or copy recent
 # recordings. A finished recording opens in mpv and lands on the clipboard as a
-# file:// URI.
+# file:// URI. While recording, "sto" or "stop" on its own also shows the Stop
+# row (the manifest's second prefix).
 #
 # Requires: wf-recorder slurp mpv wl-clipboard (wl-copy) jq hyprctl ffmpeg.
 # Optional: pactl or wpctl (audio source probe), setsid from util-linux (keeps
@@ -314,7 +315,18 @@ emit_finishing() {
     printf '%s\n' "{\"v\":1,\"seq\":$1,\"event\":\"results\",\"done\":true,\"results\":[{\"id\":\"finishing\",\"title\":\"$ef_title\",\"subtitle\":\"$(json_escape "${ef_final##*/}")\",\"icon\":\"camera-video-symbolic\",\"score\":100,\"action\":{\"kind\":\"callback\"}}]}"
 }
 
+# handle_query <seq> <query> <prefix> — prefix is the manifest prefix that
+# matched; an older host omits it, which reads as the primary "record".
 handle_query() {
+    if [ "$(lower "${3:-}")" = stop ]; then
+        refresh_phase
+        case $PHASE in
+            recording) emit_recording "$1" ;;
+            finishing) emit_finishing "$1" ;;
+            *) printf '%s\n' "{\"v\":1,\"seq\":$1,\"event\":\"results\",\"done\":true,\"results\":[]}" ;;
+        esac
+        return 0
+    fi
     hq_missing=$(missing_deps)
     if [ -n "$hq_missing" ]; then
         emit_deps_row "$1" "$hq_missing"
@@ -591,7 +603,7 @@ while IFS= read -r line; do
     event=$(str_field "$line" event)
     case "$event" in
         query)
-            handle_query "$(num_field "$line" seq)" "$(str_field "$line" query)"
+            handle_query "$(num_field "$line" seq)" "$(str_field "$line" query)" "$(str_field "$line" prefix)"
             ;;
         activate)
             handle_activate "$(str_field "$line" id)"

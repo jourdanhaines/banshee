@@ -162,7 +162,7 @@ func (h *Host) Providers() []providers.Provider {
 	defer h.mu.RUnlock()
 	out := make([]providers.Provider, 0, len(h.execs))
 	for _, p := range h.execs {
-		if p.m.Exec.Background && p.prefix == "" {
+		if p.m.Exec.Background && len(p.prefixes) == 0 {
 			continue
 		}
 		out = append(out, p)

@@ -8,6 +8,7 @@
         "bin": "./plugin.sh",
         "prefix": "record",
         "prefix_min": 3,
+        "prefixes": ["stop"],
         "timeout_ms": 1000
     }
 }

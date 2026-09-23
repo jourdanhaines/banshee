@@ -616,15 +616,27 @@ func TestScreenrecPrefix(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		query string
-		want  []string // nil means the gate rejects the query
+		want  []string // nil means the gate rejects the query; empty, no rows
 	}{
 		{"full prefix", "record", []string{"rec:region", "rec:window", "rec:screen"}},
 		{"partial prefix", "reco", []string{"rec:region", "rec:window", "rec:screen"}},
 		{"partial prefix with filter", "recor win", []string{"rec:window"}},
 		{"below minimum", "re", nil},
 		{"longer than prefix", "recording", nil},
+		{"stop while idle", "stop", []string{}},
+		{"shortened stop while idle", "sto", []string{}},
+		{"stop below minimum", "st", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.want != nil && len(tc.want) == 0 {
+				// The plugin is warm from the earlier cases, so an empty answer
+				// is the stop branch speaking, not a startup timeout.
+				rows, err := s.prov.Query(context.Background(), tc.query)
+				if err != nil || len(rows) != 0 {
+					t.Fatalf("Query(%q) = (%v, %v), want no rows", tc.query, screenrecIDs(rows), err)
+				}
+				return
+			}
 			if tc.want == nil {
 				rows, err := s.prov.Query(context.Background(), tc.query)
 				if err != nil || rows != nil {
@@ -759,6 +771,37 @@ func TestScreenrecRecordLifecycle(t *testing.T) {
 		t.Fatalf("notify after stop = %+v, want Recording saved", saved.n)
 	}
 	assertSaved(t, s, e, final, saved.n, 8000)
+}
+
+// TestScreenrecStopPrefix proves the manifest's second prefix: "sto"/"stop"
+// alone surface the Stop row while recording and nothing once it is saved.
+func TestScreenrecStopPrefix(t *testing.T) {
+	e := newScreenrecEnv(t, screenrecStubOpts{pactlSources: screenrecPactlSource})
+	s := startScreenrec(t, stageScreenrec(t, ""))
+	s.startRecording(t, e, "rec:region", map[string]string{"format": "MP4", "audio": "Off"})
+
+	for _, q := range []string{"sto", "stop"} {
+		var rows []providers.Result
+		deadline := time.Now().Add(5 * time.Second)
+		for len(rows) == 0 && time.Now().Before(deadline) {
+			var err error
+			if rows, err = s.prov.Query(context.Background(), q); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := screenrecIDs(rows); !reflect.DeepEqual(got, []string{"stop"}) {
+			t.Fatalf("Query(%q) while recording = %v, want [stop]", q, got)
+		}
+	}
+
+	if err := s.h.Activate("screenrec", "stop"); err != nil {
+		t.Fatal(err)
+	}
+	s.untilSaved(t)
+	rows, err := s.prov.Query(context.Background(), "stop")
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("Query(\"stop\") after saving = (%v, %v), want no rows", screenrecIDs(rows), err)
+	}
 }
 
 // untilSaved drains notifies up to "Recording saved", returning them in order.

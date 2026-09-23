@@ -86,6 +86,21 @@ func TestParseManifest(t *testing.T) {
 				}
 			},
 		},
+		{"exec prefixes without prefix", `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefixes":["stop"]}}`, true, nil},
+		{"exec prefixes empty entry", `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix":"record","prefixes":[""]}}`, true, nil},
+		{"exec prefixes entry with space", `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix":"record","prefixes":["st op"]}}`, true, nil},
+		{"exec prefixes entry below prefix_min", `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix":"record","prefix_min":3,"prefixes":["st"]}}`, true, nil},
+		{"exec prefixes duplicate of prefix", `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix":"record","prefixes":["RECORD"]}}`, true, nil},
+		{"exec prefixes duplicate entries", `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix":"record","prefixes":["stop","Stop"]}}`, true, nil},
+		{
+			name: "exec prefixes valid with unknown key",
+			json: `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix":"record","prefix_min":3,"prefixes":["stop","pause"],"prefix_aliases":{"s":"stop"}}}`,
+			check: func(t *testing.T, m Manifest) {
+				if len(m.Exec.Prefixes) != 2 || m.Exec.Prefixes[0] != "stop" || m.Exec.Prefixes[1] != "pause" {
+					t.Fatalf("Prefixes = %v, want [stop pause]", m.Exec.Prefixes)
+				}
+			},
+		},
 		{"malformed json", `{`, true, nil},
 	}
 	for _, tt := range tests {

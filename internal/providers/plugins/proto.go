@@ -35,6 +35,13 @@
 // the notification plugin system; WireNotify.Sound added for per-notification
 // audio — additive, unknown-ignored both ways.)
 //
+// A query event carries "query" (the user's text with the gate token
+// stripped) and "prefix": which manifest prefix matched, as the manifest
+// spells it — lets a plugin with several prefixes (exec.prefixes) answer each
+// differently; absent on an older host, so a plugin must treat a missing
+// prefix as its primary one. (Migration 2026-09c: Event.Prefix added —
+// additive, unknown-ignored.)
+//
 // Every query carries a Seq, and a plugin must echo the seq it is answering:
 // the host drops any message whose seq is not the query it is still waiting
 // on. Results for one seq may be split across several messages; the host
@@ -133,6 +140,9 @@ type Event struct {
 	Seq uint64 `json:"seq,omitempty"`
 	// Query is the user's query with the plugin's prefix stripped (query).
 	Query string `json:"query,omitempty"`
+	// Prefix is the manifest prefix that matched, as the manifest spells it
+	// (query). Absent for an unprefixed plugin and on an older host.
+	Prefix string `json:"prefix,omitempty"`
 	// ID is the result's id (activate, submit).
 	ID string `json:"id,omitempty"`
 	// Values are the submitted form values keyed by field key (submit).

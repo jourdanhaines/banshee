@@ -120,7 +120,7 @@ type ExecPlugin struct {
 	m         connectors.Manifest
 	opts      Options
 	timeout   time.Duration
-	prefix    string
+	prefixes  []string // manifest prefix first, then exec.prefixes; empty = ungated
 	prefixMin int
 
 	mu       sync.Mutex
@@ -151,7 +151,10 @@ func NewExecPlugin(m connectors.Manifest, opts Options) (*ExecPlugin, error) {
 		return nil, fmt.Errorf("plugins: %q is not an exec plugin", m.ID)
 	}
 	opts = opts.withDefaults()
-	p := &ExecPlugin{m: m, opts: opts, timeout: opts.Timeout, prefix: m.Exec.Prefix, prefixMin: m.Exec.PrefixMin}
+	p := &ExecPlugin{m: m, opts: opts, timeout: opts.Timeout, prefixMin: m.Exec.PrefixMin}
+	if m.Exec.Prefix != "" {
+		p.prefixes = append([]string{m.Exec.Prefix}, m.Exec.Prefixes...)
+	}
 	if ms := m.Exec.TimeoutMS; ms > 0 {
 		// Clamped again here (ParseManifest already clamps) so a Manifest built
 		// in code cannot stall the aggregator: every provider is joined before
@@ -178,48 +181,55 @@ func (p *ExecPlugin) Disabled() bool {
 }
 
 // MatchQuery applies the plugin's prefix gate. ok is false when the plugin
-// should not see this query at all; otherwise the returned string is the query
-// with the leading token and its separating space removed. The first token is
-// compared case-insensitively against the whole prefix or, when prefixMin is
-// set, against any leading substring of it at least prefixMin long: with
+// should not see this query at all; otherwise rest is the query with the
+// leading token and its separating space removed, and prefix is the manifest
+// prefix that matched, as the manifest spells it ("" for an ungated plugin).
+// The first token is compared case-insensitively against each prefix in
+// manifest order, first match wins: against the whole prefix or, when
+// prefixMin is set, any leading substring of it at least prefixMin long. With
 // prefix "wifi", "wifi" and "WiFi list" match, "wifikill" does not; with
 // prefix "record" and prefixMin 3, "rec", "reco x" and "record" match, "re"
 // and "recording" do not.
-func (p *ExecPlugin) MatchQuery(q string) (string, bool) {
+func (p *ExecPlugin) MatchQuery(q string) (rest, prefix string, ok bool) {
 	q = strings.TrimSpace(q)
 	if q == "" {
-		return "", false
+		return "", "", false
 	}
-	if p.prefix == "" {
-		return q, true
+	if len(p.prefixes) == 0 {
+		return q, "", true
 	}
 	token, rest, _ := strings.Cut(q, " ")
+	for _, pre := range p.prefixes {
+		if p.tokenMatches(token, pre) {
+			return strings.TrimSpace(rest), pre, true
+		}
+	}
+	return "", "", false
+}
+
+// tokenMatches reports whether token selects prefix: the whole prefix, or a
+// leading substring of at least prefixMin bytes when prefixMin is set.
+func (p *ExecPlugin) tokenMatches(token, prefix string) bool {
 	n := len(token)
 	switch {
-	case n == len(p.prefix):
-		if !strings.EqualFold(token, p.prefix) {
-			return "", false
-		}
-	case p.prefixMin > 0 && n >= p.prefixMin && n < len(p.prefix):
+	case n == len(prefix):
+		return strings.EqualFold(token, prefix)
+	case p.prefixMin > 0 && n >= p.prefixMin && n < len(prefix):
 		// Byte slicing is safe: manifest prefixes are ASCII.
-		if !strings.EqualFold(token, p.prefix[:n]) {
-			return "", false
-		}
-	default:
-		return "", false
+		return strings.EqualFold(token, prefix[:n])
 	}
-	return strings.TrimSpace(rest), true
+	return false
 }
 
 // Query implements providers.Provider. It sends a query event and waits for
 // results until the plugin reports done, the soft timeout elapses (partial
 // results are returned) or ctx is cancelled.
 func (p *ExecPlugin) Query(ctx context.Context, q string) ([]providers.Result, error) {
-	sub, ok := p.MatchQuery(q)
+	sub, prefix, ok := p.MatchQuery(q)
 	if !ok {
 		return nil, nil
 	}
-	pend, err := p.send(sub)
+	pend, err := p.send(sub, prefix)
 	if err != nil {
 		// Disabled, backing off or torn down: an expected, already-reported
 		// state, not a per-keystroke error for the aggregator to log.
@@ -345,8 +355,9 @@ func killGroup(cmd *exec.Cmd) {
 var errBackoff = errors.New("plugins: plugin restarting")
 
 // send starts the plugin if needed and writes a query event, returning the
-// pending slot the reader will fill.
-func (p *ExecPlugin) send(q string) (*pending, error) {
+// pending slot the reader will fill. prefix is the canonical gate prefix that
+// matched, forwarded so a multi-prefix plugin can tell its verbs apart.
+func (p *ExecPlugin) send(q, prefix string) (*pending, error) {
 	p.mu.Lock()
 	if err := p.ensureStartedLocked(); err != nil {
 		p.mu.Unlock()
@@ -362,7 +373,7 @@ func (p *ExecPlugin) send(q string) (*pending, error) {
 	stdin := p.stdin
 	p.mu.Unlock()
 
-	if err := p.write(stdin, Event{V: ProtoVersion, Event: EventQuery, Seq: pend.seq, Query: q}); err != nil {
+	if err := p.write(stdin, Event{V: ProtoVersion, Event: EventQuery, Seq: pend.seq, Query: q, Prefix: prefix}); err != nil {
 		p.retire(pend)
 		return nil, err
 	}
