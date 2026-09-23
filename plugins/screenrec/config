@@ -1,0 +1,43 @@
+# banshee screenrec plugin — user-editable options, sourced as sh.
+# Edit and run `banshee reload` to apply.
+
+# Where finished recordings are saved. XDG_VIDEOS_DIR is read from
+# ~/.config/user-dirs.dirs before this file is sourced. In-progress files live
+# in a hidden .partial/ directory inside it.
+OUTPUT_DIR="${XDG_VIDEOS_DIR:-$HOME/Videos}/Recordings"
+
+# File names are <prefix>-YYYYMMDD-HHMMSS.mp4 (or .gif). Only files matching
+# this prefix are listed as recent recordings or removed by "Clear recordings".
+FILENAME_PREFIX=screenrec
+
+# mp4 or gif — preselected in the Format dropdown. GIF records an MP4 first and
+# converts it with ffmpeg when you stop; GIFs never carry audio.
+DEFAULT_FORMAT=mp4
+
+# wf-recorder codec (-c), MP4 only. Empty = wf-recorder's default.
+CODEC=""
+
+# Extra wf-recorder arguments, word-split (e.g. "--no-damage" or "-r 30").
+WF_RECORDER_ARGS=""
+
+# GIF frame rate, and output width in pixels (empty = native width; height
+# keeps the aspect ratio).
+GIF_FPS=15
+GIF_WIDTH=""
+
+# Arguments for the mpv replay after a recording stops, word-split. Tip: add
+# `windowrulev2 = float, class:^(mpv)$` to hyprland.conf to float the replay.
+MPV_ARGS="--loop=inf --really-quiet"
+
+# true: replay the finished recording in mpv.
+AUTOPLAY=true
+
+# true: put the finished recording on the clipboard as a file:// URI, ready to
+# paste into chat apps and file managers.
+COPY_TO_CLIPBOARD=true
+
+# How many recent recordings the launcher lists.
+RECENT_LIMIT=10
+
+# Seconds the "Recording saved" notification stays on screen.
+NOTIFY_TIMEOUT_SECONDS=8

@@ -55,10 +55,10 @@ JSON-described tmux session, exactly as it always has.
 |---|---|
 | **Required** | Go 1.23+, `gtk4`, `gtk4-layer-shell`, `pkgconf`, `make` |
 | **Compositor** | Hyprland (or any `wlr-layer-shell` compositor; banshee falls back to a normal window elsewhere) |
-| **Recommended** | `tmux` (session features), `fzf` (nicer CLI picker), `git` (GitHub connector), `wl-clipboard` (clipboard history and calculator copy; `xclip`/`xsel` cover copying on X11) |
+| **Recommended** | `tmux` (session features), `fzf` (nicer CLI picker), `git` (GitHub connector), `wl-clipboard` (clipboard history and calculator copy; `xclip`/`xsel` cover copying on X11), `wf-recorder`, `slurp`, `mpv`, `ffmpeg`, `jq` (screen recording plugin) |
 
 On Arch, the lot:
-`sudo pacman -S --needed go gtk4 gtk4-layer-shell pkgconf make tmux fzf git`
+`sudo pacman -S --needed go gtk4 gtk4-layer-shell pkgconf make tmux fzf git wl-clipboard wf-recorder slurp mpv ffmpeg jq`
 
 ## Install
 
@@ -71,7 +71,7 @@ cd banshee
 The installer checks dependencies, builds the binary, and wires banshee in:
 `~/.local/bin/banshee`, shell integration in your `~/.zshrc` or `~/.bashrc`,
 the `$menu` rebind and `layerrule` block in `~/.config/hypr/hyprland.conf`
-(after a timestamped backup), a default config plus the example plugin, and an
+(after a timestamped backup), a default config plus the bundled plugins, and an
 optional, not-enabled `banshee.service` user unit. It is idempotent. Skip the
 automatic edits with `--no-hyprland` / `--no-shell`, and undo everything with
 `./install.sh --uninstall`. Prefer to do it by hand? `make install` touches
@@ -261,6 +261,56 @@ What you should know about how it treats your data:
 - Watching requires Wayland and `wl-clipboard`; turn the feature off entirely
   with `clipboard_history = false`.
 
+## Screen recording
+
+The bundled `screenrec` plugin records your screen with `wf-recorder`. Type
+`rec`:
+
+```
+┌──────────────────────────────────────────────┐
+│  rec                                         │
+├──────────────────────────────────────────────┤
+│  ▎ Record region                             │
+│    Record window                             │
+│    Record screen                             │
+│    Clear recordings (3 files, 42.3 MB)       │
+│    screenrec-20260923-141502.mp4             │
+│      8.1 MB · 2m ago                         │
+└──────────────────────────────────────────────┘
+```
+
+Picking a **Record** row opens a sub-menu with two dropdowns — **Format**
+(MP4 or GIF) and **Audio** (Off or On; it reads `Unavailable (no audio
+source)` when no PulseAudio/PipeWire source is found, and is ignored for GIF).
+Enter starts, Esc goes back. **Region** lets you drag a box with `slurp`,
+**window** is a click-to-pick over the current workspace's windows, and
+**screen** records the focused monitor with no prompt.
+
+While recording, `rec` shows only **Stop recording**, and a persistent
+"Recording…" notification carries a **Stop** button — either one ends it. On
+stop, the file's `file://` URI goes on the clipboard as `text/uri-list` (paste
+it into a chat app or file manager and it arrives as a file), the recording
+opens looping in `mpv`, and a "Recording saved" notification offers
+**Open folder**. GIFs are recorded as MP4 and converted with `ffmpeg` on stop
+(15 fps by default, `GIF_WIDTH` to downscale); the MP4 is then removed.
+
+- **Recent recordings** — the newest files list under the Record rows; Enter
+  replays one and copies it again.
+- **Clear recordings** — deletes every recording after you type `delete` to
+  confirm.
+- **Where they go** — `~/Videos/Recordings` (`XDG_VIDEOS_DIR` is honored),
+  named `screenrec-YYYYMMDD-HHMMSS.<mp4|gif>`.
+- **Options** — `~/.config/banshee/plugins/screenrec/config`: `OUTPUT_DIR`,
+  `FILENAME_PREFIX`, `DEFAULT_FORMAT`, `CODEC`, `WF_RECORDER_ARGS`, `GIF_FPS`,
+  `GIF_WIDTH`, `MPV_ARGS`, `AUTOPLAY`, `COPY_TO_CLIPBOARD`, `RECENT_LIMIT`,
+  `NOTIFY_TIMEOUT_SECONDS`. Apply edits with `banshee reload` — safe even
+  mid-recording: the recording continues and Stop still works.
+- **Missing tools** show up as a single `screenrec: install …` row instead of
+  the menu.
+
+> Tip: to have the replay float instead of tiling, add
+> `windowrulev2 = float, class:^(mpv)$` to `hyprland.conf`.
+
 ## Sessions
 
 A target is either a git repo found by the indexer or a session config —
@@ -321,7 +371,9 @@ any shell with `banshee link <id> [path] [binding]`. **`exec` plugins** are
 long-running child processes speaking newline-delimited JSON, optionally gated
 behind a query prefix; their actions can open URLs, run detached commands,
 copy text to the clipboard, call back into the plugin, or declare an input
-form whose submitted values come back to the plugin. Start from the runnable
+form whose submitted values come back to the plugin. `make install` ships
+three: `example`, `claude-code` (Claude Code notifications) and `screenrec`
+(screen recording). Start from the runnable
 sample in
 [plugins/example/](plugins/example/); the wire protocol is defined in
 [internal/providers/plugins/proto.go](internal/providers/plugins/proto.go),

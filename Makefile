@@ -1,7 +1,7 @@
 # banshee — GTK4 layer-shell launcher + tmux session manager
 #
 #   make build      build ./bin/banshee
-#   make install    build, then install binary, shell plugins, unit and example plugin
+#   make install    build, then install binary, shell plugins, unit and bundled plugins
 #   make test       go test ./...
 #   make lint       gofmt check + go vet (+ golangci-lint when installed)
 #   make warm       pre-build the gotk4 cgo dependency tree (slow, once)
@@ -143,6 +143,15 @@ install-plugins:
 		install -m 0755 plugins/claude-code/hook.sh       $(CONFIGDIR)/plugins/claude-code/hook.sh; \
 		install -m 0644 plugins/claude-code/config        $(CONFIGDIR)/plugins/claude-code/config; \
 		echo "installed claude-code plugin to $(CONFIGDIR)/plugins/claude-code"; \
+	fi
+	@if [ -d $(CONFIGDIR)/plugins/screenrec ]; then \
+		echo "keeping existing $(CONFIGDIR)/plugins/screenrec"; \
+	else \
+		mkdir -p $(CONFIGDIR)/plugins/screenrec; \
+		install -m 0644 plugins/screenrec/manifest.json $(CONFIGDIR)/plugins/screenrec/manifest.json; \
+		install -m 0755 plugins/screenrec/plugin.sh     $(CONFIGDIR)/plugins/screenrec/plugin.sh; \
+		install -m 0644 plugins/screenrec/config        $(CONFIGDIR)/plugins/screenrec/config; \
+		echo "installed screenrec plugin to $(CONFIGDIR)/plugins/screenrec"; \
 	fi
 
 uninstall:

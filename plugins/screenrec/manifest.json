@@ -1,0 +1,12 @@
+{
+    "v": 1,
+    "id": "screenrec",
+    "name": "Screen recording",
+    "icon": "camera-video-symbolic",
+    "type": "exec",
+    "exec": {
+        "bin": "./plugin.sh",
+        "prefix": "rec",
+        "timeout_ms": 1000
+    }
+}
