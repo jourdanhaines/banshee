@@ -1,8 +1,9 @@
 #!/bin/sh
-# banshee screenrec plugin — screen recording from the launcher. Type "rec" to
-# record a region, a window or the focused screen (MP4 or GIF, optional
-# audio), stop it again, and replay or copy recent recordings. A finished
-# recording opens in mpv and lands on the clipboard as a file:// URI.
+# banshee screenrec plugin — screen recording from the launcher. Type "rec" (or
+# any longer prefix of "record") to record a region, a window or the focused
+# screen (MP4 or GIF, optional audio), stop it again, and replay or copy recent
+# recordings. A finished recording opens in mpv and lands on the clipboard as a
+# file:// URI.
 #
 # Requires: wf-recorder slurp mpv wl-clipboard (wl-copy) jq hyprctl ffmpeg.
 # Optional: pactl or wpctl (audio source probe), setsid from util-linux (keeps

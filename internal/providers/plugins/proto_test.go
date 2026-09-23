@@ -118,23 +118,35 @@ func TestMatchQuery(t *testing.T) {
 	tests := []struct {
 		name   string
 		prefix string
+		min    int
 		query  string
 		want   string
 		ok     bool
 	}{
-		{"no prefix passes through", "", "blacksh", "blacksh", true},
-		{"no prefix rejects empty", "", "   ", "", false},
-		{"prefix alone", "wifi", "wifi", "", true},
-		{"prefix with argument", "wifi", "wifi home", "home", true},
-		{"prefix case insensitive", "wifi", "WiFi home", "home", true},
-		{"prefix must be followed by space", "wifi", "wifikill", "", false},
-		{"non-matching query", "wifi", "blacksh", "", false},
-		{"shorter than prefix", "wifi", "wi", "", false},
-		{"surrounding whitespace trimmed", "wifi", "  wifi   home  ", "home", true},
+		{"no prefix passes through", "", 0, "blacksh", "blacksh", true},
+		{"no prefix rejects empty", "", 0, "   ", "", false},
+		{"prefix alone", "wifi", 0, "wifi", "", true},
+		{"prefix with argument", "wifi", 0, "wifi home", "home", true},
+		{"prefix case insensitive", "wifi", 0, "WiFi home", "home", true},
+		{"prefix must be followed by space", "wifi", 0, "wifikill", "", false},
+		{"non-matching query", "wifi", 0, "blacksh", "", false},
+		{"shorter than prefix", "wifi", 0, "wi", "", false},
+		{"surrounding whitespace trimmed", "wifi", 0, "  wifi   home  ", "home", true},
+		{"min zero keeps exact only", "record", 0, "rec", "", false},
+		{"min prefix alone", "record", 3, "rec", "", true},
+		{"min prefix case insensitive", "record", 3, "REC", "", true},
+		{"min partial with argument", "record", 3, "reco x", "x", true},
+		{"min one short of full", "record", 3, "recor", "", true},
+		{"min full prefix", "record", 3, "record", "", true},
+		{"min full prefix with arguments", "record", 3, "record foo bar", "foo bar", true},
+		{"min below minimum", "record", 3, "re", "", false},
+		{"min token longer than prefix", "record", 3, "recording", "", false},
+		{"min plural not a prefix", "record", 3, "records", "", false},
+		{"min leading junk", "record", 3, "xrec", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &ExecPlugin{prefix: tt.prefix}
+			p := &ExecPlugin{prefix: tt.prefix, prefixMin: tt.min}
 			got, ok := p.MatchQuery(tt.query)
 			if got != tt.want || ok != tt.ok {
 				t.Fatalf("MatchQuery(%q) = (%q, %v), want (%q, %v)", tt.query, got, ok, tt.want, tt.ok)

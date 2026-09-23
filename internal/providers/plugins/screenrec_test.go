@@ -606,6 +606,45 @@ func TestScreenrecIdleRows(t *testing.T) {
 	}
 }
 
+// TestScreenrecPrefix proves the shipped manifest accepts any prefix of
+// "record" from three letters on, and nothing shorter or longer.
+func TestScreenrecPrefix(t *testing.T) {
+	newScreenrecEnv(t, screenrecStubOpts{pactlSources: screenrecPactlSource})
+	s := startScreenrec(t, stageScreenrec(t, ""))
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  []string // nil means the gate rejects the query
+	}{
+		{"full prefix", "record", []string{"rec:region", "rec:window", "rec:screen"}},
+		{"partial prefix", "reco", []string{"rec:region", "rec:window", "rec:screen"}},
+		{"partial prefix with filter", "recor win", []string{"rec:window"}},
+		{"below minimum", "re", nil},
+		{"longer than prefix", "recording", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.want == nil {
+				rows, err := s.prov.Query(context.Background(), tc.query)
+				if err != nil || rows != nil {
+					t.Fatalf("Query(%q) = (%v, %v), want (nil, nil)", tc.query, screenrecIDs(rows), err)
+				}
+				return
+			}
+			var rows []providers.Result
+			deadline := time.Now().Add(5 * time.Second)
+			for len(rows) == 0 && time.Now().Before(deadline) {
+				var err error
+				if rows, err = s.prov.Query(context.Background(), tc.query); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := screenrecIDs(rows); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("Query(%q) rows = %v, want %v", tc.query, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestScreenrecFormatDefault proves DEFAULT_FORMAT picks which format the
 // dropdown preselects (its first option).
 func TestScreenrecFormatDefault(t *testing.T) {

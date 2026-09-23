@@ -113,6 +113,12 @@ type ExecSpec struct {
 	// Prefix gates the plugin: when set, it only receives queries starting
 	// with the prefix, and the prefix is stripped before sending.
 	Prefix string `json:"prefix"`
+	// PrefixMin, when > 0, also accepts any leading substring of Prefix at
+	// least this long ("rec"/"reco"/"record" for Prefix "record", PrefixMin
+	// 3), so a user who stops typing early still triggers the plugin. Zero
+	// means exact Prefix only. (Migration 2026-09: additive; an older
+	// banshee ignores the key and gates on the full Prefix.)
+	PrefixMin int `json:"prefix_min"`
 	// TimeoutMS is the soft per-query timeout in milliseconds. Zero uses the
 	// host default (150ms); anything above MaxExecTimeoutMS is clamped to it.
 	TimeoutMS int `json:"timeout_ms"`
@@ -177,6 +183,14 @@ func (m Manifest) Validate() error {
 		}
 		if m.Exec.TimeoutMS < 0 {
 			return fmt.Errorf("manifest %q: exec.timeout_ms must not be negative", m.ID)
+		}
+		switch {
+		case m.Exec.PrefixMin < 0:
+			return fmt.Errorf("manifest %q: exec.prefix_min must not be negative", m.ID)
+		case m.Exec.PrefixMin > 0 && m.Exec.Prefix == "":
+			return fmt.Errorf("manifest %q: exec.prefix_min requires exec.prefix", m.ID)
+		case m.Exec.PrefixMin > len(m.Exec.Prefix):
+			return fmt.Errorf("manifest %q: exec.prefix_min %d exceeds the length of exec.prefix %q", m.ID, m.Exec.PrefixMin, m.Exec.Prefix)
 		}
 	case "":
 		return fmt.Errorf("manifest %q: type is required (%q or %q)", m.ID, TypeURL, TypeExec)

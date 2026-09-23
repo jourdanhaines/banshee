@@ -117,10 +117,11 @@ func (p *pending) finish() { p.once.Do(func() { close(p.done) }) }
 // ExecPlugin is a providers.Provider backed by a long-running child process
 // speaking the JSON-lines plugin protocol. It is safe for concurrent use.
 type ExecPlugin struct {
-	m       connectors.Manifest
-	opts    Options
-	timeout time.Duration
-	prefix  string
+	m         connectors.Manifest
+	opts      Options
+	timeout   time.Duration
+	prefix    string
+	prefixMin int
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd
@@ -150,7 +151,7 @@ func NewExecPlugin(m connectors.Manifest, opts Options) (*ExecPlugin, error) {
 		return nil, fmt.Errorf("plugins: %q is not an exec plugin", m.ID)
 	}
 	opts = opts.withDefaults()
-	p := &ExecPlugin{m: m, opts: opts, timeout: opts.Timeout, prefix: m.Exec.Prefix}
+	p := &ExecPlugin{m: m, opts: opts, timeout: opts.Timeout, prefix: m.Exec.Prefix, prefixMin: m.Exec.PrefixMin}
 	if ms := m.Exec.TimeoutMS; ms > 0 {
 		// Clamped again here (ParseManifest already clamps) so a Manifest built
 		// in code cannot stall the aggregator: every provider is joined before
@@ -178,9 +179,12 @@ func (p *ExecPlugin) Disabled() bool {
 
 // MatchQuery applies the plugin's prefix gate. ok is false when the plugin
 // should not see this query at all; otherwise the returned string is the query
-// with the prefix (and one separating space) removed. The comparison is
-// case-insensitive, and the prefix must be followed by a space or by nothing:
-// with prefix "wifi", "wifi" and "WiFi list" match, "wifikill" does not.
+// with the leading token and its separating space removed. The first token is
+// compared case-insensitively against the whole prefix or, when prefixMin is
+// set, against any leading substring of it at least prefixMin long: with
+// prefix "wifi", "wifi" and "WiFi list" match, "wifikill" does not; with
+// prefix "record" and prefixMin 3, "rec", "reco x" and "record" match, "re"
+// and "recording" do not.
 func (p *ExecPlugin) MatchQuery(q string) (string, bool) {
 	q = strings.TrimSpace(q)
 	if q == "" {
@@ -189,11 +193,19 @@ func (p *ExecPlugin) MatchQuery(q string) (string, bool) {
 	if p.prefix == "" {
 		return q, true
 	}
-	if len(q) < len(p.prefix) || !strings.EqualFold(q[:len(p.prefix)], p.prefix) {
-		return "", false
-	}
-	rest := q[len(p.prefix):]
-	if rest != "" && rest[0] != ' ' {
+	token, rest, _ := strings.Cut(q, " ")
+	n := len(token)
+	switch {
+	case n == len(p.prefix):
+		if !strings.EqualFold(token, p.prefix) {
+			return "", false
+		}
+	case p.prefixMin > 0 && n >= p.prefixMin && n < len(p.prefix):
+		// Byte slicing is safe: manifest prefixes are ASCII.
+		if !strings.EqualFold(token, p.prefix[:n]) {
+			return "", false
+		}
+	default:
 		return "", false
 	}
 	return strings.TrimSpace(rest), true

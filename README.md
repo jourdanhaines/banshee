@@ -264,7 +264,7 @@ What you should know about how it treats your data:
 ## Screen recording
 
 The bundled `screenrec` plugin records your screen with `wf-recorder`. Type
-`rec`:
+`rec` (or `reco`, `record` — any prefix from three letters):
 
 ```
 ┌──────────────────────────────────────────────┐

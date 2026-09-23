@@ -65,6 +65,27 @@ func TestParseManifest(t *testing.T) {
 		{"url without url block", `{"v":1,"id":"x","type":"url"}`, true, nil},
 		{"exec without bin", `{"v":1,"id":"x","type":"exec","exec":{"prefix":"p"}}`, true, nil},
 		{"exec negative timeout", `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","timeout_ms":-1}}`, true, nil},
+		{"exec negative prefix_min", `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix":"rec","prefix_min":-1}}`, true, nil},
+		{"exec prefix_min without prefix", `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix_min":2}}`, true, nil},
+		{"exec prefix_min longer than prefix", `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix":"rec","prefix_min":4}}`, true, nil},
+		{
+			name: "exec prefix_min within prefix",
+			json: `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix":"record","prefix_min":3,"prefix_max":9}}`,
+			check: func(t *testing.T, m Manifest) {
+				if m.Exec.Prefix != "record" || m.Exec.PrefixMin != 3 {
+					t.Fatalf("bad exec spec: %+v", m.Exec)
+				}
+			},
+		},
+		{
+			name: "exec prefix_min equal to prefix length",
+			json: `{"v":1,"id":"x","type":"exec","exec":{"bin":"p","prefix":"rec","prefix_min":3}}`,
+			check: func(t *testing.T, m Manifest) {
+				if m.Exec.PrefixMin != 3 {
+					t.Fatalf("PrefixMin = %d, want 3", m.Exec.PrefixMin)
+				}
+			},
+		},
 		{"malformed json", `{`, true, nil},
 	}
 	for _, tt := range tests {
