@@ -376,8 +376,10 @@ form whose submitted values come back to the plugin. Form fields are text by
 default; `options` makes a dropdown, `slider` an integer range, `checkbox` a
 toggle, and `show_when` shows a field only while an earlier field holds one of
 the listed values (hidden fields are not submitted). `make install` ships
-three: `example`, `claude-code` (Claude Code notifications) and `screenrec`
-(screen recording). Start from the runnable
+four: `example`, `claude-code` (Claude Code notifications), `screenrec`
+(screen recording) and `passgen` (type `pass`, `gen` or `key` to generate a
+password, UUIDv4, JWT secret or random key straight to the clipboard, marked
+sensitive; needs `wl-clipboard`). Start from the runnable
 sample in
 [plugins/example/](plugins/example/); the wire protocol is defined in
 [internal/providers/plugins/proto.go](internal/providers/plugins/proto.go),
