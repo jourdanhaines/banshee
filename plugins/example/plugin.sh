@@ -68,8 +68,11 @@ emit_results() {
     #    "true"/"false"). "show_when" is a list of conditions, all of which
     #    must hold: each shows the field only while an earlier field's value
     #    is in its "values"; a hidden field is left out of the submit.
-    #    An older banshee renders sliders and checkboxes as text entries and
-    #    ignores show_when, so handle_submit must tolerate any string or none.
+    #    A "generate" field is a secret banshee draws from crypto/rand (here
+    #    16 random bytes as hex), shown elided with reveal and re-roll buttons.
+    #    An older banshee renders sliders, checkboxes and generated fields as
+    #    text entries (a generated one submits "") and ignores show_when, so
+    #    handle_submit must tolerate any string or none.
     printf ',{"id":"greet","title":"Send a custom greeting",'
     printf '"subtitle":"form demo","score":60,'
     printf '"form":{"title":"Custom greeting","fields":['
@@ -77,7 +80,9 @@ emit_results() {
     printf '{"key":"style","label":"Style","options":["Plain","Shout"]},'
     printf '{"key":"repeat","label":"Repeat","slider":{"min":1,"max":5,"step":1,"default":1},'
     printf '"show_when":[{"key":"style","values":["Shout"]}]},'
-    printf '{"key":"notify","label":"Show a notification","checkbox":true,"checked":true}]}}'
+    printf '{"key":"notify","label":"Show a notification","checkbox":true,"checked":true},'
+    printf '{"key":"token","label":"Token","generate":{"bytes":16,"encoding":"hex"},'
+    printf '"show_when":[{"key":"style","values":["Shout"]}]}]}}'
 
     printf ']}\n'
 }
@@ -118,6 +123,12 @@ handle_submit() {
                     msg="$msg $one"
                     i=$((i + 1))
                 done
+            fi
+            # token is secret material: only its length may reach the log. It
+            # is absent while hidden and "" from a banshee that cannot generate.
+            token=$(str_field "$2" token)
+            if [ -n "$token" ]; then
+                printf 'greet token: %d chars\n' "${#token}" >>"${TMPDIR:-/tmp}/banshee-example.log"
             fi
             # Only an explicit "true" notifies; anything else goes to the log.
             if [ "$(str_field "$2" notify)" = true ] && command -v notify-send >/dev/null 2>&1; then

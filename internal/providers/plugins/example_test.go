@@ -96,7 +96,8 @@ func TestExamplePlugin(t *testing.T) {
 }
 
 // assertExampleFields checks the greet form demos every field kind the wire
-// carries: entry, dropdown, show_when-gated slider and checkbox.
+// carries: entry, dropdown, show_when-gated slider, checkbox and show_when-gated
+// generated secret.
 func assertExampleFields(t *testing.T, fields []providers.FormField) {
 	t.Helper()
 	tests := []struct {
@@ -116,6 +117,11 @@ func assertExampleFields(t *testing.T, fields []providers.FormField) {
 		}},
 		{"notify", func(f providers.FormField) bool {
 			return f.Checkbox && f.Checked && f.ShowWhen == nil
+		}},
+		{"token", func(f providers.FormField) bool {
+			return f.Generate != nil &&
+				*f.Generate == providers.GenerateSpec{Bytes: 16, Encoding: "hex"} &&
+				reflect.DeepEqual(f.ShowWhen, []providers.Condition{{Key: "style", Values: []string{"Shout"}}})
 		}},
 	}
 	if len(fields) != len(tests) {
