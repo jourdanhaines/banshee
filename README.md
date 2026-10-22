@@ -382,7 +382,8 @@ shows a field only while each named earlier field holds one of its listed
 values (hidden fields are not submitted). `make install` ships
 four: `example`, `claude-code` (Claude Code notifications), `screenrec`
 (screen recording) and `passgen` (type `pass`, `gen` or `key` to generate a
-password, UUIDv4, JWT secret or random key straight to the clipboard, marked
+password, UUIDv4, JWT secret or random key in the launcher, previewed elided
+with reveal and re-roll buttons, and copy it to the clipboard marked
 sensitive; needs `wl-clipboard`). Start from the runnable
 sample in
 [plugins/example/](plugins/example/); the wire protocol is defined in
