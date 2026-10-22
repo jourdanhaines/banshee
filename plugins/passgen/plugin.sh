@@ -3,10 +3,12 @@
 # key and copy it to the clipboard. Type "pas"/"pass", "gen" or "key" and pick
 # a generator in the form; "key" preselects Key.
 #
-# Requires: coreutils (od, tr, head, base64, sed) and wl-clipboard (wl-copy).
-# Optional: setsid from util-linux (keeps the copy alive across a reload).
-# The generated value only ever travels through pipes: never argv, stdout or
-# a log. Protocol reference: internal/providers/plugins/proto.go.
+# banshee generates the value itself (one "generate" field per variant, shown
+# by show_when); this script only copies the one it receives.
+#
+# Requires: sed and wl-clipboard (wl-copy). Optional: setsid from util-linux
+# (keeps the copy alive across a reload). The value only ever travels through
+# pipes: never argv, stdout or a log. Protocol: internal/providers/plugins/proto.go.
 set -u
 
 HAVE_SETSID=""
@@ -48,41 +50,56 @@ emit_form() {
     printf '{"key":"jwt_encoding","label":"Encoding","options":["base64url","base64","hex"],%s},' "$jwt"
     printf '{"key":"key_bits","label":"Bits","options":["256","128","512"],%s},' "$key"
     printf '{"key":"key_encoding","label":"Encoding","options":["hex","base64","base64url"],%s}' "$key"
+    emit_generated
     printf ']}}]}\n'
 }
 
-# --- generators (each prints the value to its stdout, which is captured) ----
+ALNUM=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
+ALNUM_UNAMBIGUOUS=ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789
+SYMBOLS='!@#$%^&*()-_=+[]{};:,.<>?/'
 
-# gen_text <len> <symbols> <ambiguous> — rejection sampling via tr -dc, so no
-# modulo bias. '-', '[' and ']' are octal-escaped so tr reads them literally.
-gen_text() {
-    if [ "$3" = on ]; then
-        cs='A-HJ-NP-Za-km-z2-9'
-    else
-        cs='A-Za-z0-9'
-    fi
-    [ "$2" = on ] && cs="$cs"'!@#$%^&*()\055_=+\133\135{};:,.<>?/'
-    LC_ALL=C tr -dc "$cs" </dev/urandom | head -c "$1"
+# gen_field <key> <generate-json> <show_when-json> — one unlabelled generated
+# field; specs go through %s because the symbol set contains '%'.
+gen_field() {
+    printf ',{"key":"%s","label":"","generate":%s,"show_when":%s}' "$1" "$2" "$3"
 }
 
-gen_uuid() {
-    # shellcheck disable=SC2046
-    set -- $(od -An -tx1 -N16 /dev/urandom)
-    b6="4${7#?}"
-    b8=$(printf '%02x' $(((0x$9 & 0x3f) | 0x80)))
-    printf '%s%s%s%s-%s%s-%s%s-%s%s-%s%s%s%s%s%s' \
-        "$1" "$2" "$3" "$4" "$5" "$6" "$b6" "$8" "$b8" "${10}" \
-        "${11}" "${12}" "${13}" "${14}" "${15}" "${16}"
+# cond <key> <value> — one show_when condition.
+cond() {
+    printf '{"key":"%s","values":["%s"]}' "$1" "$2"
 }
 
-# gen_bytes <bits> <encoding> — random bytes as hex, base64 or base64url.
-gen_bytes() {
-    n=$(($1 / 8))
-    case "$2" in
-        base64) head -c "$n" /dev/urandom | base64 | tr -d '\n' ;;
-        base64url) head -c "$n" /dev/urandom | base64 | tr -d '\n=' | tr '+/' '-_' ;;
-        *) od -An -tx1 -N"$n" /dev/urandom | tr -d ' \n' ;;
-    esac
+# emit_generated — every variant the submit side can expect, one per
+# combination of the options that shape the value.
+emit_generated() {
+    for s in on off; do
+        for a in on off; do
+            cs=$ALNUM
+            [ "$a" = on ] && cs=$ALNUM_UNAMBIGUOUS
+            [ "$s" = on ] && cs="$cs$SYMBOLS"
+            sv=false am=false
+            [ "$s" = on ] && sv=true
+            [ "$a" = on ] && am=true
+            gen_field "gen_text_${s}_$a" \
+                "{\"charset\":\"$cs\",\"length_from\":\"length\"}" \
+                "[$(cond generator 'Text password'),$(cond symbols $sv),$(cond ambiguous $am)]"
+        done
+    done
+    gen_field gen_uuid \
+        '{"pattern":"xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx","charset":"0123456789abcdef"}' \
+        "[$(cond generator UUIDv4)]"
+    for bits in 256 512; do
+        for enc in base64url base64 hex; do
+            gen_field "gen_jwt_${bits}_$enc" "{\"bytes\":$((bits / 8)),\"encoding\":\"$enc\"}" \
+                "[$(cond generator 'JWT secret'),$(cond jwt_bits "$bits"),$(cond jwt_encoding "$enc")]"
+        done
+    done
+    for bits in 256 128 512; do
+        for enc in hex base64 base64url; do
+            gen_field "gen_key_${bits}_$enc" "{\"bytes\":$((bits / 8)),\"encoding\":\"$enc\"}" \
+                "[$(cond generator Key),$(cond key_bits "$bits"),$(cond key_encoding "$enc")]"
+        done
+    done
 }
 
 # --- submit -----------------------------------------------------------------
@@ -101,8 +118,24 @@ one_of() {
     printf '%s' "$oo_d"
 }
 
-# handle_submit <line> — an older banshee renders sliders and checkboxes as
-# text entries and ignores show_when, so every value is validated here.
+# secret_field <line> <key> — a generated value, JSON-unescaped. Safe with sed
+# because no charset contains '"' or '\'; the only escapes on the wire are
+# Go's HTML-safe \u003c \u003e \u0026. The value moves only through pipes.
+secret_field() {
+    str_field "$1" "$2" | sed 's/\\u003c/</g; s/\\u003e/>/g; s/\\u0026/\&/g'
+}
+
+# any_generated <line> — the leftmost non-empty gen_* value, for a field set
+# that disagrees with the expected key (e.g. a newer form layout).
+any_generated() {
+    printf '%s' "$1" |
+        sed -n 's/"gen_[a-z0-9_]*"[[:space:]]*:[[:space:]]*"\([^"][^"]*\)".*/"gen_:"\1/; s/.*"gen_:"//p' |
+        sed 's/\\u003c/</g; s/\\u003e/>/g; s/\\u0026/\&/g'
+}
+
+# handle_submit <line> — picks the generated field matching the chosen options.
+# An older banshee ignores show_when, so the options are re-validated here, and
+# it cannot generate, so an empty value copies nothing.
 handle_submit() {
     if ! command -v wl-copy >/dev/null 2>&1; then
         notify "wl-copy not found"
@@ -111,39 +144,35 @@ handle_submit() {
     case "$(str_field "$1" generator)" in
         UUIDv4)
             summary="UUID copied"
-            out=$(gen_uuid)
+            want=gen_uuid
             ;;
         "JWT secret")
             summary="JWT secret copied"
             bits=$(one_of "$(str_field "$1" jwt_bits)" 256 256 512)
             enc=$(one_of "$(str_field "$1" jwt_encoding)" base64url base64url base64 hex)
-            out=$(gen_bytes "$bits" "$enc")
+            want="gen_jwt_${bits}_$enc"
             ;;
         Key)
             summary="Key copied"
             bits=$(one_of "$(str_field "$1" key_bits)" 256 256 128 512)
             enc=$(one_of "$(str_field "$1" key_encoding)" hex hex base64 base64url)
-            out=$(gen_bytes "$bits" "$enc")
+            want="gen_key_${bits}_$enc"
             ;;
         *)
             summary="Password copied"
-            len=$(str_field "$1" length)
-            case "$len" in
-                '' | *[!0-9]*) len=24 ;;
-            esac
-            # Strip leading zeros so a value like "08" is not read as octal.
-            len=$(printf '%s' "$len" | sed 's/^0*//')
-            [ -z "$len" ] && len=8
-            [ "${#len}" -gt 3 ] && len=128
-            [ "$len" -lt 8 ] && len=8
-            [ "$len" -gt 128 ] && len=128
             sym=on
             [ "$(str_field "$1" symbols)" = false ] && sym=off
             amb=off
             [ "$(str_field "$1" ambiguous)" = true ] && amb=on
-            out=$(gen_text "$len" "$sym" "$amb")
+            want="gen_text_${sym}_$amb"
             ;;
     esac
+    out=$(secret_field "$1" "$want")
+    [ -z "$out" ] && out=$(any_generated "$1")
+    if [ -z "$out" ]; then
+        notify "Update banshee to generate"
+        return
+    fi
     # wl-copy forks to serve the offer; its own session survives the host's
     # process-group kill on reload/shutdown.
     if [ -n "$HAVE_SETSID" ]; then

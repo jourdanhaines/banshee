@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,13 +14,17 @@ import (
 	"github.com/jourdanhaines/banshee/internal/providers"
 )
 
-// passgenSymbols is the plugin's symbol set; every one must survive tr.
-const passgenSymbols = "!@#$%^&*()-_=+[]{};:,.<>?/"
+// Charsets the plugin declares for its text variants.
+const (
+	passgenAlnum       = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	passgenUnambiguous = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+	passgenSymbols     = "!@#$%^&*()-_=+[]{};:,.<>?/"
+)
 
 // passgenCoreTools is the PATH allowlist besides the wl-copy stub. setsid is
 // left out on purpose: the plugin then copies synchronously, so wl-copy.stdin
 // is complete before the notify arrives.
-var passgenCoreTools = []string{"sh", "sed", "tr", "od", "head", "base64", "cat"}
+var passgenCoreTools = []string{"sh", "sed", "cat"}
 
 // passgenStub logs argv (\x1f-joined) and captures stdin, never echoing it.
 const passgenStub = `#!/bin/sh
@@ -188,12 +191,14 @@ func TestPassgenQuery(t *testing.T) {
 	}
 }
 
-// passgenFields is the form the plugin must declare for one generator order.
+// passgenFields is the form the plugin must declare for one generator order:
+// the 8 option fields, then one unlabelled generated field per variant.
 func passgenFields(order []string) []providers.FormField {
-	when := func(v string) []providers.Condition {
-		return []providers.Condition{{Key: "generator", Values: []string{v}}}
+	cond := func(k, v string) providers.Condition {
+		return providers.Condition{Key: k, Values: []string{v}}
 	}
-	return []providers.FormField{
+	when := func(v string) []providers.Condition { return []providers.Condition{cond("generator", v)} }
+	fields := []providers.FormField{
 		{Key: "generator", Label: "Generator", Options: order},
 		{Key: "length", Label: "Length", Slider: &providers.SliderSpec{Min: 8, Max: 128, Step: 1, Default: 24}, ShowWhen: when("Text password")},
 		{Key: "symbols", Label: "Symbols", Checkbox: true, Checked: true, ShowWhen: when("Text password")},
@@ -203,63 +208,140 @@ func passgenFields(order []string) []providers.FormField {
 		{Key: "key_bits", Label: "Bits", Options: []string{"256", "128", "512"}, ShowWhen: when("Key")},
 		{Key: "key_encoding", Label: "Encoding", Options: []string{"hex", "base64", "base64url"}, ShowWhen: when("Key")},
 	}
+	onoff := map[string]string{"on": "true", "off": "false"}
+	for _, sym := range []string{"on", "off"} {
+		for _, amb := range []string{"on", "off"} {
+			cs := passgenAlnum
+			if amb == "on" {
+				cs = passgenUnambiguous
+			}
+			if sym == "on" {
+				cs += passgenSymbols
+			}
+			fields = append(fields, providers.FormField{
+				Key:      "gen_text_" + sym + "_" + amb,
+				Generate: &providers.GenerateSpec{Charset: cs, LengthFrom: "length"},
+				ShowWhen: []providers.Condition{cond("generator", "Text password"), cond("symbols", onoff[sym]), cond("ambiguous", onoff[amb])},
+			})
+		}
+	}
+	fields = append(fields, providers.FormField{
+		Key:      "gen_uuid",
+		Generate: &providers.GenerateSpec{Pattern: "xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx", Charset: "0123456789abcdef"},
+		ShowWhen: when("UUIDv4"),
+	})
+	for _, g := range []struct {
+		kind, gen  string
+		bits, encs []string
+	}{
+		{"jwt", "JWT secret", []string{"256", "512"}, []string{"base64url", "base64", "hex"}},
+		{"key", "Key", []string{"256", "128", "512"}, []string{"hex", "base64", "base64url"}},
+	} {
+		for _, bits := range g.bits {
+			for _, enc := range g.encs {
+				n, _ := strconv.Atoi(bits)
+				fields = append(fields, providers.FormField{
+					Key:      "gen_" + g.kind + "_" + bits + "_" + enc,
+					Generate: &providers.GenerateSpec{Bytes: n / 8, Encoding: enc},
+					ShowWhen: []providers.Condition{cond("generator", g.gen), cond(g.kind+"_bits", bits), cond(g.kind+"_encoding", enc)},
+				})
+			}
+		}
+	}
+	return fields
 }
 
-// passgenText matches a text password of n characters from the full set.
-func passgenText(n int) *regexp.Regexp {
-	return regexp.MustCompile(`^[A-Za-z0-9` + regexp.QuoteMeta(passgenSymbols) + `]{` + strconv.Itoa(n) + `}$`)
+// TestPassgenGeneratedFields pins the shape the launcher depends on: 28
+// fields, the 20 generated ones unlabelled and placed after key_encoding.
+func TestPassgenGeneratedFields(t *testing.T) {
+	p := startPassgen(t, false)
+	rows := p.query(t, "pass")
+	if len(rows) != 1 || rows[0].Form == nil {
+		t.Fatalf("rows = %+v, want one form row", rows)
+	}
+	fields := rows[0].Form.Fields
+	if len(fields) != 28 {
+		t.Fatalf("%d fields, want 28", len(fields))
+	}
+	if fields[7].Key != "key_encoding" {
+		t.Fatalf("field 7 = %q, want key_encoding", fields[7].Key)
+	}
+	for _, f := range fields[8:] {
+		if !strings.HasPrefix(f.Key, "gen_") || f.Generate == nil || f.Label != "" || len(f.ShowWhen) == 0 {
+			t.Errorf("field %+v: want an unlabelled gen_* field with a spec and show_when", f)
+		}
+	}
 }
 
-// TestPassgenSubmit proves each generator's output shape, the tolerant value
-// parsing an older banshee relies on, and that the value only reaches stdin.
+// TestPassgenSubmit proves the plugin copies exactly the generated value for
+// the chosen options, through wl-copy's stdin only.
 func TestPassgenSubmit(t *testing.T) {
 	p := startPassgen(t, false)
 	p.query(t, "pass") // starts the plugin
+	text := map[string]string{"generator": "Text password", "length": "24"}
+	with := func(base map[string]string, kv ...string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
 	for _, tc := range []struct {
 		name    string
 		values  map[string]string
 		summary string
-		want    *regexp.Regexp
-		reject  string // characters that must never appear
+		want    string // "" means nothing is copied
 	}{
-		{"text 32 with symbols", map[string]string{"generator": "Text password", "length": "32", "symbols": "true", "ambiguous": "false"},
-			"Password copied", passgenText(32), ""},
-		{"text without symbols", map[string]string{"generator": "Text password", "length": "24", "symbols": "false"},
-			"Password copied", regexp.MustCompile(`^[A-Za-z0-9]{24}$`), ""},
-		{"text excluding ambiguous", map[string]string{"generator": "Text password", "length": "128", "ambiguous": "true"},
-			"Password copied", passgenText(128), "0O1lI|"},
-		{"length absent", map[string]string{"generator": "Text password"}, "Password copied", passgenText(24), ""},
-		{"length not a number", map[string]string{"generator": "Text password", "length": "abc"}, "Password copied", passgenText(24), ""},
-		{"length above max", map[string]string{"generator": "Text password", "length": "500"}, "Password copied", passgenText(128), ""},
-		{"length below min", map[string]string{"generator": "Text password", "length": "3"}, "Password copied", passgenText(8), ""},
-		{"uuid", map[string]string{"generator": "UUIDv4"}, "UUID copied",
-			regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`), ""},
-		{"jwt 256 base64url", map[string]string{"generator": "JWT secret", "jwt_bits": "256", "jwt_encoding": "base64url"},
-			"JWT secret copied", regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`), ""},
-		{"jwt 256 base64", map[string]string{"generator": "JWT secret", "jwt_bits": "256", "jwt_encoding": "base64"},
-			"JWT secret copied", regexp.MustCompile(`^[A-Za-z0-9+/]{43}=$`), ""},
-		{"jwt 512 hex", map[string]string{"generator": "JWT secret", "jwt_bits": "512", "jwt_encoding": "hex"},
-			"JWT secret copied", regexp.MustCompile(`^[0-9a-f]{128}$`), ""},
-		{"jwt bad bits and encoding", map[string]string{"generator": "JWT secret", "jwt_bits": "100", "jwt_encoding": "rot13"},
-			"JWT secret copied", regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`), ""},
-		{"key 128 hex", map[string]string{"generator": "Key", "key_bits": "128", "key_encoding": "hex"},
-			"Key copied", regexp.MustCompile(`^[0-9a-f]{32}$`), ""},
-		{"key 512 base64url", map[string]string{"generator": "Key", "key_bits": "512", "key_encoding": "base64url"},
-			"Key copied", regexp.MustCompile(`^[A-Za-z0-9_-]{86}$`), ""},
-		{"key bad bits and encoding", map[string]string{"generator": "Key", "key_bits": "1024", "key_encoding": "octal"},
-			"Key copied", regexp.MustCompile(`^[0-9a-f]{64}$`), ""},
-		{"unknown generator", map[string]string{"generator": "Diceware"}, "Password copied", passgenText(24), ""},
+		{"text symbols on, ambiguous off", with(text, "symbols", "true", "ambiguous", "false", "gen_text_on_off", "Ab1"+passgenSymbols),
+			"Password copied", "Ab1" + passgenSymbols},
+		{"text symbols off", with(text, "symbols", "false", "ambiguous", "false", "gen_text_off_off", "Abc123xyz"),
+			"Password copied", "Abc123xyz"},
+		{"text ambiguous on", with(text, "symbols", "true", "ambiguous", "true", "gen_text_on_on", "Ab2<&>"),
+			"Password copied", "Ab2<&>"},
+		{"text symbols off ambiguous on", with(text, "symbols", "false", "ambiguous", "true", "gen_text_off_on", "Zz23"),
+			"Password copied", "Zz23"},
+		{"text checkboxes absent", with(text, "gen_text_on_off", "dflt$%^"), "Password copied", "dflt$%^"},
+		{"expected key wins over others", with(text, "symbols", "false", "gen_text_off_off", "right", "gen_jwt_256_hex", "wrong"),
+			"Password copied", "right"},
+		{"uuid", map[string]string{"generator": "UUIDv4", "gen_uuid": "0f1e2d3c-4b5a-4968-a776-655443322110"},
+			"UUID copied", "0f1e2d3c-4b5a-4968-a776-655443322110"},
+		{"jwt 512 hex", map[string]string{"generator": "JWT secret", "jwt_bits": "512", "jwt_encoding": "hex", "gen_jwt_512_hex": "abcdef0123"},
+			"JWT secret copied", "abcdef0123"},
+		{"jwt 256 base64", map[string]string{"generator": "JWT secret", "jwt_bits": "256", "jwt_encoding": "base64", "gen_jwt_256_base64": "q+/w=="},
+			"JWT secret copied", "q+/w=="},
+		{"jwt bad bits and encoding default", map[string]string{"generator": "JWT secret", "jwt_bits": "100", "jwt_encoding": "rot13",
+			"gen_jwt_256_base64url": "dflt-_jwt", "gen_jwt_512_hex": "zz"},
+			"JWT secret copied", "dflt-_jwt"},
+		{"key 128 base64url", map[string]string{"generator": "Key", "key_bits": "128", "key_encoding": "base64url", "gen_key_128_base64url": "k-_ey"},
+			"Key copied", "k-_ey"},
+		{"key bad bits and encoding default", map[string]string{"generator": "Key", "key_bits": "1024", "key_encoding": "octal",
+			"gen_key_256_hex": "00ff", "gen_key_512_base64": "zz"},
+			"Key copied", "00ff"},
+		{"unknown generator is a password", map[string]string{"generator": "Diceware", "gen_text_on_off": "fallback1"},
+			"Password copied", "fallback1"},
+		{"fallback scan finds another key", map[string]string{"generator": "Key", "key_bits": "256", "key_encoding": "hex", "gen_key_512_base64": "other+key"},
+			"Key copied", "other+key"},
+		{"empty expected value falls back", map[string]string{"generator": "UUIDv4", "gen_uuid": "", "gen_text_on_off": "x<y"},
+			"UUID copied", "x<y"},
+		{"no generated value", map[string]string{"generator": "Text password", "length": "24"}, "Update banshee to generate", ""},
+		{"only empty generated values", map[string]string{"generator": "UUIDv4", "gen_uuid": ""}, "Update banshee to generate", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			n, value := p.submit(t, tc.values)
 			if n.ID != "passgen:copied" || n.Summary != tc.summary || n.Body != "" || n.TimeoutMS != 3000 {
 				t.Errorf("notify = %+v, want %q with no body", n, tc.summary)
 			}
-			if !tc.want.MatchString(value) {
-				t.Fatalf("copied %q, want %s", value, tc.want)
+			if tc.want == "" {
+				if _, err := os.Stat(filepath.Join(p.logDir, "wl-copy.stdin")); !os.IsNotExist(err) {
+					t.Fatalf("wl-copy ran (stat err %v), want nothing copied", err)
+				}
+				return
 			}
-			if strings.ContainsAny(value, tc.reject) {
-				t.Errorf("copied %q contains one of %q", value, tc.reject)
+			if value != tc.want {
+				t.Fatalf("copied %q, want %q", value, tc.want)
 			}
 			argv := p.wlCopyArgv(t)
 			if !reflect.DeepEqual(argv, []string{"--sensitive"}) {
@@ -272,34 +354,12 @@ func TestPassgenSubmit(t *testing.T) {
 	}
 }
 
-// TestPassgenSymbolCoverage proves tr reads every symbol literally: escaping
-// mistakes ('-' ranges, '[' classes) silently drop or add characters.
-func TestPassgenSymbolCoverage(t *testing.T) {
-	p := startPassgen(t, false)
-	p.query(t, "pass")
-	seen := map[rune]bool{}
-	for i := 0; i < 20; i++ {
-		_, value := p.submit(t, map[string]string{"generator": "Text password", "length": "128"})
-		if !passgenText(128).MatchString(value) {
-			t.Fatalf("copied %q outside the charset", value)
-		}
-		for _, r := range value {
-			seen[r] = true
-		}
-	}
-	for _, r := range passgenSymbols {
-		if !seen[r] {
-			t.Errorf("symbol %q never generated", r)
-		}
-	}
-}
-
 // TestPassgenNoWlCopy proves a missing wl-copy is reported, not fatal.
 func TestPassgenNoWlCopy(t *testing.T) {
 	p := startPassgen(t, true)
 	p.query(t, "pass")
 	for i := 0; i < 2; i++ {
-		n, value := p.submit(t, map[string]string{"generator": "Text password"})
+		n, value := p.submit(t, map[string]string{"generator": "Text password", "gen_text_on_off": "secret"})
 		if n.Summary != "wl-copy not found" || value != "" {
 			t.Fatalf("notify = %+v, copied %q; want wl-copy not found", n, value)
 		}
