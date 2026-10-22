@@ -1,6 +1,7 @@
 package theme
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -45,6 +46,16 @@ func TestGeneratedCSSParses(t *testing.T) {
 		{"drain bar thickness", "min-height: 3px"},
 		{"per-row drain bar thickness", "min-height: 2px"},
 		{"per-row drain bar accent", "background-color: rgba(122,162,247,0.75)"},
+		{"slider trough thickness", "min-height: 6px"},
+		{"slider handle overhangs the trough", "margin-top: -5px"},
+		{"slider fill accent", "background-color: rgba(122,162,247,0.6)"},
+		{"slider focus ring", "box-shadow: 0 0 0 3px rgba(122,162,247,0.3)"},
+		{"checked checkbox accent", "background-color: rgba(122,162,247,0.85)"},
+		{"dropdown list stays transparent", "background-color: rgba(0,0,0,0)"},
+		{"dropdown selected hover tint", "background-color: rgba(122,162,247,0.22)"},
+		{"generated secret is monospace", `font-family: "Adwaita Mono", "JetBrainsMono Nerd Font", "monospace"`},
+		{"generated secret is bold", "font-weight: 700"},
+		{"generated buttons are square", "min-width: 28px"},
 	}
 
 	css := roundTrip(t, config.Default())
@@ -65,8 +76,6 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window entry.query > text > placeholder",
 		"#banshee-window entry.query > text > selection",
 		"#banshee-window entry.form-field",
-		// GTK re-serializes compound class selectors alphabetically, so
-		// entry.form-field.error comes back as entry.error.form-field.
 		"#banshee-window entry.error.form-field",
 		"#banshee-window .form-view",
 		"#banshee-window .form-title",
@@ -78,14 +87,41 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window dropdown.form-field > popover > contents",
 		"#banshee-window dropdown.form-field > popover listview > row",
 		"#banshee-window dropdown.form-field > popover listview > row:selected",
+		"#banshee-window dropdown.form-field > popover listview",
+		"#banshee-window dropdown.form-field > popover scrolledwindow",
+		"#banshee-window dropdown.form-field > popover scrolledwindow > viewport",
+		"#banshee-window dropdown.form-field > popover listview > row:hover",
+		"#banshee-window dropdown.form-field > popover listview > row:selected:hover",
+		"#banshee-window dropdown.form-field > popover > arrow",
 		"#banshee-window button.form-submit",
 		"#banshee-window button.form-back",
 		// GTK serializes pseudo-classes ahead of classes, so
-		// button.form-submit:hover comes back as button:hover.form-submit.
 		"#banshee-window button:focus.form-submit",
 		"#banshee-window button:hover.form-submit",
 		"#banshee-window button:focus.form-back",
 		"#banshee-window button:hover.form-back",
+		"#banshee-window scale.form-field",
+		"#banshee-window scale.form-field > trough",
+		"#banshee-window scale.form-field > trough > highlight",
+		"#banshee-window scale.form-field > trough > slider",
+		"#banshee-window scale.form-field > trough > slider:hover",
+		"#banshee-window scale:focus-within.form-field > trough > slider",
+		"#banshee-window scale.form-field > value",
+		"#banshee-window checkbutton.form-field",
+		"#banshee-window checkbutton.form-field > check",
+		"#banshee-window checkbutton:hover.form-field > check",
+		"#banshee-window checkbutton:focus-within.form-field > check",
+		"#banshee-window checkbutton.form-field > check:checked",
+		"#banshee-window checkbutton.form-field > label",
+		"#banshee-window box.form-generated-row",
+		"#banshee-window label.form-generated",
+		"#banshee-window button.form-generated-toggle",
+		"#banshee-window button.form-generated-reroll",
+		"#banshee-window button:hover.form-generated-toggle",
+		"#banshee-window button:hover.form-generated-reroll",
+		"#banshee-window button:focus.form-generated-toggle",
+		"#banshee-window button:focus.form-generated-reroll",
+		"#banshee-window button:checked.form-generated-toggle",
 		"#banshee-window progressbar.code-timer",
 		"#banshee-window progressbar.code-timer > trough",
 		"#banshee-window progressbar.code-timer > trough > progress",
@@ -105,12 +141,43 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window label.empty",
 	}
 
-	css := roundTrip(t, config.Default())
+	parsed := map[string]bool{}
+	for _, line := range strings.Split(roundTrip(t, config.Default()), "\n") {
+		if sel, ok := strings.CutSuffix(strings.TrimSpace(line), " {"); ok {
+			parsed[canonicalSelector(sel)] = true
+		}
+	}
 	for _, s := range selectors {
-		if !strings.Contains(css, s+" {") {
+		if !parsed[canonicalSelector(s)] {
 			t.Errorf("selector %q did not survive parsing", s)
 		}
 	}
+}
+
+// canonicalSelector sorts the classes and pseudo-classes inside each compound
+// selector. GTK re-serializes them in interned-quark order, which shifts as
+// stylesheets add classes, so only the set within a compound is stable.
+func canonicalSelector(sel string) string {
+	parts := strings.Fields(sel)
+	for i, part := range parts {
+		start := strings.IndexAny(part, ".:")
+		if start < 0 {
+			continue
+		}
+		var tokens []string
+		rest := part[start:]
+		for rest != "" {
+			end := strings.IndexAny(rest[1:], ".:") + 1
+			if end == 0 {
+				end = len(rest)
+			}
+			tokens = append(tokens, rest[:end])
+			rest = rest[end:]
+		}
+		sort.Strings(tokens)
+		parts[i] = part[:start] + strings.Join(tokens, "")
+	}
+	return strings.Join(parts, " ")
 }
 
 func TestGeneratedCSSParsesForEveryConfig(t *testing.T) {

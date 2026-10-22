@@ -1,7 +1,12 @@
 package ui
 
 import (
+	"log"
+	"strconv"
+	"unicode/utf8"
+
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 
 	"github.com/jourdanhaines/banshee/internal/providers"
 )
@@ -16,16 +21,26 @@ type formView struct {
 	res  providers.Result
 	form providers.Form
 
+	// page is the outer widget the launcher mounts; it scrolls root so a tall
+	// form (a revealed long secret) never grows the fixed-height panel.
+	page   *gtk.ScrolledWindow
 	root   *gtk.Box
 	inputs []formInput // parallel to form.Fields
+	// rows hold each field's label and widget, parallel to inputs, so a
+	// field hidden by its ShowWhen conditions disappears as one unit.
+	rows []*gtk.Box
+	// generated lists the generated inputs, re-rolled on every refresh.
+	generated []*generatedInput
+	// accent is the theme accent hex that colours digits in secret markup.
+	accent string
 
 	// submit and back exist only when form.SubmitLabel is set.
 	submit, back *gtk.Button
 }
 
 // formInput is one field's widget, seen only through what the form actually
-// asks of it. It exists so a field can be a text entry or a fixed-choice
-// dropdown without values/focusFirst/markError growing a type switch, and it
+// asks of it. It exists so a field can be an entry, dropdown, slider or
+// checkbox without values/focusFirst/markError growing a type switch, and it
 // keeps the inputs slice index-parallel to form.Fields — which is the contract
 // FirstMissingRequired's returned index relies on.
 type formInput interface {
@@ -35,6 +50,8 @@ type formInput interface {
 	markError()
 	// grabFocus puts the keyboard on the field.
 	grabFocus()
+	// onChange registers f to run whenever the field's value changes.
+	onChange(f func())
 }
 
 // entryInput is a free-text field, masked when the FormField is Secret.
@@ -48,6 +65,8 @@ func (i *entryInput) markError() {
 }
 
 func (i *entryInput) grabFocus() { i.e.GrabFocus() }
+
+func (i *entryInput) onChange(f func()) { i.e.ConnectChanged(f) }
 
 // dropdownInput is a fixed-choice field (FormField.Options). The option
 // strings are kept alongside the widget because GtkDropDown reports a
@@ -76,12 +95,116 @@ func (i *dropdownInput) markError() {}
 
 func (i *dropdownInput) grabFocus() { i.d.GrabFocus() }
 
-// newFormView builds the widget tree for res.Form. res.Form must be non-nil.
-func newFormView(res providers.Result) *formView {
-	v := &formView{res: res, form: *res.Form}
+func (i *dropdownInput) onChange(f func()) { i.d.NotifyProperty("selected", f) }
+
+// sliderInput is an integer range field (FormField.Slider). spec is the
+// normalized spec, kept so every read snaps to the same grid the field
+// declared.
+type sliderInput struct {
+	s    *gtk.Scale
+	spec providers.SliderSpec
+}
+
+func (i *sliderInput) value() string {
+	return strconv.Itoa(SnapSlider(i.spec, i.s.Value()))
+}
+
+// markError does nothing: a slider always holds a value in range.
+func (i *sliderInput) markError() {}
+
+func (i *sliderInput) grabFocus() { i.s.GrabFocus() }
+
+func (i *sliderInput) onChange(f func()) { i.s.ConnectValueChanged(f) }
+
+// checkboxInput is a boolean field (FormField.Checkbox) submitting "true" or
+// "false". The check button carries the field label itself, so clicking the
+// label toggles it.
+type checkboxInput struct{ c *gtk.CheckButton }
+
+func (i *checkboxInput) value() string { return strconv.FormatBool(i.c.Active()) }
+
+// markError does nothing: both states of a checkbox are valid.
+func (i *checkboxInput) markError() {}
+
+func (i *checkboxInput) grabFocus() { i.c.GrabFocus() }
+
+func (i *checkboxInput) onChange(f func()) { i.c.ConnectToggled(f) }
+
+// generatedInput is a FormField.Generate field: a read-only box holding a
+// banshee-generated secret, shown with a random quarter of its runes obscured
+// until the eye toggle reveals it, with a re-roll button. The value is secret material and is never logged.
+type generatedInput struct {
+	key      string
+	label    *gtk.Label
+	eye      *gtk.ToggleButton
+	reroll   *gtk.Button
+	spec     providers.GenerateSpec
+	current  string
+	mask     []bool // obscured positions; kept across reveal toggles
+	revealed bool
+	accent   string
+}
+
+func (i *generatedInput) value() string { return i.current }
+
+// markError does nothing: a generated field always holds a value.
+func (i *generatedInput) markError() {}
+
+func (i *generatedInput) grabFocus() { i.eye.GrabFocus() }
+
+// onChange hooks only the re-roll button: toggling reveal changes the display,
+// never the value, so it must not re-roll this or any other field.
+func (i *generatedInput) onChange(f func()) { i.reroll.ConnectClicked(f) }
+
+// regenerate draws a fresh value for the current form values and redraws it.
+func (i *generatedInput) regenerate(values map[string]string) {
+	v, err := GenerateValue(i.spec, values)
+	if err != nil {
+		log.Printf("ui: generating form field %q failed: %v", i.key, err)
+		v = ""
+	}
+	i.current = v
+	i.mask = ObscureMask(utf8.RuneCountInString(v), nil)
+	i.render()
+}
+
+// render draws the value obscured or in full per the reveal state. Both
+// states are full length, so both wrap per character: a secret has no word
+// boundaries.
+func (i *generatedInput) render() {
+	text := ObscureSecret(i.current, i.mask)
+	if i.revealed {
+		text = i.current
+	}
+	i.label.SetMarkup(SecretMarkup(text, i.accent))
+	if i.revealed {
+		i.eye.SetIconName("view-conceal-symbolic")
+		i.eye.SetTooltipText("Hide")
+	} else {
+		i.eye.SetIconName("view-reveal-symbolic")
+		i.eye.SetTooltipText("Reveal")
+	}
+}
+
+// newFormView builds the widget tree for res.Form, colouring generated
+// secrets with accent. res.Form must be non-nil.
+//
+// With SubmitLabel set, Enter goes to GTK: a focused check button may toggle
+// and a scale ignores it, so only the button submits. Without it, Enter
+// submits from any field and Space toggles a checkbox.
+func newFormView(res providers.Result, accent string) *formView {
+	v := &formView{res: res, form: *res.Form, accent: accent}
 
 	v.root = gtk.NewBox(gtk.OrientationVertical, 0)
 	v.root.AddCSSClass("form-view")
+
+	// Not propagating natural height keeps the page's size request small, so
+	// the homogeneous stack still takes its height from the results page.
+	v.page = gtk.NewScrolledWindow()
+	v.page.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
+	v.page.SetPropagateNaturalHeight(false)
+	v.page.SetVExpand(true)
+	v.page.SetChild(v.root)
 
 	title := gtk.NewLabel(v.form.Title)
 	title.AddCSSClass("form-title")
@@ -90,20 +213,40 @@ func newFormView(res providers.Result) *formView {
 	v.root.Append(title)
 
 	for _, f := range v.form.Fields {
-		label := gtk.NewLabel(f.Label)
-		label.AddCSSClass("form-label")
-		label.SetXAlign(0)
-		v.root.Append(label)
+		row := gtk.NewBox(gtk.OrientationVertical, 0)
+		row.AddCSSClass("form-row")
+		v.root.Append(row)
+		v.rows = append(v.rows, row)
 
-		// Non-emptiness, not nil-ness, is the contract: a plugin may legally
-		// send "options": [], which decodes to an empty non-nil slice and must
-		// still render as free text.
-		if len(f.Options) > 0 {
-			v.addDropdown(f)
-			continue
+		kind := KindOf(f)
+		if kind != KindCheckbox && f.Label != "" {
+			// A checkbox labels itself; a separate label would not toggle it.
+			label := gtk.NewLabel(f.Label)
+			label.AddCSSClass("form-label")
+			label.SetXAlign(0)
+			row.Append(label)
 		}
-		v.addEntry(f)
+
+		switch kind {
+		case KindDropdown:
+			v.addDropdown(row, f)
+		case KindSlider:
+			v.addSlider(row, f)
+		case KindCheckbox:
+			v.addCheckbox(row, f)
+		case KindGenerated:
+			v.addGenerated(row, f)
+		default:
+			v.addEntry(row, f)
+		}
 	}
+
+	// Connected only now: construction-time SetValue/SetActive would fire
+	// refresh while rows and inputs are still incomplete.
+	for _, in := range v.inputs {
+		in.onChange(v.refresh)
+	}
+	v.refresh()
 
 	if v.form.SubmitLabel != "" {
 		v.addButtons()
@@ -116,6 +259,21 @@ func newFormView(res providers.Result) *formView {
 	v.root.Append(hint)
 
 	return v
+}
+
+// refresh shows exactly the rows whose ShowWhen conditions all hold for the
+// current values, then re-rolls every generated field so its value always
+// matches the options it was drawn from. Hiding rows never resizes the panel:
+// the form page scrolls inside the homogeneous stack.
+func (v *formView) refresh() {
+	vals := TrimValues(v.values())
+	vis := Visible(v.form.Fields, vals)
+	for i, row := range v.rows {
+		row.SetVisible(vis[i])
+	}
+	for _, g := range v.generated {
+		g.regenerate(vals)
+	}
 }
 
 // addButtons appends the submit button and the Back button below the fields.
@@ -142,8 +300,8 @@ func (v *formView) connectButtons(onSubmit, onBack func()) {
 	}
 }
 
-// addEntry appends f's text entry to the form and registers it as an input.
-func (v *formView) addEntry(f providers.FormField) {
+// addEntry appends f's text entry to row and registers it as an input.
+func (v *formView) addEntry(row *gtk.Box, f providers.FormField) {
 	entry := gtk.NewEntry()
 	entry.AddCSSClass("form-field")
 	entry.SetPlaceholderText(f.Placeholder)
@@ -158,21 +316,95 @@ func (v *formView) addEntry(f providers.FormField) {
 	}
 	// Typing clears a validation error the moment the field changes.
 	entry.ConnectChanged(func() { entry.RemoveCSSClass("error") })
-	v.root.Append(entry)
+	row.Append(entry)
 	v.inputs = append(v.inputs, &entryInput{e: entry})
 }
 
-// addDropdown appends f's fixed-choice dropdown to the form and registers it as
-// an input. GtkDropDown preselects index 0, which is the contract's "first
+// addDropdown appends f's fixed-choice dropdown to row and registers it as an
+// input. GtkDropDown preselects index 0, which is the contract's "first
 // option preselected".
-func (v *formView) addDropdown(f providers.FormField) {
+func (v *formView) addDropdown(row *gtk.Box, f providers.FormField) {
 	opts := make([]string, len(f.Options))
 	copy(opts, f.Options) // the field is the provider's; the widget outlives the query
 	d := gtk.NewDropDownFromStrings(opts)
 	d.AddCSSClass("form-field")
 	d.SetHExpand(true)
-	v.root.Append(d)
+	row.Append(d)
 	v.inputs = append(v.inputs, &dropdownInput{d: d, options: opts})
+}
+
+// addSlider appends f's integer slider to row and registers it as an input.
+// KindOf has already rejected a spec with no range.
+func (v *formView) addSlider(row *gtk.Box, f providers.FormField) {
+	spec, _ := NormalizeSlider(*f.Slider)
+	s := gtk.NewScaleWithRange(gtk.OrientationHorizontal,
+		float64(spec.Min), float64(spec.Max), float64(spec.Step))
+	s.SetDrawValue(true)
+	s.SetDigits(0)
+	s.SetValuePos(gtk.PosRight)
+	s.SetHExpand(true)
+	s.SetValue(float64(spec.Default))
+	s.AddCSSClass("form-field")
+	// GtkRange does not snap to its step while dragging, so the handle is
+	// pulled back onto the grid; the re-entrant SetValue settles in one round.
+	s.ConnectValueChanged(func() {
+		if snapped := float64(SnapSlider(spec, s.Value())); snapped != s.Value() {
+			s.SetValue(snapped)
+		}
+	})
+	row.Append(s)
+	v.inputs = append(v.inputs, &sliderInput{s: s, spec: spec})
+}
+
+// addCheckbox appends f's check button, labelled with f.Label, to row and
+// registers it as an input.
+func (v *formView) addCheckbox(row *gtk.Box, f providers.FormField) {
+	c := gtk.NewCheckButtonWithLabel(f.Label)
+	c.SetActive(f.Checked)
+	c.AddCSSClass("form-field")
+	row.Append(c)
+	v.inputs = append(v.inputs, &checkboxInput{c: c})
+}
+
+// addGenerated appends f's generated-secret box, reveal toggle and re-roll
+// button to row and registers it as an input. Its first value is drawn by the
+// construction-time refresh, once every option field exists.
+func (v *formView) addGenerated(row *gtk.Box, f providers.FormField) {
+	box := gtk.NewBox(gtk.OrientationHorizontal, 0)
+	box.AddCSSClass("form-generated-row")
+
+	label := gtk.NewLabel("")
+	label.AddCSSClass("form-generated")
+	label.SetUseMarkup(true)
+	label.SetXAlign(0.5)
+	label.SetJustify(gtk.JustifyCenter)
+	label.SetHAlign(gtk.AlignFill)
+	label.SetHExpand(true)
+	label.SetCanFocus(false)
+	label.SetSelectable(false)
+	label.SetWrap(true)
+	label.SetWrapMode(pango.WrapChar)
+	box.Append(label)
+
+	eye := gtk.NewToggleButton()
+	eye.SetIconName("view-reveal-symbolic")
+	eye.AddCSSClass("form-generated-toggle")
+	box.Append(eye)
+
+	reroll := gtk.NewButtonFromIconName("view-refresh-symbolic")
+	reroll.AddCSSClass("form-generated-reroll")
+	reroll.SetTooltipText("Generate again")
+	box.Append(reroll)
+
+	row.Append(box)
+	in := &generatedInput{key: f.Key, label: label, eye: eye, reroll: reroll, spec: *f.Generate, accent: v.accent}
+	eye.ConnectToggled(func() {
+		in.revealed = eye.Active()
+		in.render()
+	})
+	in.render()
+	v.inputs = append(v.inputs, in)
+	v.generated = append(v.generated, in)
 }
 
 // values returns the current field values keyed by FormField.Key.
@@ -184,10 +416,13 @@ func (v *formView) values() map[string]string {
 	return out
 }
 
-// focusFirst puts the keyboard on the first field.
+// focusFirst puts the keyboard on the first visible field.
 func (v *formView) focusFirst() {
-	if len(v.inputs) > 0 {
-		v.inputs[0].grabFocus()
+	for i, in := range v.inputs {
+		if v.rows[i].Visible() {
+			in.grabFocus()
+			return
+		}
 	}
 }
 

@@ -230,6 +230,105 @@ window#banshee-window {
 	color: #f2f5fb;
 }
 
+/* GTK's light Default theme paints the list's scroller, viewport and listview
+   white; clearing them lets the dark popover contents show through. */
+#banshee-window dropdown.form-field > popover scrolledwindow,
+#banshee-window dropdown.form-field > popover scrolledwindow > viewport,
+#banshee-window dropdown.form-field > popover listview {
+	background-color: transparent;
+}
+
+#banshee-window dropdown.form-field > popover listview > row:hover {
+	background-color: rgba(255, 255, 255, 0.045);
+}
+
+#banshee-window dropdown.form-field > popover listview > row:selected:hover {
+	background-color: {{ alpha .AccentRGB 0.22 }};
+}
+
+#banshee-window dropdown.form-field > popover > arrow {
+	background-color: rgba({{ .PanelRGB }}, 0.98);
+	border-color: {{ alpha .AccentRGB 0.35 }};
+}
+
+/* Integer slider form field (FormField.Slider): a thin accent-filled trough
+   with a light round handle and the value drawn to its right. */
+#banshee-window scale.form-field {
+	margin-bottom: 8px;
+	padding: 6px 2px;
+}
+
+#banshee-window scale.form-field > trough {
+	min-height: 6px;
+	border: none;
+	border-radius: 3px;
+	background-image: none;
+	background-color: rgba(255, 255, 255, 0.08);
+}
+
+#banshee-window scale.form-field > trough > highlight {
+	border-radius: 3px;
+	background-image: none;
+	background-color: {{ alpha .AccentRGB 0.6 }};
+}
+
+#banshee-window scale.form-field > trough > slider {
+	min-width: 16px;
+	min-height: 16px;
+	margin: -5px;
+	border-radius: 8px;
+	border: 1px solid {{ alpha .AccentRGB 0.8 }};
+	background-image: none;
+	background-color: #e6e9f0;
+	box-shadow: none;
+}
+
+#banshee-window scale.form-field > trough > slider:hover,
+#banshee-window scale.form-field:focus-within > trough > slider {
+	background-color: #ffffff;
+	box-shadow: 0 0 0 3px {{ alpha .AccentRGB 0.3 }};
+}
+
+#banshee-window scale.form-field > value {
+	color: #e6e9f0;
+	font-size: 14px;
+	min-width: 32px;
+}
+
+/* Boolean form field (FormField.Checkbox); the button carries its own label. */
+#banshee-window checkbutton.form-field {
+	margin-bottom: 8px;
+	padding: 4px 2px;
+	color: #e6e9f0;
+	font-size: 15px;
+}
+
+#banshee-window checkbutton.form-field > check {
+	min-width: 16px;
+	min-height: 16px;
+	margin-right: 8px;
+	border-radius: 5px;
+	border: 1px solid {{ alpha .AccentRGB 0.35 }};
+	background-image: none;
+	background-color: rgba(255, 255, 255, 0.04);
+	box-shadow: none;
+}
+
+#banshee-window checkbutton.form-field:hover > check,
+#banshee-window checkbutton.form-field:focus-within > check {
+	border-color: {{ alpha .AccentRGB 0.7 }};
+}
+
+#banshee-window checkbutton.form-field > check:checked {
+	background-color: {{ alpha .AccentRGB 0.85 }};
+	border-color: {{ .Accent }};
+	color: #11131b;
+}
+
+#banshee-window checkbutton.form-field > label {
+	color: #e6e9f0;
+}
+
 /* Dedicated form buttons (Form.SubmitLabel), styled like the dropdown button:
    submit carries the accent, Back stays subtle. */
 #banshee-window button.form-submit,
@@ -268,6 +367,50 @@ window#banshee-window {
 	background-color: rgba(255, 255, 255, 0.06);
 	border-color: {{ alpha .AccentRGB 0.6 }};
 	color: #e6e9f0;
+}
+
+/* Generated secret (FormField.Generate): a monospace entry-like box with the
+   reveal toggle and re-roll button beside it. */
+#banshee-window box.form-generated-row {
+	margin-bottom: 8px;
+}
+
+#banshee-window label.form-generated {
+	padding: 8px 10px;
+	border-radius: 8px;
+	border: 1px solid {{ alpha .AccentRGB 0.35 }};
+	background-color: rgba(255, 255, 255, 0.04);
+	/* JetBrains Mono clipped glyph tops on the user's display, so Adwaita Mono is preferred. */
+	font-family: "Adwaita Mono", "JetBrainsMono Nerd Font", monospace;
+	font-weight: 700;
+	font-size: 15px;
+	color: #e6e9f0;
+}
+
+#banshee-window button.form-generated-toggle,
+#banshee-window button.form-generated-reroll {
+	min-width: 28px;
+	min-height: 28px;
+	margin-left: 6px;
+	padding: 0 6px;
+	border-radius: 8px;
+	border: 1px solid {{ alpha .AccentRGB 0.35 }};
+	background-image: none;
+	background-color: rgba(255, 255, 255, 0.04);
+	color: #dfe4ee;
+	box-shadow: none;
+}
+
+#banshee-window button.form-generated-toggle:hover,
+#banshee-window button.form-generated-reroll:hover,
+#banshee-window button.form-generated-toggle:focus,
+#banshee-window button.form-generated-reroll:focus {
+	border-color: {{ alpha .AccentRGB 0.7 }};
+}
+
+#banshee-window button.form-generated-toggle:checked {
+	background-color: {{ alpha .AccentRGB 0.22 }};
+	border-color: {{ .Accent }};
 }
 
 /* Results list */

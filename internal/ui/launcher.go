@@ -463,13 +463,13 @@ func (l *Launcher) openForm(res providers.Result) {
 	if l.stack == nil || res.Form == nil {
 		return
 	}
-	l.form = newFormView(res)
+	l.form = newFormView(res, theme.ParamsFor(l.cfg).Accent)
 	l.form.connectButtons(l.submitForm, func() { l.closeForm(true) })
 
 	for c := l.formBox.FirstChild(); c != nil; c = l.formBox.FirstChild() {
 		l.formBox.Remove(c)
 	}
-	l.formBox.Append(l.form.root)
+	l.formBox.Append(l.form.page)
 
 	l.stack.SetTransitionType(gtk.StackTransitionTypeSlideLeft)
 	l.stack.SetVisibleChildName("form")
@@ -526,12 +526,13 @@ func (l *Launcher) submitForm() {
 	if l.form == nil {
 		return
 	}
-	values := TrimValues(l.form.values())
-	if i, ok := FirstMissingRequired(l.form.form.Fields, values); !ok {
+	all := TrimValues(l.form.values())
+	if i, ok := FirstMissingRequired(l.form.form.Fields, all); !ok {
 		l.form.markError(i)
 		return
 	}
 	res, form := l.form.res, l.form.form
+	values := VisibleValues(form.Fields, all)
 
 	l.Hide() // also resets the stack to the results view
 

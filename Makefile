@@ -67,9 +67,9 @@ RACE_PKGS = $$($(GO) list ./... | grep -v '/internal/theme$$')
 test-race:
 	$(GO) test -race $(RACE_PKGS)
 
-## smoke — the GTK smoke test. Needs a live Wayland/X session; not part of `test`.
+## smoke — the GTK smoke tests. Needs a live Wayland/X session; not part of `test`.
 smoke:
-	$(GO) test -tags gtksmoke -run Smoke ./internal/daemon
+	$(GO) test -tags gtksmoke -run Smoke ./internal/daemon ./internal/ui
 
 ## fmt — rewrite every file with gofmt.
 fmt:
@@ -152,6 +152,14 @@ install-plugins:
 		install -m 0755 plugins/screenrec/plugin.sh     $(CONFIGDIR)/plugins/screenrec/plugin.sh; \
 		install -m 0644 plugins/screenrec/config        $(CONFIGDIR)/plugins/screenrec/config; \
 		echo "installed screenrec plugin to $(CONFIGDIR)/plugins/screenrec"; \
+	fi
+	@if [ -d $(CONFIGDIR)/plugins/passgen ]; then \
+		echo "keeping existing $(CONFIGDIR)/plugins/passgen"; \
+	else \
+		mkdir -p $(CONFIGDIR)/plugins/passgen; \
+		install -m 0644 plugins/passgen/manifest.json $(CONFIGDIR)/plugins/passgen/manifest.json; \
+		install -m 0755 plugins/passgen/plugin.sh     $(CONFIGDIR)/plugins/passgen/plugin.sh; \
+		echo "installed passgen plugin to $(CONFIGDIR)/plugins/passgen"; \
 	fi
 
 uninstall:
