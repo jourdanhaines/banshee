@@ -1,9 +1,15 @@
 package ui
 
 import (
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"maps"
+	"regexp"
 	"slices"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/jourdanhaines/banshee/internal/providers"
 )
@@ -365,6 +371,314 @@ func TestVisibleValues(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := VisibleValues(tt.fields, tt.values); !maps.Equal(got, tt.want) {
 				t.Errorf("VisibleValues = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGenerateLength(t *testing.T) {
+	tests := []struct {
+		name   string
+		spec   providers.GenerateSpec
+		values map[string]string
+		want   int
+	}{
+		{"length_from parses", providers.GenerateSpec{LengthFrom: "len", Length: 10}, map[string]string{"len": "24"}, 24},
+		{"length_from trims", providers.GenerateSpec{LengthFrom: "len"}, map[string]string{"len": " 32 "}, 32},
+		{"non-int falls back to length", providers.GenerateSpec{LengthFrom: "len", Length: 10}, map[string]string{"len": "abc"}, 10},
+		{"zero falls back to length", providers.GenerateSpec{LengthFrom: "len", Length: 10}, map[string]string{"len": "0"}, 10},
+		{"negative falls back to length", providers.GenerateSpec{LengthFrom: "len", Length: 10}, map[string]string{"len": "-5"}, 10},
+		{"missing key falls back to length", providers.GenerateSpec{LengthFrom: "len", Length: 10}, nil, 10},
+		{"nothing set defaults to 16", providers.GenerateSpec{}, nil, 16},
+		{"non-int with no length defaults to 16", providers.GenerateSpec{LengthFrom: "len"}, map[string]string{"len": "x"}, 16},
+		{"negative length defaults to 16", providers.GenerateSpec{Length: -3}, nil, 16},
+		{"minimum of 1 kept", providers.GenerateSpec{LengthFrom: "len"}, map[string]string{"len": "1"}, 1},
+		{"length_from clamps to 256", providers.GenerateSpec{LengthFrom: "len"}, map[string]string{"len": "1000"}, 256},
+		{"length clamps to 256", providers.GenerateSpec{Length: 257}, nil, 256},
+		{"256 kept", providers.GenerateSpec{Length: 256}, nil, 256},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GenerateLength(tt.spec, tt.values); got != tt.want {
+				t.Errorf("GenerateLength = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// mustGenerate is GenerateValue failing the test on a reader error.
+func mustGenerate(t *testing.T, spec providers.GenerateSpec, values map[string]string) string {
+	t.Helper()
+	v, err := GenerateValue(spec, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+func TestGenerateValuePattern(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		charset string
+		want    *regexp.Regexp
+	}{
+		{"x picks from charset", "x", "ab", regexp.MustCompile(`^[ab]$`)},
+		{"bracket set picks from its runes", "[89ab]", "z", regexp.MustCompile(`^[89ab]$`)},
+		{"escaped x is literal", `\x`, "ab", regexp.MustCompile(`^x$`)},
+		{"escaped bracket is literal", `\[x]`, "a", regexp.MustCompile(`^\[a\]$`)},
+		{"trailing backslash is literal", `x\`, "a", regexp.MustCompile(`^a\\$`)},
+		{"unterminated bracket is literal", "[ab", "z", regexp.MustCompile(`^\[ab$`)},
+		{"empty set is literal", "[]x", "z", regexp.MustCompile(`^\[\]z$`)},
+		{"mixed literals", "id-xx_[7]!", "q", regexp.MustCompile(`^id-qq_7!$`)},
+		{"multibyte set and literal", "é[αβ]x", "γ", regexp.MustCompile(`^é[αβ]γ$`)},
+		{
+			"uuid v4 pattern",
+			"xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx", "0123456789abcdef",
+			regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for range 20 {
+				got := mustGenerate(t, providers.GenerateSpec{Pattern: tt.pattern, Charset: tt.charset, Length: 99}, nil)
+				if !tt.want.MatchString(got) {
+					t.Fatalf("GenerateValue(%q) = %q, want match %s", tt.pattern, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateValueBytes(t *testing.T) {
+	tests := []struct {
+		name     string
+		bytes    int
+		encoding string
+		wantLen  int
+		suffix   string
+		decode   func(string) ([]byte, error)
+	}{
+		{"hex 16", 16, "hex", 32, "", hex.DecodeString},
+		{"hex 32", 32, "hex", 64, "", hex.DecodeString},
+		{"unknown encoding is hex", 16, "rot13", 32, "", hex.DecodeString},
+		{"empty encoding is hex", 8, "", 16, "", hex.DecodeString},
+		{"base64 16", 16, "base64", 24, "==", base64.StdEncoding.DecodeString},
+		{"base64 32", 32, "base64", 44, "=", base64.StdEncoding.DecodeString},
+		{"base64 64", 64, "base64", 88, "==", base64.StdEncoding.DecodeString},
+		{"base64url 16", 16, "base64url", 22, "", base64.RawURLEncoding.DecodeString},
+		{"base64url 32", 32, "base64url", 43, "", base64.RawURLEncoding.DecodeString},
+		{"base64url 64", 64, "base64url", 86, "", base64.RawURLEncoding.DecodeString},
+		{"bytes cap at 256", 1000, "hex", 512, "", hex.DecodeString},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Bytes wins over a pattern and charset set alongside it.
+			spec := providers.GenerateSpec{Bytes: tt.bytes, Encoding: tt.encoding, Pattern: "x", Charset: "a"}
+			got := mustGenerate(t, spec, nil)
+			if len(got) != tt.wantLen {
+				t.Fatalf("len = %d, want %d (%q)", len(got), tt.wantLen, got)
+			}
+			if tt.suffix != "" && !strings.HasSuffix(got, tt.suffix) {
+				t.Errorf("%q lacks padding %q", got, tt.suffix)
+			}
+			if tt.encoding == "base64url" && strings.ContainsAny(got, "+/=") {
+				t.Errorf("%q is not raw base64url", got)
+			}
+			raw, err := tt.decode(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(raw) != min(tt.bytes, 256) {
+				t.Errorf("decoded %d bytes, want %d", len(raw), min(tt.bytes, 256))
+			}
+		})
+	}
+}
+
+// passgenSymbolCharset is a full password alphabet: alnum plus every symbol
+// a text password may draw from.
+const passgenSymbolCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{};:,.<>?/"
+
+func TestGenerateValueCharset(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"picks stay in the charset", func(t *testing.T) {
+			got := mustGenerate(t, providers.GenerateSpec{Charset: "abc€", Length: 200}, nil)
+			if n := utf8.RuneCountInString(got); n != 200 {
+				t.Fatalf("rune count = %d, want 200", n)
+			}
+			for _, r := range got {
+				if !strings.ContainsRune("abc€", r) {
+					t.Fatalf("rune %q outside charset", r)
+				}
+			}
+		}},
+		{"every charset rune appears", func(t *testing.T) {
+			// Proves the charset is iterated as runes with nothing dropped:
+			// 88 runes over up to 20 rolls of 256 picks.
+			missing := map[rune]bool{}
+			for _, r := range passgenSymbolCharset {
+				missing[r] = true
+			}
+			for roll := 0; roll < 20 && len(missing) > 0; roll++ {
+				for _, r := range mustGenerate(t, providers.GenerateSpec{Charset: passgenSymbolCharset, Length: 256}, nil) {
+					delete(missing, r)
+				}
+			}
+			if len(missing) > 0 {
+				t.Errorf("never generated %q", slices.Collect(maps.Keys(missing)))
+			}
+		}},
+		{"length_from sets the count", func(t *testing.T) {
+			got := mustGenerate(t, providers.GenerateSpec{Charset: "ab", LengthFrom: "len"}, map[string]string{"len": "40"})
+			if len(got) != 40 {
+				t.Errorf("len = %d, want 40", len(got))
+			}
+		}},
+		{"two rolls differ", func(t *testing.T) {
+			spec := providers.GenerateSpec{Charset: passgenSymbolCharset, Length: 32}
+			if a, b := mustGenerate(t, spec, nil), mustGenerate(t, spec, nil); a == b {
+				t.Errorf("two rolls both %q", a)
+			}
+		}},
+		{"empty charset generates nothing", func(t *testing.T) {
+			for _, spec := range []providers.GenerateSpec{{Length: 8}, {Pattern: "xx-[ab]"}} {
+				if got := mustGenerate(t, spec, nil); got != "" {
+					t.Errorf("GenerateValue(%+v) = %q, want empty", spec, got)
+				}
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+// errExhausted is failReader's error once it runs dry.
+var errExhausted = errors.New("entropy exhausted")
+
+// failReader is an entropy source that runs dry after n bytes.
+type failReader struct{ n int }
+
+func (f *failReader) Read(p []byte) (int, error) {
+	if f.n <= 0 {
+		return 0, errExhausted
+	}
+	k := min(len(p), f.n)
+	for i := range k {
+		p[i] = 'A'
+	}
+	f.n -= k
+	return k, nil
+}
+
+func TestGenerateValueReaderFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		spec providers.GenerateSpec
+	}{
+		{"bytes", providers.GenerateSpec{Bytes: 32}},
+		{"charset", providers.GenerateSpec{Charset: "abcdefgh", Length: 64}},
+		{"pattern", providers.GenerateSpec{Charset: "abcdefgh", Pattern: "xxxxxxxx-[xy]xxxxxxx"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := generateValue(&failReader{n: 8}, tt.spec, nil)
+			if err == nil {
+				t.Fatalf("err = nil, value %q", got)
+			}
+			if got != "" {
+				t.Errorf("value = %q, want empty on failure", got)
+			}
+			// The message is fixed text around the reader's error, so it
+			// cannot carry any of the runes picked before the failure.
+			msg := strings.TrimSuffix(err.Error(), ": "+errExhausted.Error())
+			if !errors.Is(err, errExhausted) || (msg != "generate: read random bytes" && msg != "generate: pick random rune") {
+				t.Errorf("error %q is not the fixed failure text", err)
+			}
+		})
+	}
+}
+
+func TestElideSecret(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"24 runes kept", "abcdefghijklmnopqrstuvwx", "abcdefghijklmnopqrstuvwx"},
+		{"25 runes elided", "abcdefghijklmnopqrstuvwxy", "abcdefgh••••••rstuvwxy"},
+		{"24 multibyte runes kept", strings.Repeat("é", 24), strings.Repeat("é", 24)},
+		{"25 multibyte runes elided on rune boundaries", "αβγδεζηθ" + strings.Repeat("é", 9) + "ικλμνξοπ", "αβγδεζηθ••••••ικλμνξοπ"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ElideSecret(tt.in); got != tt.want {
+				t.Errorf("ElideSecret = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyRune(t *testing.T) {
+	tests := []struct {
+		name string
+		r    rune
+		want RuneClass
+	}{
+		{"ascii upper", 'Q', RuneAlpha},
+		{"ascii lower", 'l', RuneAlpha},
+		{"non-ascii letter", 'é', RuneAlpha},
+		{"digit", '0', RuneDigit},
+		{"bullet", '•', RuneBullet},
+		{"pipe", '|', RuneSymbol},
+		{"dash", '-', RuneSymbol},
+		{"angle", '<', RuneSymbol},
+		{"space", ' ', RuneSymbol},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClassifyRune(tt.r); got != tt.want {
+				t.Errorf("ClassifyRune(%q) = %v, want %v", tt.r, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSecretMarkup(t *testing.T) {
+	span := func(colour, text string) string {
+		return `<span foreground="` + colour + `">` + text + `</span>`
+	}
+	const accent = "#7aa2f7"
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"runs merge by class", "ab12", span(SecretAlphaColor, "ab") + span(accent, "12")},
+		{
+			"each class change opens a span",
+			"aB9-x•",
+			span(SecretAlphaColor, "aB") + span(accent, "9") + span(SecretSymbolColor, "-") +
+				span(SecretAlphaColor, "x") + span(SecretBulletColor, "•"),
+		},
+		{"markup characters are escaped", "<&>", span(SecretSymbolColor, "&lt;&amp;&gt;")},
+		{
+			"elided value",
+			ElideSecret("abcdefgh01234567xyz89abcdef"),
+			span(SecretAlphaColor, "abcdefgh") + span(SecretBulletColor, "••••••") +
+				span(accent, "89") + span(SecretAlphaColor, "abcdef"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SecretMarkup(tt.in, accent); got != tt.want {
+				t.Errorf("SecretMarkup = %q, want %q", got, tt.want)
 			}
 		})
 	}

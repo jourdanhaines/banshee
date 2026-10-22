@@ -174,8 +174,9 @@ type SliderSpec struct {
 
 // GenerateSpec describes how the launcher generates a FormField.Generate
 // value, resolved in order:
-//   - Bytes > 0: Bytes random bytes encoded per Encoding: "hex", "base64"
-//     (standard, padded) or "base64url" (raw, unpadded); unknown means hex.
+//   - Bytes > 0: Bytes (capped at 256) random bytes encoded per Encoding:
+//     "hex", "base64" (standard, padded) or "base64url" (raw, unpadded);
+//     unknown means hex.
 //   - Pattern != "": each rune expands by a small grammar — `x` picks from
 //     Charset, `[abc]` picks from the bracketed runes, `\` escapes the next
 //     rune, anything else is literal.

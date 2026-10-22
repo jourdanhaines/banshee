@@ -1,9 +1,17 @@
 package ui
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+	"io"
 	"math"
+	"math/big"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/jourdanhaines/banshee/internal/providers"
 )
@@ -140,4 +148,189 @@ func FirstMissingRequired(fields []providers.FormField, values map[string]string
 // opens and commits its list and only the button submits.
 func EnterSubmits(form providers.Form) bool {
 	return form.SubmitLabel == ""
+}
+
+// Generation bounds: a pick-based value defaults to defaultGenerateLength and
+// never exceeds maxGenerateLength runes; Bytes is capped the same way so a
+// plugin cannot make the launcher allocate without limit.
+const (
+	defaultGenerateLength = 16
+	maxGenerateLength     = 256
+)
+
+// GenerateLength is the pick count for a charset-only spec: the positive
+// integer value of the LengthFrom field, else Length, else 16, clamped to
+// 1..256. Pattern and Bytes specs ignore it.
+func GenerateLength(spec providers.GenerateSpec, values map[string]string) int {
+	n := 0
+	if spec.LengthFrom != "" {
+		if v, err := strconv.Atoi(strings.TrimSpace(values[spec.LengthFrom])); err == nil && v > 0 {
+			n = v
+		}
+	}
+	if n == 0 && spec.Length > 0 {
+		n = spec.Length
+	}
+	if n == 0 {
+		n = defaultGenerateLength
+	}
+	return min(max(n, 1), maxGenerateLength)
+}
+
+// GenerateValue generates a FormField.Generate value from crypto/rand per the
+// GenerateSpec resolution order. The result is secret material: callers must
+// never log it, and the error (reader failure only) never carries it.
+func GenerateValue(spec providers.GenerateSpec, values map[string]string) (string, error) {
+	return generateValue(rand.Reader, spec, values)
+}
+
+// generateValue is GenerateValue over an explicit entropy source, so a test
+// can prove a failing reader yields an error and no partial value.
+func generateValue(r io.Reader, spec providers.GenerateSpec, values map[string]string) (string, error) {
+	if spec.Bytes > 0 {
+		buf := make([]byte, min(spec.Bytes, maxGenerateLength))
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return "", fmt.Errorf("generate: read random bytes: %w", err)
+		}
+		switch spec.Encoding {
+		case "base64":
+			return base64.StdEncoding.EncodeToString(buf), nil
+		case "base64url":
+			return base64.RawURLEncoding.EncodeToString(buf), nil
+		}
+		return hex.EncodeToString(buf), nil
+	}
+	charset := []rune(spec.Charset)
+	if len(charset) == 0 {
+		return "", nil
+	}
+	var b strings.Builder
+	pick := func(set []rune) error {
+		i, err := rand.Int(r, big.NewInt(int64(len(set))))
+		if err != nil {
+			return fmt.Errorf("generate: pick random rune: %w", err)
+		}
+		b.WriteRune(set[i.Int64()])
+		return nil
+	}
+	if spec.Pattern == "" {
+		for range GenerateLength(spec, values) {
+			if err := pick(charset); err != nil {
+				return "", err
+			}
+		}
+		return b.String(), nil
+	}
+	pat := []rune(spec.Pattern)
+	for i := 0; i < len(pat); i++ {
+		switch c := pat[i]; c {
+		case '\\':
+			// A trailing backslash has nothing to escape and stays literal.
+			if i+1 < len(pat) {
+				i++
+			}
+			b.WriteRune(pat[i])
+		case 'x':
+			if err := pick(charset); err != nil {
+				return "", err
+			}
+		case '[':
+			end := slices.Index(pat[i+1:], ']')
+			if end <= 0 {
+				// Unterminated `[` and empty `[]` are literal text.
+				b.WriteRune(c)
+				continue
+			}
+			if err := pick(pat[i+1 : i+1+end]); err != nil {
+				return "", err
+			}
+			i += end + 1
+		default:
+			b.WriteRune(c)
+		}
+	}
+	return b.String(), nil
+}
+
+// ElideSecret shortens a long secret for its hidden display: more than 24
+// runes become the first 8, six bullets and the last 8, so the box stays one
+// line while the user can still recognise the value.
+func ElideSecret(s string) string {
+	r := []rune(s)
+	if len(r) <= 24 {
+		return s
+	}
+	return string(r[:8]) + "••••••" + string(r[len(r)-8:])
+}
+
+// RuneClass groups a secret's runes for colouring, so look-alike characters
+// (O and 0, l and |) read differently at a glance.
+type RuneClass int
+
+// The rune classes ClassifyRune assigns.
+const (
+	RuneAlpha RuneClass = iota
+	RuneDigit
+	RuneSymbol
+	RuneBullet
+)
+
+// ClassifyRune returns r's colour class: letters, digits, the elision bullet,
+// and everything else as a symbol.
+func ClassifyRune(r rune) RuneClass {
+	switch {
+	case unicode.IsLetter(r):
+		return RuneAlpha
+	case unicode.IsDigit(r):
+		return RuneDigit
+	case r == '•':
+		return RuneBullet
+	}
+	return RuneSymbol
+}
+
+// Secret display colours; digits take the theme accent instead.
+const (
+	// SecretAlphaColor colours letters.
+	SecretAlphaColor = "#ffffff"
+	// SecretBulletColor dims the elision bullets so they read as a gap.
+	SecretBulletColor = "#6b7080"
+	// SecretSymbolColor colours punctuation and every other rune.
+	SecretSymbolColor = "#f7768e"
+)
+
+// SecretMarkup renders s as Pango markup with one coloured span per run of
+// same-class runes (digits in accentHex), escaped by hand so this file stays
+// display-free.
+func SecretMarkup(s, accentHex string) string {
+	colour := func(c RuneClass) string {
+		switch c {
+		case RuneAlpha:
+			return SecretAlphaColor
+		case RuneDigit:
+			return accentHex
+		case RuneBullet:
+			return SecretBulletColor
+		}
+		return SecretSymbolColor
+	}
+	var b strings.Builder
+	runes := []rune(s)
+	for i := 0; i < len(runes); {
+		class := ClassifyRune(runes[i])
+		j := i + 1
+		for j < len(runes) && ClassifyRune(runes[j]) == class {
+			j++
+		}
+		b.WriteString(`<span foreground="` + markupEscape(colour(class)) + `">`)
+		b.WriteString(markupEscape(string(runes[i:j])))
+		b.WriteString(`</span>`)
+		i = j
+	}
+	return b.String()
+}
+
+// markupEscape escapes the characters Pango markup treats as syntax.
+func markupEscape(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;").Replace(s)
 }
