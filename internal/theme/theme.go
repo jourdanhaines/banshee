@@ -369,6 +369,48 @@ window#banshee-window {
 	color: #e6e9f0;
 }
 
+/* Generated secret (FormField.Generate): a monospace entry-like box with the
+   reveal toggle and re-roll button beside it. */
+#banshee-window box.form-generated-row {
+	margin-bottom: 8px;
+}
+
+#banshee-window label.form-generated {
+	padding: 8px 10px;
+	border-radius: 8px;
+	border: 1px solid {{ alpha .AccentRGB 0.35 }};
+	background-color: rgba(255, 255, 255, 0.04);
+	font-family: monospace;
+	font-size: 14px;
+	color: #e6e9f0;
+}
+
+#banshee-window button.form-generated-toggle,
+#banshee-window button.form-generated-reroll {
+	min-width: 28px;
+	min-height: 28px;
+	margin-left: 6px;
+	padding: 0 6px;
+	border-radius: 8px;
+	border: 1px solid {{ alpha .AccentRGB 0.35 }};
+	background-image: none;
+	background-color: rgba(255, 255, 255, 0.04);
+	color: #dfe4ee;
+	box-shadow: none;
+}
+
+#banshee-window button.form-generated-toggle:hover,
+#banshee-window button.form-generated-reroll:hover,
+#banshee-window button.form-generated-toggle:focus,
+#banshee-window button.form-generated-reroll:focus {
+	border-color: {{ alpha .AccentRGB 0.7 }};
+}
+
+#banshee-window button.form-generated-toggle:checked {
+	background-color: {{ alpha .AccentRGB 0.22 }};
+	border-color: {{ .Accent }};
+}
+
 /* Results list */
 #banshee-window scrolledwindow.results-scroll,
 #banshee-window scrolledwindow.results-scroll > viewport,
