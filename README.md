@@ -372,7 +372,10 @@ any shell with `banshee link <id> [path] [binding]`. **`exec` plugins** are
 long-running child processes speaking newline-delimited JSON, optionally gated
 behind a query prefix; their actions can open URLs, run detached commands,
 copy text to the clipboard, call back into the plugin, or declare an input
-form whose submitted values come back to the plugin. `make install` ships
+form whose submitted values come back to the plugin. Form fields are text by
+default; `options` makes a dropdown, `slider` an integer range, `checkbox` a
+toggle, and `show_when` shows a field only while an earlier field holds one of
+the listed values (hidden fields are not submitted). `make install` ships
 three: `example`, `claude-code` (Claude Code notifications) and `screenrec`
 (screen recording). Start from the runnable
 sample in
