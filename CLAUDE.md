@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 make build       # → ./bin/banshee (CGo mandatory: GTK4 + gtk4-layer-shell are C libraries)
 make test        # go test ./... — no display, tmux server or network needed
 make test-race   # same suite under -race, minus internal/theme (see below)
-make smoke       # go test -tags gtksmoke -run Smoke ./internal/daemon — needs a live Wayland/X session
+make smoke       # go test -tags gtksmoke -run Smoke ./internal/daemon ./internal/ui — needs a live Wayland/X session
 make lint        # gofmt -l check, then go vet ./..., then golangci-lint if installed
 make warm        # pre-compile the gotk4 cgo tree: 5–15 min cold, once per machine
 make install     # binary + shell plugins + systemd unit + banshee.conf + bundled plugins

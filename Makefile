@@ -67,9 +67,9 @@ RACE_PKGS = $$($(GO) list ./... | grep -v '/internal/theme$$')
 test-race:
 	$(GO) test -race $(RACE_PKGS)
 
-## smoke — the GTK smoke test. Needs a live Wayland/X session; not part of `test`.
+## smoke — the GTK smoke tests. Needs a live Wayland/X session; not part of `test`.
 smoke:
-	$(GO) test -tags gtksmoke -run Smoke ./internal/daemon
+	$(GO) test -tags gtksmoke -run Smoke ./internal/daemon ./internal/ui
 
 ## fmt — rewrite every file with gofmt.
 fmt:
