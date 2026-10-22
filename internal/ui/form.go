@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"strconv"
+
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
 	"github.com/jourdanhaines/banshee/internal/providers"
@@ -24,8 +26,8 @@ type formView struct {
 }
 
 // formInput is one field's widget, seen only through what the form actually
-// asks of it. It exists so a field can be a text entry or a fixed-choice
-// dropdown without values/focusFirst/markError growing a type switch, and it
+// asks of it. It exists so a field can be an entry, dropdown, slider or
+// checkbox without values/focusFirst/markError growing a type switch, and it
 // keeps the inputs slice index-parallel to form.Fields — which is the contract
 // FirstMissingRequired's returned index relies on.
 type formInput interface {
@@ -35,6 +37,8 @@ type formInput interface {
 	markError()
 	// grabFocus puts the keyboard on the field.
 	grabFocus()
+	// onChange registers f to run whenever the field's value changes.
+	onChange(f func())
 }
 
 // entryInput is a free-text field, masked when the FormField is Secret.
@@ -48,6 +52,8 @@ func (i *entryInput) markError() {
 }
 
 func (i *entryInput) grabFocus() { i.e.GrabFocus() }
+
+func (i *entryInput) onChange(f func()) { i.e.ConnectChanged(f) }
 
 // dropdownInput is a fixed-choice field (FormField.Options). The option
 // strings are kept alongside the widget because GtkDropDown reports a
@@ -76,7 +82,46 @@ func (i *dropdownInput) markError() {}
 
 func (i *dropdownInput) grabFocus() { i.d.GrabFocus() }
 
+func (i *dropdownInput) onChange(f func()) { i.d.NotifyProperty("selected", f) }
+
+// sliderInput is an integer range field (FormField.Slider). spec is the
+// normalized spec, kept so every read snaps to the same grid the field
+// declared.
+type sliderInput struct {
+	s    *gtk.Scale
+	spec providers.SliderSpec
+}
+
+func (i *sliderInput) value() string {
+	return strconv.Itoa(SnapSlider(i.spec, i.s.Value()))
+}
+
+// markError does nothing: a slider always holds a value in range.
+func (i *sliderInput) markError() {}
+
+func (i *sliderInput) grabFocus() { i.s.GrabFocus() }
+
+func (i *sliderInput) onChange(f func()) { i.s.ConnectValueChanged(f) }
+
+// checkboxInput is a boolean field (FormField.Checkbox) submitting "true" or
+// "false". The check button carries the field label itself, so clicking the
+// label toggles it.
+type checkboxInput struct{ c *gtk.CheckButton }
+
+func (i *checkboxInput) value() string { return strconv.FormatBool(i.c.Active()) }
+
+// markError does nothing: both states of a checkbox are valid.
+func (i *checkboxInput) markError() {}
+
+func (i *checkboxInput) grabFocus() { i.c.GrabFocus() }
+
+func (i *checkboxInput) onChange(f func()) { i.c.ConnectToggled(f) }
+
 // newFormView builds the widget tree for res.Form. res.Form must be non-nil.
+//
+// With SubmitLabel set, Enter goes to GTK: a focused check button may toggle
+// and a scale ignores it, so only the button submits. Without it, Enter
+// submits from any field and Space toggles a checkbox.
 func newFormView(res providers.Result) *formView {
 	v := &formView{res: res, form: *res.Form}
 
@@ -90,19 +135,25 @@ func newFormView(res providers.Result) *formView {
 	v.root.Append(title)
 
 	for _, f := range v.form.Fields {
-		label := gtk.NewLabel(f.Label)
-		label.AddCSSClass("form-label")
-		label.SetXAlign(0)
-		v.root.Append(label)
-
-		// Non-emptiness, not nil-ness, is the contract: a plugin may legally
-		// send "options": [], which decodes to an empty non-nil slice and must
-		// still render as free text.
-		if len(f.Options) > 0 {
-			v.addDropdown(f)
-			continue
+		kind := KindOf(f)
+		if kind != KindCheckbox {
+			// A checkbox labels itself; a separate label would not toggle it.
+			label := gtk.NewLabel(f.Label)
+			label.AddCSSClass("form-label")
+			label.SetXAlign(0)
+			v.root.Append(label)
 		}
-		v.addEntry(f)
+
+		switch kind {
+		case KindDropdown:
+			v.addDropdown(f)
+		case KindSlider:
+			v.addSlider(f)
+		case KindCheckbox:
+			v.addCheckbox(f)
+		default:
+			v.addEntry(f)
+		}
 	}
 
 	if v.form.SubmitLabel != "" {
@@ -173,6 +224,39 @@ func (v *formView) addDropdown(f providers.FormField) {
 	d.SetHExpand(true)
 	v.root.Append(d)
 	v.inputs = append(v.inputs, &dropdownInput{d: d, options: opts})
+}
+
+// addSlider appends f's integer slider to the form and registers it as an
+// input. KindOf has already rejected a spec with no range.
+func (v *formView) addSlider(f providers.FormField) {
+	spec, _ := NormalizeSlider(*f.Slider)
+	s := gtk.NewScaleWithRange(gtk.OrientationHorizontal,
+		float64(spec.Min), float64(spec.Max), float64(spec.Step))
+	s.SetDrawValue(true)
+	s.SetDigits(0)
+	s.SetValuePos(gtk.PosRight)
+	s.SetHExpand(true)
+	s.SetValue(float64(spec.Default))
+	s.AddCSSClass("form-field")
+	// GtkRange does not snap to its step while dragging, so the handle is
+	// pulled back onto the grid; the re-entrant SetValue settles in one round.
+	s.ConnectValueChanged(func() {
+		if snapped := float64(SnapSlider(spec, s.Value())); snapped != s.Value() {
+			s.SetValue(snapped)
+		}
+	})
+	v.root.Append(s)
+	v.inputs = append(v.inputs, &sliderInput{s: s, spec: spec})
+}
+
+// addCheckbox appends f's check button, labelled with f.Label, to the form and
+// registers it as an input.
+func (v *formView) addCheckbox(f providers.FormField) {
+	c := gtk.NewCheckButtonWithLabel(f.Label)
+	c.SetActive(f.Checked)
+	c.AddCSSClass("form-field")
+	v.root.Append(c)
+	v.inputs = append(v.inputs, &checkboxInput{c: c})
 }
 
 // values returns the current field values keyed by FormField.Key.
