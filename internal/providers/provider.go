@@ -30,6 +30,10 @@
 //
 // Migration 2026-09b: Form.SubmitLabel added — additive, zero value inert. A
 // form that leaves it empty keeps Enter-submits and the keyboard hint.
+//
+// Migration 2026-10: FormField.Slider, Checkbox, Checked and ShowWhen added —
+// additive, zero value inert. A UI that ignores them renders every field as
+// before and submits every field.
 package providers
 
 import (
@@ -137,6 +141,39 @@ type FormField struct {
 	// submits a value and Required is trivially satisfied. Secret is ignored
 	// on a dropdown — a fixed choice list has nothing to mask.
 	Options []string
+	// Slider, when non-nil and valid (Max > Min), renders the field as an
+	// integer slider whose submitted value is the decimal position. Options
+	// takes precedence; an invalid spec falls through to the next kind. The
+	// field always submits a value, so Required is trivially satisfied.
+	Slider *SliderSpec
+	// Checkbox renders the field as a labelled check button submitting "true"
+	// or "false", below Options and Slider in precedence. Required is
+	// trivially satisfied and never means "must be checked".
+	Checkbox bool
+	// Checked is a checkbox's initial state; inert on any other kind.
+	Checked bool
+	// ShowWhen, when non-nil, shows the field only while an earlier field's
+	// value is one of ShowWhen.Values. A hidden field is omitted from
+	// Action.Values and never fails Required.
+	ShowWhen *ShowWhen
+}
+
+// SliderSpec bounds an integer slider field. The UI normalizes it rather than
+// rejecting it: Step < 1 becomes 1, and Default is clamped into [Min, Max]
+// and snapped to the Min+k*Step grid. Max <= Min makes the spec ignored.
+type SliderSpec struct {
+	Min, Max, Step, Default int
+}
+
+// ShowWhen makes a form field conditional on an earlier field's submitted
+// string value, so one form can carry fields that apply only to some choices.
+// Only earlier fields resolve: a later, self or unknown Key, or empty Values,
+// leaves the field always visible. A hidden field hides fields chained on it.
+type ShowWhen struct {
+	// Key names the earlier field whose value is tested.
+	Key string
+	// Values lists the values that show the field.
+	Values []string
 }
 
 // Form makes a result open a secondary input view inside the launcher
