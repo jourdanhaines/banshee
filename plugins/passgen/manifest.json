@@ -1,0 +1,13 @@
+{
+    "v": 1,
+    "id": "passgen",
+    "name": "Password generator",
+    "icon": "dialog-password-symbolic",
+    "type": "exec",
+    "exec": {
+        "bin": "./plugin.sh",
+        "prefix": "pass",
+        "prefix_min": 3,
+        "prefixes": ["key", "gen"]
+    }
+}
