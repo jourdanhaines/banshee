@@ -68,9 +68,10 @@ func TestExamplePlugin(t *testing.T) {
 		}
 	}
 	form := got[3].Form
-	if form == nil || len(form.Fields) != 1 || form.Fields[0].Key != "name" || !form.Fields[0].Required {
-		t.Fatalf("form result = %+v, want one required 'name' field", form)
+	if form == nil {
+		t.Fatal("greet result carries no form")
 	}
+	assertExampleFields(t, form.Fields)
 	act, err := form.Build(map[string]string{"name": "tea"})
 	if err != nil {
 		t.Fatal(err)
@@ -90,5 +91,41 @@ func TestExamplePlugin(t *testing.T) {
 	}
 	if got[1].Icon.ThemeName != "text-x-generic-symbolic" {
 		t.Errorf("per-result icon = %+v", got[1].Icon)
+	}
+}
+
+// assertExampleFields checks the greet form demos every field kind the wire
+// carries: entry, dropdown, show_when-gated slider and checkbox.
+func assertExampleFields(t *testing.T, fields []providers.FormField) {
+	t.Helper()
+	tests := []struct {
+		name  string
+		check func(f providers.FormField) bool
+	}{
+		{"name", func(f providers.FormField) bool {
+			return f.Required && len(f.Options) == 0 && f.Slider == nil && !f.Checkbox
+		}},
+		{"style", func(f providers.FormField) bool {
+			return len(f.Options) == 2 && f.Options[0] == "Plain" && f.Options[1] == "Shout"
+		}},
+		{"repeat", func(f providers.FormField) bool {
+			return f.Slider != nil &&
+				*f.Slider == providers.SliderSpec{Min: 1, Max: 5, Step: 1, Default: 1} &&
+				f.ShowWhen != nil && f.ShowWhen.Key == "style" &&
+				len(f.ShowWhen.Values) == 1 && f.ShowWhen.Values[0] == "Shout"
+		}},
+		{"notify", func(f providers.FormField) bool {
+			return f.Checkbox && f.Checked && f.ShowWhen == nil
+		}},
+	}
+	if len(fields) != len(tests) {
+		t.Fatalf("got %d fields, want %d: %+v", len(fields), len(tests), fields)
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if fields[i].Key != tt.name || !tt.check(fields[i]) {
+				t.Errorf("field %d = %+v", i, fields[i])
+			}
+		})
 	}
 }

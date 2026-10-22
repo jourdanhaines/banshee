@@ -63,10 +63,20 @@ emit_results() {
 
     # 4. A form result: activating it opens an input view inside the launcher;
     #    the submitted values come back as a "submit" event (see handle_submit).
+    #    Field kinds: free text (default), "options" (dropdown, first option
+    #    preselected), "slider" (integer range) and "checkbox" (submits
+    #    "true"/"false"). "show_when" shows a field only while an earlier
+    #    field's value is in "values"; a hidden field is left out of the submit.
+    #    An older banshee renders sliders and checkboxes as text entries and
+    #    ignores show_when, so handle_submit must tolerate any string or none.
     printf ',{"id":"greet","title":"Send a custom greeting",'
     printf '"subtitle":"form demo","score":60,'
     printf '"form":{"title":"Custom greeting","fields":['
-    printf '{"key":"name","label":"Who to greet","placeholder":"world","required":true}]}}'
+    printf '{"key":"name","label":"Who to greet","placeholder":"world","required":true},'
+    printf '{"key":"style","label":"Style","options":["Plain","Shout"]},'
+    printf '{"key":"repeat","label":"Repeat","slider":{"min":1,"max":5,"step":1,"default":1},'
+    printf '"show_when":{"key":"style","values":["Shout"]}},'
+    printf '{"key":"notify","label":"Show a notification","checkbox":true,"checked":true}]}}'
 
     printf ']}\n'
 }
@@ -89,11 +99,30 @@ handle_activate() {
 handle_submit() {
     case "$1" in
         greet)
-            name=$(printf '%s' "$2" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')
-            if command -v notify-send >/dev/null 2>&1; then
-                notify-send "banshee example" "hello, ${name:-world}!"
+            name=$(str_field "$2" name)
+            style=$(str_field "$2" style)
+            # repeat is absent while hidden (style "Plain"), and may be any
+            # text from an older banshee's entry: fall back to 1, cap at 5.
+            repeat=$(str_field "$2" repeat)
+            case "$repeat" in
+                '' | *[!0-9]*) repeat=1 ;;
+            esac
+            [ "$repeat" -gt 5 ] && repeat=5
+            msg="hello, ${name:-world}!"
+            if [ "$style" = Shout ]; then
+                msg=$(printf '%s' "$msg" | tr '[:lower:]' '[:upper:]')
+                one=$msg
+                i=1
+                while [ "$i" -lt "$repeat" ]; do
+                    msg="$msg $one"
+                    i=$((i + 1))
+                done
+            fi
+            # Only an explicit "true" notifies; anything else goes to the log.
+            if [ "$(str_field "$2" notify)" = true ] && command -v notify-send >/dev/null 2>&1; then
+                notify-send "banshee example" "$msg"
             else
-                printf 'greet submitted: %s\n' "${name:-world}" >>"${TMPDIR:-/tmp}/banshee-example.log"
+                printf 'greet submitted: %s\n' "$msg" >>"${TMPDIR:-/tmp}/banshee-example.log"
             fi
             ;;
     esac
