@@ -20,6 +20,9 @@ type formView struct {
 
 	root   *gtk.Box
 	inputs []formInput // parallel to form.Fields
+	// rows hold each field's label and widget, parallel to inputs, so a
+	// ShowWhen-hidden field disappears as one unit.
+	rows []*gtk.Box
 
 	// submit and back exist only when form.SubmitLabel is set.
 	submit, back *gtk.Button
@@ -135,26 +138,38 @@ func newFormView(res providers.Result) *formView {
 	v.root.Append(title)
 
 	for _, f := range v.form.Fields {
+		row := gtk.NewBox(gtk.OrientationVertical, 0)
+		row.AddCSSClass("form-row")
+		v.root.Append(row)
+		v.rows = append(v.rows, row)
+
 		kind := KindOf(f)
 		if kind != KindCheckbox {
 			// A checkbox labels itself; a separate label would not toggle it.
 			label := gtk.NewLabel(f.Label)
 			label.AddCSSClass("form-label")
 			label.SetXAlign(0)
-			v.root.Append(label)
+			row.Append(label)
 		}
 
 		switch kind {
 		case KindDropdown:
-			v.addDropdown(f)
+			v.addDropdown(row, f)
 		case KindSlider:
-			v.addSlider(f)
+			v.addSlider(row, f)
 		case KindCheckbox:
-			v.addCheckbox(f)
+			v.addCheckbox(row, f)
 		default:
-			v.addEntry(f)
+			v.addEntry(row, f)
 		}
 	}
+
+	// Connected only now: construction-time SetValue/SetActive would fire
+	// refreshVisibility while rows and inputs are still incomplete.
+	for _, in := range v.inputs {
+		in.onChange(v.refreshVisibility)
+	}
+	v.refreshVisibility()
 
 	if v.form.SubmitLabel != "" {
 		v.addButtons()
@@ -167,6 +182,16 @@ func newFormView(res providers.Result) *formView {
 	v.root.Append(hint)
 
 	return v
+}
+
+// refreshVisibility shows exactly the rows whose ShowWhen condition holds for
+// the current values. The form stack page is vertically homogeneous, so
+// hiding rows never resizes the panel.
+func (v *formView) refreshVisibility() {
+	vis := Visible(v.form.Fields, TrimValues(v.values()))
+	for i, row := range v.rows {
+		row.SetVisible(vis[i])
+	}
 }
 
 // addButtons appends the submit button and the Back button below the fields.
@@ -193,8 +218,8 @@ func (v *formView) connectButtons(onSubmit, onBack func()) {
 	}
 }
 
-// addEntry appends f's text entry to the form and registers it as an input.
-func (v *formView) addEntry(f providers.FormField) {
+// addEntry appends f's text entry to row and registers it as an input.
+func (v *formView) addEntry(row *gtk.Box, f providers.FormField) {
 	entry := gtk.NewEntry()
 	entry.AddCSSClass("form-field")
 	entry.SetPlaceholderText(f.Placeholder)
@@ -209,26 +234,26 @@ func (v *formView) addEntry(f providers.FormField) {
 	}
 	// Typing clears a validation error the moment the field changes.
 	entry.ConnectChanged(func() { entry.RemoveCSSClass("error") })
-	v.root.Append(entry)
+	row.Append(entry)
 	v.inputs = append(v.inputs, &entryInput{e: entry})
 }
 
-// addDropdown appends f's fixed-choice dropdown to the form and registers it as
-// an input. GtkDropDown preselects index 0, which is the contract's "first
+// addDropdown appends f's fixed-choice dropdown to row and registers it as an
+// input. GtkDropDown preselects index 0, which is the contract's "first
 // option preselected".
-func (v *formView) addDropdown(f providers.FormField) {
+func (v *formView) addDropdown(row *gtk.Box, f providers.FormField) {
 	opts := make([]string, len(f.Options))
 	copy(opts, f.Options) // the field is the provider's; the widget outlives the query
 	d := gtk.NewDropDownFromStrings(opts)
 	d.AddCSSClass("form-field")
 	d.SetHExpand(true)
-	v.root.Append(d)
+	row.Append(d)
 	v.inputs = append(v.inputs, &dropdownInput{d: d, options: opts})
 }
 
-// addSlider appends f's integer slider to the form and registers it as an
-// input. KindOf has already rejected a spec with no range.
-func (v *formView) addSlider(f providers.FormField) {
+// addSlider appends f's integer slider to row and registers it as an input.
+// KindOf has already rejected a spec with no range.
+func (v *formView) addSlider(row *gtk.Box, f providers.FormField) {
 	spec, _ := NormalizeSlider(*f.Slider)
 	s := gtk.NewScaleWithRange(gtk.OrientationHorizontal,
 		float64(spec.Min), float64(spec.Max), float64(spec.Step))
@@ -245,17 +270,17 @@ func (v *formView) addSlider(f providers.FormField) {
 			s.SetValue(snapped)
 		}
 	})
-	v.root.Append(s)
+	row.Append(s)
 	v.inputs = append(v.inputs, &sliderInput{s: s, spec: spec})
 }
 
-// addCheckbox appends f's check button, labelled with f.Label, to the form and
+// addCheckbox appends f's check button, labelled with f.Label, to row and
 // registers it as an input.
-func (v *formView) addCheckbox(f providers.FormField) {
+func (v *formView) addCheckbox(row *gtk.Box, f providers.FormField) {
 	c := gtk.NewCheckButtonWithLabel(f.Label)
 	c.SetActive(f.Checked)
 	c.AddCSSClass("form-field")
-	v.root.Append(c)
+	row.Append(c)
 	v.inputs = append(v.inputs, &checkboxInput{c: c})
 }
 
@@ -268,10 +293,13 @@ func (v *formView) values() map[string]string {
 	return out
 }
 
-// focusFirst puts the keyboard on the first field.
+// focusFirst puts the keyboard on the first visible field.
 func (v *formView) focusFirst() {
-	if len(v.inputs) > 0 {
-		v.inputs[0].grabFocus()
+	for i, in := range v.inputs {
+		if v.rows[i].Visible() {
+			in.grabFocus()
+			return
+		}
 	}
 }
 
