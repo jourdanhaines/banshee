@@ -380,8 +380,10 @@ window#banshee-window {
 	border-radius: 8px;
 	border: 1px solid {{ alpha .AccentRGB 0.35 }};
 	background-color: rgba(255, 255, 255, 0.04);
-	font-family: monospace;
-	font-size: 14px;
+	/* Named faces first: the generic monospace alias can resolve to a thin CJK face. */
+	font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", "Adwaita Mono", monospace;
+	font-weight: 600;
+	font-size: 15px;
 	color: #e6e9f0;
 }
 

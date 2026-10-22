@@ -53,7 +53,8 @@ func TestGeneratedCSSParses(t *testing.T) {
 		{"checked checkbox accent", "background-color: rgba(122,162,247,0.85)"},
 		{"dropdown list stays transparent", "background-color: rgba(0,0,0,0)"},
 		{"dropdown selected hover tint", "background-color: rgba(122,162,247,0.22)"},
-		{"generated secret is monospace", `font-family: "monospace"`},
+		{"generated secret is monospace", `font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", "Adwaita Mono", "monospace"`},
+		{"generated secret is bold", "font-weight: 600"},
 		{"generated buttons are square", "min-width: 28px"},
 	}
 
