@@ -50,6 +50,8 @@ func TestGeneratedCSSParses(t *testing.T) {
 		{"slider fill accent", "background-color: rgba(122,162,247,0.6)"},
 		{"slider focus ring", "box-shadow: 0 0 0 3px rgba(122,162,247,0.3)"},
 		{"checked checkbox accent", "background-color: rgba(122,162,247,0.85)"},
+		{"dropdown list stays transparent", "background-color: rgba(0,0,0,0)"},
+		{"dropdown selected hover tint", "background-color: rgba(122,162,247,0.22)"},
 	}
 
 	css := roundTrip(t, config.Default())
@@ -83,6 +85,12 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window dropdown.form-field > popover > contents",
 		"#banshee-window dropdown.form-field > popover listview > row",
 		"#banshee-window dropdown.form-field > popover listview > row:selected",
+		"#banshee-window dropdown.form-field > popover listview",
+		"#banshee-window dropdown.form-field > popover scrolledwindow",
+		"#banshee-window dropdown.form-field > popover scrolledwindow > viewport",
+		"#banshee-window dropdown.form-field > popover listview > row:hover",
+		"#banshee-window dropdown.form-field > popover listview > row:selected:hover",
+		"#banshee-window dropdown.form-field > popover > arrow",
 		"#banshee-window button.form-submit",
 		"#banshee-window button.form-back",
 		// GTK serializes pseudo-classes ahead of classes, so

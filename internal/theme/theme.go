@@ -230,6 +230,27 @@ window#banshee-window {
 	color: #f2f5fb;
 }
 
+/* GTK's light Default theme paints the list's scroller, viewport and listview
+   white; clearing them lets the dark popover contents show through. */
+#banshee-window dropdown.form-field > popover scrolledwindow,
+#banshee-window dropdown.form-field > popover scrolledwindow > viewport,
+#banshee-window dropdown.form-field > popover listview {
+	background-color: transparent;
+}
+
+#banshee-window dropdown.form-field > popover listview > row:hover {
+	background-color: rgba(255, 255, 255, 0.045);
+}
+
+#banshee-window dropdown.form-field > popover listview > row:selected:hover {
+	background-color: {{ alpha .AccentRGB 0.22 }};
+}
+
+#banshee-window dropdown.form-field > popover > arrow {
+	background-color: rgba({{ .PanelRGB }}, 0.98);
+	border-color: {{ alpha .AccentRGB 0.35 }};
+}
+
 /* Integer slider form field (FormField.Slider): a thin accent-filled trough
    with a light round handle and the value drawn to its right. */
 #banshee-window scale.form-field {
