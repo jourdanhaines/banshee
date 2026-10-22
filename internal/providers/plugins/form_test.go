@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,9 @@ func TestWireFormToResult(t *testing.T) {
 				{Key: "ssid", Label: "SSID", Placeholder: "network name", Required: true},
 				{Key: "pass", Label: "Password"},
 				{Key: "band", Label: "Band", Options: []string{"2.4 GHz", "5 GHz"}},
+				{Key: "width", Label: "Width",
+					Slider:   &WireSlider{Min: 20, Max: 80, Step: 20, Default: 40},
+					ShowWhen: &WireShowWhen{Key: "band", Values: []string{"5 GHz"}}},
 			},
 			SubmitLabel: "Join",
 		}}
@@ -46,7 +50,7 @@ func TestWireFormToResult(t *testing.T) {
 		if res.Form == nil {
 			t.Fatal("Form is nil")
 		}
-		if res.Form.Title != "Join network" || len(res.Form.Fields) != 3 || res.Form.SubmitLabel != "Join" {
+		if res.Form.Title != "Join network" || len(res.Form.Fields) != 4 || res.Form.SubmitLabel != "Join" {
 			t.Fatalf("form = %+v", res.Form)
 		}
 		f0 := res.Form.Fields[0]
@@ -59,14 +63,23 @@ func TestWireFormToResult(t *testing.T) {
 		if f2 := res.Form.Fields[2]; len(f2.Options) != 2 || f2.Options[1] != "5 GHz" {
 			t.Errorf("field 2 = %+v", f2)
 		}
-		act, err := res.Form.Build(map[string]string{"ssid": "home", "pass": "hunter2"})
+		f3 := res.Form.Fields[3]
+		if f3.Slider == nil || *f3.Slider != (providers.SliderSpec{Min: 20, Max: 80, Step: 20, Default: 40}) {
+			t.Errorf("field 3 Slider = %+v", f3.Slider)
+		}
+		if f3.ShowWhen == nil || f3.ShowWhen.Key != "band" || !slices.Equal(f3.ShowWhen.Values, []string{"5 GHz"}) {
+			t.Errorf("field 3 ShowWhen = %+v", f3.ShowWhen)
+		}
+		// Build forwards whatever it is handed: show_when filtering is the
+		// launcher's job, so a hidden field's value passes through untouched.
+		act, err := res.Form.Build(map[string]string{"ssid": "home", "pass": "hunter2", "band": "2.4 GHz", "width": "40"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if act.Kind != providers.ActPluginCallback || act.PluginID != "wifi" || act.ResultID != "f" {
 			t.Errorf("action = %+v", act)
 		}
-		if act.Values["ssid"] != "home" || act.Values["pass"] != "hunter2" {
+		if act.Values["ssid"] != "home" || act.Values["pass"] != "hunter2" || act.Values["width"] != "40" {
 			t.Errorf("values = %+v", act.Values)
 		}
 	})
@@ -222,6 +235,146 @@ func TestWireFormFieldOptions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// decodeField unmarshals a one-field result and returns the converted field.
+func decodeField(t *testing.T, field string) providers.FormField {
+	t.Helper()
+	var w WireResult
+	js := `{"id":"r","title":"R","form":{"title":"T","fields":[` + field + `]}}`
+	if err := json.Unmarshal([]byte(js), &w); err != nil {
+		t.Fatal(err)
+	}
+	res := w.toResult(connectors.Manifest{ID: "gen", Dir: "/plugins/gen"})
+	if res.Form == nil || len(res.Form.Fields) != 1 {
+		t.Fatalf("form = %+v", res.Form)
+	}
+	return res.Form.Fields[0]
+}
+
+// TestWireFormFieldSlider pins the "slider" spec's trip across the wire.
+func TestWireFormFieldSlider(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		want  *providers.SliderSpec
+	}{
+		{
+			name:  "full spec round-trips",
+			field: `{"key":"len","label":"Length","slider":{"min":8,"max":128,"step":2,"default":24}}`,
+			want:  &providers.SliderSpec{Min: 8, Max: 128, Step: 2, Default: 24},
+		},
+		{
+			name:  "absent slider stays nil",
+			field: `{"key":"len","label":"Length"}`,
+		},
+		{
+			name:  "null slider stays nil",
+			field: `{"key":"len","label":"Length","slider":null}`,
+		},
+		{
+			name:  "unknown inner key is ignored",
+			field: `{"key":"len","label":"Length","slider":{"min":1,"max":5,"log":true}}`,
+			want:  &providers.SliderSpec{Min: 1, Max: 5},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decodeField(t, tt.field).Slider
+			if (got == nil) != (tt.want == nil) || (got != nil && *got != *tt.want) {
+				t.Errorf("Slider = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWireFormFieldCheckbox pins the "checkbox" and "checked" flags.
+func TestWireFormFieldCheckbox(t *testing.T) {
+	tests := []struct {
+		name         string
+		field        string
+		wantCheckbox bool
+		wantChecked  bool
+	}{
+		{"checkbox and checked", `{"key":"sym","label":"Symbols","checkbox":true,"checked":true}`, true, true},
+		{"checkbox only", `{"key":"sym","label":"Symbols","checkbox":true}`, true, false},
+		{"absent", `{"key":"sym","label":"Symbols"}`, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := decodeField(t, tt.field)
+			if f.Checkbox != tt.wantCheckbox || f.Checked != tt.wantChecked {
+				t.Errorf("Checkbox, Checked = %v, %v; want %v, %v",
+					f.Checkbox, f.Checked, tt.wantCheckbox, tt.wantChecked)
+			}
+		})
+	}
+}
+
+// TestWireFormFieldShowWhen pins the "show_when" condition's trip.
+func TestWireFormFieldShowWhen(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		want  *providers.ShowWhen
+	}{
+		{
+			name:  "key and values decode in order",
+			field: `{"key":"bits","label":"Bits","show_when":{"key":"gen","values":["Key","JWT secret"]}}`,
+			want:  &providers.ShowWhen{Key: "gen", Values: []string{"Key", "JWT secret"}},
+		},
+		{
+			name:  "absent stays nil",
+			field: `{"key":"bits","label":"Bits"}`,
+		},
+		{
+			name:  "unknown inner key is ignored",
+			field: `{"key":"bits","label":"Bits","show_when":{"key":"gen","values":["Key"],"negate":true}}`,
+			want:  &providers.ShowWhen{Key: "gen", Values: []string{"Key"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decodeField(t, tt.field).ShowWhen
+			if (got == nil) != (tt.want == nil) {
+				t.Fatalf("ShowWhen = %+v, want %+v", got, tt.want)
+			}
+			if got != nil && (got.Key != tt.want.Key || !slices.Equal(got.Values, tt.want.Values)) {
+				t.Errorf("ShowWhen = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWireFormFieldLegacy pins forward and backward compatibility of the new
+// field keys: a legacy field decodes with every new field zero, and a field
+// that sets none of them marshals without their keys.
+func TestWireFormFieldLegacy(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"legacy field decodes with new fields zero", func(t *testing.T) {
+			f := decodeField(t, `{"key":"name","label":"Name","placeholder":"x","required":true,"secret":false}`)
+			if f.Slider != nil || f.Checkbox || f.Checked || f.ShowWhen != nil {
+				t.Errorf("field = %+v, want new fields zero", f)
+			}
+		}},
+		{"zero new fields are omitted on marshal", func(t *testing.T) {
+			b, err := json.Marshal(WireFormField{Key: "k"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"slider", "checkbox", "checked", "show_when"} {
+				if strings.Contains(string(b), `"`+key+`"`) {
+					t.Errorf("marshal = %s, carries %q", b, key)
+				}
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
 	}
 }
 

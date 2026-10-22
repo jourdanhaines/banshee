@@ -42,6 +42,11 @@
 // prefix as its primary one. (Migration 2026-09c: Event.Prefix added —
 // additive, unknown-ignored.)
 //
+// A form field may also be a slider ("slider", see WireSlider), a checkbox
+// ("checkbox" + "checked") or conditional on an earlier field ("show_when",
+// see WireShowWhen). (Migration 2026-10: WireFormField.Slider, Checkbox,
+// Checked and ShowWhen added — additive, unknown-ignored.)
+//
 // Every query carries a Seq, and a plugin must echo the seq it is answering:
 // the host drops any message whose seq is not the query it is still waiting
 // on. Results for one seq may be split across several messages; the host
@@ -75,6 +80,8 @@
 package plugins
 
 import (
+	"slices"
+
 	"github.com/jourdanhaines/banshee/internal/providers"
 	"github.com/jourdanhaines/banshee/internal/providers/connectors"
 )
@@ -259,6 +266,41 @@ type WireFormField struct {
 	// plugin too old to set it leaves it empty — either way a value comes back
 	// under the same key.
 	Options []string `json:"options,omitempty"`
+	// Slider makes the launcher render the field as an integer slider and
+	// submit its decimal position; "options" wins when both are set.
+	// Degradation is symmetric: a host too old to know it renders a free-text
+	// entry under the same key, so a plugin must fall back to its default on
+	// an empty or non-integer value.
+	Slider *WireSlider `json:"slider,omitempty"`
+	// Checkbox makes the launcher render a labelled check button submitting
+	// "true" or "false"; Checked is its initial state. Degradation is
+	// symmetric: an older host renders a free-text entry under the same key,
+	// so a plugin must treat any value other than "true" as unchecked.
+	Checkbox bool `json:"checkbox,omitempty"`
+	// Checked is a checkbox's initial state; an older host ignores it.
+	Checked bool `json:"checked,omitempty"`
+	// ShowWhen shows the field only while an earlier field holds one of the
+	// listed values; a hidden field is not submitted. Degradation is
+	// symmetric: an older host ignores it, shows and submits every field, so
+	// a plugin must ignore keys that do not apply to the chosen values.
+	ShowWhen *WireShowWhen `json:"show_when,omitempty"`
+}
+
+// WireSlider is the wire form of providers.SliderSpec: an integer range the
+// launcher normalizes rather than rejects (step < 1 becomes 1, default is
+// clamped and snapped); max <= min makes the launcher ignore the slider.
+type WireSlider struct {
+	Min     int `json:"min"`
+	Max     int `json:"max"`
+	Step    int `json:"step,omitempty"`
+	Default int `json:"default,omitempty"`
+}
+
+// WireShowWhen is the wire form of providers.ShowWhen: the field shows only
+// while the earlier field keyed Key submits one of Values.
+type WireShowWhen struct {
+	Key    string   `json:"key"`
+	Values []string `json:"values"`
 }
 
 // toResult converts a wire result into a launcher result, filling icon and
@@ -305,6 +347,20 @@ func wireFormTo(f WireForm, pluginID, resultID string) *providers.Form {
 			Required:    wf.Required,
 			Secret:      wf.Secret,
 			Options:     wf.Options,
+			Checkbox:    wf.Checkbox,
+			Checked:     wf.Checked,
+		}
+		if wf.Slider != nil {
+			fields[i].Slider = &providers.SliderSpec{
+				Min: wf.Slider.Min, Max: wf.Slider.Max,
+				Step: wf.Slider.Step, Default: wf.Slider.Default,
+			}
+		}
+		if wf.ShowWhen != nil {
+			fields[i].ShowWhen = &providers.ShowWhen{
+				Key:    wf.ShowWhen.Key,
+				Values: slices.Clone(wf.ShowWhen.Values),
+			}
 		}
 	}
 	return &providers.Form{
