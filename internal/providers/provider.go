@@ -31,9 +31,9 @@
 // Migration 2026-09b: Form.SubmitLabel added — additive, zero value inert. A
 // form that leaves it empty keeps Enter-submits and the keyboard hint.
 //
-// Migration 2026-10: FormField.Slider, Checkbox, Checked and ShowWhen added —
-// additive, zero value inert. A UI that ignores them renders every field as
-// before and submits every field.
+// Migration 2026-10: FormField.Slider, Checkbox, Checked and ShowWhen (a list
+// of Condition, ANDed) added — additive, zero value inert. A UI that ignores
+// them renders every field as before and submits every field.
 package providers
 
 import (
@@ -152,10 +152,10 @@ type FormField struct {
 	Checkbox bool
 	// Checked is a checkbox's initial state; inert on any other kind.
 	Checked bool
-	// ShowWhen, when non-nil, shows the field only while an earlier field's
-	// value is one of ShowWhen.Values. A hidden field is omitted from
-	// Action.Values and never fails Required.
-	ShowWhen *ShowWhen
+	// ShowWhen, when non-empty, shows the field only while every condition
+	// holds (AND). A hidden field is omitted from Action.Values and never
+	// fails Required.
+	ShowWhen []Condition
 }
 
 // SliderSpec bounds an integer slider field. The UI normalizes it rather than
@@ -165,11 +165,12 @@ type SliderSpec struct {
 	Min, Max, Step, Default int
 }
 
-// ShowWhen makes a form field conditional on an earlier field's submitted
+// Condition is one FormField.ShowWhen test on an earlier field's submitted
 // string value, so one form can carry fields that apply only to some choices.
-// Only earlier fields resolve: a later, self or unknown Key, or empty Values,
-// leaves the field always visible. A hidden field hides fields chained on it.
-type ShowWhen struct {
+// Key resolves to the first earlier field with that key; a later, self or
+// unknown Key, or empty Values, makes the condition ignored (it neither shows
+// nor hides). A referenced field that is itself hidden hides the dependant.
+type Condition struct {
 	// Key names the earlier field whose value is tested.
 	Key string
 	// Values lists the values that show the field.

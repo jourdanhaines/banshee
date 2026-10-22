@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -42,7 +43,7 @@ func TestWireFormToResult(t *testing.T) {
 				{Key: "band", Label: "Band", Options: []string{"2.4 GHz", "5 GHz"}},
 				{Key: "width", Label: "Width",
 					Slider:   &WireSlider{Min: 20, Max: 80, Step: 20, Default: 40},
-					ShowWhen: &WireShowWhen{Key: "band", Values: []string{"5 GHz"}}},
+					ShowWhen: []WireCondition{{Key: "band", Values: []string{"5 GHz"}}}},
 			},
 			SubmitLabel: "Join",
 		}}
@@ -67,7 +68,7 @@ func TestWireFormToResult(t *testing.T) {
 		if f3.Slider == nil || *f3.Slider != (providers.SliderSpec{Min: 20, Max: 80, Step: 20, Default: 40}) {
 			t.Errorf("field 3 Slider = %+v", f3.Slider)
 		}
-		if f3.ShowWhen == nil || f3.ShowWhen.Key != "band" || !slices.Equal(f3.ShowWhen.Values, []string{"5 GHz"}) {
+		if len(f3.ShowWhen) != 1 || f3.ShowWhen[0].Key != "band" || !slices.Equal(f3.ShowWhen[0].Values, []string{"5 GHz"}) {
 			t.Errorf("field 3 ShowWhen = %+v", f3.ShowWhen)
 		}
 		// Build forwards whatever it is handed: show_when filtering is the
@@ -312,38 +313,67 @@ func TestWireFormFieldCheckbox(t *testing.T) {
 	}
 }
 
-// TestWireFormFieldShowWhen pins the "show_when" condition's trip.
+// TestWireFormFieldShowWhen pins the "show_when" condition list's trip.
 func TestWireFormFieldShowWhen(t *testing.T) {
 	tests := []struct {
 		name  string
 		field string
-		want  *providers.ShowWhen
+		want  []providers.Condition
 	}{
 		{
-			name:  "key and values decode in order",
-			field: `{"key":"bits","label":"Bits","show_when":{"key":"gen","values":["Key","JWT secret"]}}`,
-			want:  &providers.ShowWhen{Key: "gen", Values: []string{"Key", "JWT secret"}},
+			name:  "conditions decode in order",
+			field: `{"key":"x","label":"X","show_when":[{"key":"gen","values":["Key","JWT secret"]},{"key":"sym","values":["true"]}]}`,
+			want: []providers.Condition{
+				{Key: "gen", Values: []string{"Key", "JWT secret"}},
+				{Key: "sym", Values: []string{"true"}},
+			},
 		},
 		{
 			name:  "absent stays nil",
 			field: `{"key":"bits","label":"Bits"}`,
 		},
 		{
+			name:  "empty list stays nil",
+			field: `{"key":"bits","label":"Bits","show_when":[]}`,
+		},
+		{
 			name:  "unknown inner key is ignored",
-			field: `{"key":"bits","label":"Bits","show_when":{"key":"gen","values":["Key"],"negate":true}}`,
-			want:  &providers.ShowWhen{Key: "gen", Values: []string{"Key"}},
+			field: `{"key":"bits","label":"Bits","show_when":[{"key":"gen","values":["Key"],"negate":true}]}`,
+			want:  []providers.Condition{{Key: "gen", Values: []string{"Key"}}},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := decodeField(t, tt.field).ShowWhen
-			if (got == nil) != (tt.want == nil) {
-				t.Fatalf("ShowWhen = %+v, want %+v", got, tt.want)
-			}
-			if got != nil && (got.Key != tt.want.Key || !slices.Equal(got.Values, tt.want.Values)) {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ShowWhen = %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+// showWhenObjectScript answers with a result whose show_when is an object
+// rather than a list, followed by a well-formed message for the same seq.
+const showWhenObjectScript = `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in *'"event":"shutdown"'*) exit 0 ;; esac
+  seq=$(printf '%s' "$line" | sed -n 's/.*"seq":\([0-9]*\).*/\1/p')
+  printf '{"v":1,"seq":%s,"event":"results","results":[{"id":"bad","title":"bad","form":{"title":"T","fields":[{"key":"a","show_when":{"key":"g","values":["x"]}}]}}]}\n' "$seq"
+  printf '{"v":1,"seq":%s,"event":"results","results":[{"id":"good","title":"good"}],"done":true}\n' "$seq"
+done
+`
+
+// TestShowWhenObjectDropsWholeMessage pins how the host treats the object
+// shape of show_when: it is a JSON type error, so the entire results message
+// carrying it is skipped as malformed while later messages still land.
+func TestShowWhenObjectDropsWholeMessage(t *testing.T) {
+	p := newScriptPlugin(t, "sw", showWhenObjectScript, "", Options{Timeout: 2 * time.Second})
+	got, err := p.Query(context.Background(), "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Title != "good" {
+		t.Fatalf("results = %+v, want only the well-formed message's result", got)
 	}
 }
 
@@ -357,7 +387,7 @@ func TestWireFormFieldLegacy(t *testing.T) {
 	}{
 		{"legacy field decodes with new fields zero", func(t *testing.T) {
 			f := decodeField(t, `{"key":"name","label":"Name","placeholder":"x","required":true,"secret":false}`)
-			if f.Slider != nil || f.Checkbox || f.Checked || f.ShowWhen != nil {
+			if f.Slider != nil || f.Checkbox || f.Checked || len(f.ShowWhen) != 0 {
 				t.Errorf("field = %+v, want new fields zero", f)
 			}
 		}},

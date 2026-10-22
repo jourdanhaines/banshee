@@ -77,7 +77,7 @@ func TestFirstMissingRequired(t *testing.T) {
 			"a hidden required empty entry never blocks submission",
 			[]providers.FormField{
 				{Key: "mode", Options: []string{"a", "b"}},
-				{Key: "name", Required: true, ShowWhen: &providers.ShowWhen{Key: "mode", Values: []string{"b"}}},
+				{Key: "name", Required: true, ShowWhen: when("mode", "b")},
 			},
 			map[string]string{"mode": "a"},
 			-1, true,
@@ -86,7 +86,7 @@ func TestFirstMissingRequired(t *testing.T) {
 			"a required entry shown by its condition must be filled",
 			[]providers.FormField{
 				{Key: "mode", Options: []string{"a", "b"}},
-				{Key: "name", Required: true, ShowWhen: &providers.ShowWhen{Key: "mode", Values: []string{"b"}}},
+				{Key: "name", Required: true, ShowWhen: when("mode", "b")},
 			},
 			map[string]string{"mode": "b"},
 			1, false,
@@ -95,8 +95,8 @@ func TestFirstMissingRequired(t *testing.T) {
 			"a required entry hidden through a chain is fine",
 			[]providers.FormField{
 				{Key: "mode", Options: []string{"a", "b"}},
-				{Key: "sub", Options: []string{"x", "y"}, ShowWhen: &providers.ShowWhen{Key: "mode", Values: []string{"b"}}},
-				{Key: "name", Required: true, ShowWhen: &providers.ShowWhen{Key: "sub", Values: []string{"x"}}},
+				{Key: "sub", Options: []string{"x", "y"}, ShowWhen: when("mode", "b")},
+				{Key: "name", Required: true, ShowWhen: when("sub", "x")},
 			},
 			map[string]string{"mode": "a", "sub": "x"},
 			-1, true,
@@ -117,7 +117,7 @@ func TestFirstMissingRequired(t *testing.T) {
 			"a hidden empty entry is skipped for a later visible empty one",
 			[]providers.FormField{
 				{Key: "mode", Options: []string{"a", "b"}},
-				{Key: "hidden", Required: true, ShowWhen: &providers.ShowWhen{Key: "mode", Values: []string{"b"}}},
+				{Key: "hidden", Required: true, ShowWhen: when("mode", "b")},
 				{Key: "name", Required: true},
 			},
 			map[string]string{"mode": "a"},
@@ -229,13 +229,19 @@ func TestSnapSlider(t *testing.T) {
 	}
 }
 
-// when builds a ShowWhen condition for test tables.
-func when(key string, values ...string) *providers.ShowWhen {
-	return &providers.ShowWhen{Key: key, Values: values}
+// cond builds one ShowWhen condition for test tables.
+func cond(key string, values ...string) providers.Condition {
+	return providers.Condition{Key: key, Values: values}
+}
+
+// when builds a single-condition ShowWhen list for test tables.
+func when(key string, values ...string) []providers.Condition {
+	return []providers.Condition{cond(key, values...)}
 }
 
 func TestVisible(t *testing.T) {
 	gen := providers.FormField{Key: "gen", Options: []string{"text", "key", "uuid"}}
+	sym := providers.FormField{Key: "sym", Checkbox: true}
 	tests := []struct {
 		name   string
 		fields []providers.FormField
@@ -270,6 +276,37 @@ func TestVisible(t *testing.T) {
 			[]providers.FormField{gen, {Key: "a"}, {Key: "a", ShowWhen: when("gen", "key")}, {Key: "b", ShowWhen: when("a", "x")}},
 			map[string]string{"gen": "text", "a": "x"},
 			[]bool{true, true, false, true},
+		},
+		{
+			"two conditions both true shows",
+			[]providers.FormField{gen, sym, {Key: "x", ShowWhen: []providers.Condition{cond("gen", "text"), cond("sym", "true")}}},
+			map[string]string{"gen": "text", "sym": "true"},
+			[]bool{true, true, true},
+		},
+		{
+			"one false condition hides",
+			[]providers.FormField{gen, sym, {Key: "x", ShowWhen: []providers.Condition{cond("gen", "text"), cond("sym", "true")}}},
+			map[string]string{"gen": "text", "sym": "false"},
+			[]bool{true, true, false},
+		},
+		{
+			"unresolvable plus true condition shows",
+			[]providers.FormField{gen, {Key: "x", ShowWhen: []providers.Condition{cond("nope", "y"), cond("gen", "text")}}},
+			map[string]string{"gen": "text"},
+			[]bool{true, true},
+		},
+		{
+			"unresolvable plus false condition hides",
+			[]providers.FormField{gen, {Key: "x", ShowWhen: []providers.Condition{cond("nope", "y"), cond("gen", "key")}}},
+			map[string]string{"gen": "text"},
+			[]bool{true, false},
+		},
+		{"empty condition list shows", []providers.FormField{gen, {Key: "x", ShowWhen: []providers.Condition{}}}, map[string]string{"gen": "text"}, []bool{true, true}},
+		{
+			"hidden referenced field in a second condition hides",
+			[]providers.FormField{gen, {Key: "sym", Checkbox: true, ShowWhen: when("gen", "text")}, {Key: "x", ShowWhen: []providers.Condition{cond("gen", "text", "key"), cond("sym", "true")}}},
+			map[string]string{"gen": "key", "sym": "true"},
+			[]bool{true, false, false},
 		},
 	}
 	for _, tt := range tests {

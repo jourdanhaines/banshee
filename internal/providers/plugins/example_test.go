@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -111,8 +112,7 @@ func assertExampleFields(t *testing.T, fields []providers.FormField) {
 		{"repeat", func(f providers.FormField) bool {
 			return f.Slider != nil &&
 				*f.Slider == providers.SliderSpec{Min: 1, Max: 5, Step: 1, Default: 1} &&
-				f.ShowWhen != nil && f.ShowWhen.Key == "style" &&
-				len(f.ShowWhen.Values) == 1 && f.ShowWhen.Values[0] == "Shout"
+				reflect.DeepEqual(f.ShowWhen, []providers.Condition{{Key: "style", Values: []string{"Shout"}}})
 		}},
 		{"notify", func(f providers.FormField) bool {
 			return f.Checkbox && f.Checked && f.ShowWhen == nil

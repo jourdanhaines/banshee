@@ -34,9 +34,9 @@ emit_form() {
         title="Generate password"
         gens='"Text password","UUIDv4","JWT secret","Key"'
     fi
-    text='"show_when":{"key":"generator","values":["Text password"]}'
-    jwt='"show_when":{"key":"generator","values":["JWT secret"]}'
-    key='"show_when":{"key":"generator","values":["Key"]}'
+    text='"show_when":[{"key":"generator","values":["Text password"]}]'
+    jwt='"show_when":[{"key":"generator","values":["JWT secret"]}]'
+    key='"show_when":[{"key":"generator","values":["Key"]}]'
     printf '{"v":1,"seq":%s,"event":"results","done":true,"results":[' "$1"
     printf '{"id":"gen","title":"%s","subtitle":"Password, UUID, JWT secret or key to the clipboard","action":{"kind":"callback"},' "$title"
     printf '"form":{"title":"Generate","submit_label":"Generate","fields":['

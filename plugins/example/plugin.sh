@@ -65,8 +65,9 @@ emit_results() {
     #    the submitted values come back as a "submit" event (see handle_submit).
     #    Field kinds: free text (default), "options" (dropdown, first option
     #    preselected), "slider" (integer range) and "checkbox" (submits
-    #    "true"/"false"). "show_when" shows a field only while an earlier
-    #    field's value is in "values"; a hidden field is left out of the submit.
+    #    "true"/"false"). "show_when" is a list of conditions, all of which
+    #    must hold: each shows the field only while an earlier field's value
+    #    is in its "values"; a hidden field is left out of the submit.
     #    An older banshee renders sliders and checkboxes as text entries and
     #    ignores show_when, so handle_submit must tolerate any string or none.
     printf ',{"id":"greet","title":"Send a custom greeting",'
@@ -75,7 +76,7 @@ emit_results() {
     printf '{"key":"name","label":"Who to greet","placeholder":"world","required":true},'
     printf '{"key":"style","label":"Style","options":["Plain","Shout"]},'
     printf '{"key":"repeat","label":"Repeat","slider":{"min":1,"max":5,"step":1,"default":1},'
-    printf '"show_when":{"key":"style","values":["Shout"]}},'
+    printf '"show_when":[{"key":"style","values":["Shout"]}]},'
     printf '{"key":"notify","label":"Show a notification","checkbox":true,"checked":true}]}}'
 
     printf ']}\n'

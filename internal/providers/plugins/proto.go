@@ -43,8 +43,8 @@
 // additive, unknown-ignored.)
 //
 // A form field may also be a slider ("slider", see WireSlider), a checkbox
-// ("checkbox" + "checked") or conditional on an earlier field ("show_when",
-// see WireShowWhen). (Migration 2026-10: WireFormField.Slider, Checkbox,
+// ("checkbox" + "checked") or conditional on earlier fields ("show_when", a
+// list of WireCondition, all of which must hold). (Migration 2026-10: WireFormField.Slider, Checkbox,
 // Checked and ShowWhen added — additive, unknown-ignored.)
 //
 // Every query carries a Seq, and a plugin must echo the seq it is answering:
@@ -279,11 +279,12 @@ type WireFormField struct {
 	Checkbox bool `json:"checkbox,omitempty"`
 	// Checked is a checkbox's initial state; an older host ignores it.
 	Checked bool `json:"checked,omitempty"`
-	// ShowWhen shows the field only while an earlier field holds one of the
-	// listed values; a hidden field is not submitted. Degradation is
-	// symmetric: an older host ignores it, shows and submits every field, so
-	// a plugin must ignore keys that do not apply to the chosen values.
-	ShowWhen *WireShowWhen `json:"show_when,omitempty"`
+	// ShowWhen shows the field only while every condition holds (AND); a
+	// hidden field is not submitted. Example:
+	//   "show_when":[{"key":"generator","values":["Text password"]},{"key":"symbols","values":["true"]}]
+	// Degradation is symmetric: an older host ignores it, shows and submits
+	// every field, so a plugin must ignore keys that do not apply.
+	ShowWhen []WireCondition `json:"show_when,omitempty"`
 }
 
 // WireSlider is the wire form of providers.SliderSpec: an integer range the
@@ -296,9 +297,9 @@ type WireSlider struct {
 	Default int `json:"default,omitempty"`
 }
 
-// WireShowWhen is the wire form of providers.ShowWhen: the field shows only
-// while the earlier field keyed Key submits one of Values.
-type WireShowWhen struct {
+// WireCondition is the wire form of providers.Condition: it holds while the
+// earlier field keyed Key submits one of Values.
+type WireCondition struct {
 	Key    string   `json:"key"`
 	Values []string `json:"values"`
 }
@@ -356,10 +357,10 @@ func wireFormTo(f WireForm, pluginID, resultID string) *providers.Form {
 				Step: wf.Slider.Step, Default: wf.Slider.Default,
 			}
 		}
-		if wf.ShowWhen != nil {
-			fields[i].ShowWhen = &providers.ShowWhen{
-				Key:    wf.ShowWhen.Key,
-				Values: slices.Clone(wf.ShowWhen.Values),
+		if len(wf.ShowWhen) > 0 {
+			fields[i].ShowWhen = make([]providers.Condition, len(wf.ShowWhen))
+			for j, c := range wf.ShowWhen {
+				fields[i].ShowWhen[j] = providers.Condition{Key: c.Key, Values: slices.Clone(c.Values)}
 			}
 		}
 	}

@@ -190,8 +190,8 @@ func TestPassgenQuery(t *testing.T) {
 
 // passgenFields is the form the plugin must declare for one generator order.
 func passgenFields(order []string) []providers.FormField {
-	when := func(v string) *providers.ShowWhen {
-		return &providers.ShowWhen{Key: "generator", Values: []string{v}}
+	when := func(v string) []providers.Condition {
+		return []providers.Condition{{Key: "generator", Values: []string{v}}}
 	}
 	return []providers.FormField{
 		{Key: "generator", Label: "Generator", Options: order},

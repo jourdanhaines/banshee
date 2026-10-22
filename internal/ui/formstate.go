@@ -74,16 +74,22 @@ func SnapSlider(s providers.SliderSpec, raw float64) int {
 }
 
 // Visible reports, index-parallel to fields, which fields their ShowWhen
-// condition currently shows. Only earlier fields resolve as a condition's key
-// (first occurrence wins), and a field hidden itself hides its dependants.
+// conditions currently show (AND). Only earlier fields resolve as a
+// condition's key (first occurrence wins); an unresolvable condition is
+// ignored, and a field hidden itself hides its dependants.
 func Visible(fields []providers.FormField, values map[string]string) []bool {
 	vis := make([]bool, len(fields))
 	seen := make(map[string]int, len(fields))
 	for i, f := range fields {
 		vis[i] = true
-		if w := f.ShowWhen; w != nil && len(w.Values) > 0 {
-			if j, ok := seen[w.Key]; ok {
-				vis[i] = vis[j] && slices.Contains(w.Values, values[w.Key])
+		for _, c := range f.ShowWhen {
+			j, ok := seen[c.Key]
+			if !ok || len(c.Values) == 0 {
+				continue
+			}
+			if !vis[j] || !slices.Contains(c.Values, values[c.Key]) {
+				vis[i] = false
+				break
 			}
 		}
 		if _, dup := seen[f.Key]; !dup {

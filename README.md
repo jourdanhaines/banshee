@@ -374,8 +374,9 @@ behind a query prefix; their actions can open URLs, run detached commands,
 copy text to the clipboard, call back into the plugin, or declare an input
 form whose submitted values come back to the plugin. Form fields are text by
 default; `options` makes a dropdown, `slider` an integer range, `checkbox` a
-toggle, and `show_when` shows a field only while an earlier field holds one of
-the listed values (hidden fields are not submitted). `make install` ships
+toggle, and `show_when` — a list of `{key, values}` conditions, all of which
+must hold — shows a field only while each named earlier field holds one of its
+listed values (hidden fields are not submitted). `make install` ships
 four: `example`, `claude-code` (Claude Code notifications), `screenrec`
 (screen recording) and `passgen` (type `pass`, `gen` or `key` to generate a
 password, UUIDv4, JWT secret or random key straight to the clipboard, marked
