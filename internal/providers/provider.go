@@ -31,9 +31,9 @@
 // Migration 2026-09b: Form.SubmitLabel added — additive, zero value inert. A
 // form that leaves it empty keeps Enter-submits and the keyboard hint.
 //
-// Migration 2026-10: FormField.Slider, Checkbox, Checked and ShowWhen (a list
-// of Condition, ANDed) added — additive, zero value inert. A UI that ignores
-// them renders every field as before and submits every field.
+// Migration 2026-10: FormField.Slider, Checkbox, Checked, ShowWhen (a list of
+// Condition, ANDed) and Generate added — additive, zero value inert. A UI that
+// ignores them renders every field as before and submits every field.
 package providers
 
 import (
@@ -152,6 +152,13 @@ type FormField struct {
 	Checkbox bool
 	// Checked is a checkbox's initial state; inert on any other kind.
 	Checked bool
+	// Generate, when non-nil, renders a box holding a value the launcher
+	// generates itself and re-rolls on demand; the submitted value is that
+	// string. Precedence Options > Slider > Checkbox > Generate > entry, and
+	// Required is trivially satisfied. The value is secret material: it rides
+	// Action.Values and is never logged. An older UI renders an empty text
+	// entry and submits "", which a provider must read as "nothing generated".
+	Generate *GenerateSpec
 	// ShowWhen, when non-empty, shows the field only while every condition
 	// holds (AND). A hidden field is omitted from Action.Values and never
 	// fails Required.
@@ -163,6 +170,33 @@ type FormField struct {
 // and snapped to the Min+k*Step grid. Max <= Min makes the spec ignored.
 type SliderSpec struct {
 	Min, Max, Step, Default int
+}
+
+// GenerateSpec describes how the launcher generates a FormField.Generate
+// value, resolved in order:
+//   - Bytes > 0: Bytes random bytes encoded per Encoding: "hex", "base64"
+//     (standard, padded) or "base64url" (raw, unpadded); unknown means hex.
+//   - Pattern != "": each rune expands by a small grammar — `x` picks from
+//     Charset, `[abc]` picks from the bracketed runes, `\` escapes the next
+//     rune, anything else is literal.
+//   - otherwise N picks from Charset, where N is the integer value of the
+//     field keyed LengthFrom if > 0, else Length if > 0, else 16, clamped to
+//     1..256.
+//
+// Every pick is uniform. An empty Charset with no Bytes generates "".
+type GenerateSpec struct {
+	// Charset is the alphabet for `x` picks and plain length picks.
+	Charset string
+	// Pattern is a template in the grammar above; it overrides length picks.
+	Pattern string
+	// LengthFrom names a field (typically a slider) whose value sets N.
+	LengthFrom string
+	// Length is N when LengthFrom yields no positive integer.
+	Length int
+	// Bytes, when > 0, generates that many random bytes instead of picks.
+	Bytes int
+	// Encoding encodes Bytes: "hex", "base64" or "base64url".
+	Encoding string
 }
 
 // Condition is one FormField.ShowWhen test on an earlier field's submitted

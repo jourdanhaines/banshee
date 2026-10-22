@@ -29,11 +29,12 @@ const (
 	KindDropdown
 	KindSlider
 	KindCheckbox
+	KindGenerated
 )
 
 // KindOf resolves a field's widget kind by precedence Options > Slider >
-// Checkbox > entry. A slider whose Max <= Min is ignored, so the field falls
-// through to the next kind rather than rendering an unusable range.
+// Checkbox > Generate > entry. A slider whose Max <= Min is ignored, so the
+// field falls through to the next kind rather than rendering an unusable range.
 func KindOf(f providers.FormField) FieldKind {
 	switch {
 	case len(f.Options) > 0:
@@ -42,6 +43,8 @@ func KindOf(f providers.FormField) FieldKind {
 		return KindSlider
 	case f.Checkbox:
 		return KindCheckbox
+	case f.Generate != nil:
+		return KindGenerated
 	}
 	return KindEntry
 }
@@ -121,8 +124,8 @@ func FirstMissingRequired(fields []providers.FormField, values map[string]string
 	vis := Visible(fields, values)
 	for i, f := range fields {
 		if KindOf(f) != KindEntry || !vis[i] {
-			// Dropdowns, sliders and checkboxes always carry a value, and a
-			// hidden field is never submitted, so neither can block the form.
+			// Dropdowns, sliders, checkboxes and generated fields always
+			// carry a value, and a hidden field is never submitted.
 			continue
 		}
 		if f.Required && strings.TrimSpace(values[f.Key]) == "" {

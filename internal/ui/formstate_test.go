@@ -114,6 +114,12 @@ func TestFirstMissingRequired(t *testing.T) {
 			-1, true,
 		},
 		{
+			"a required empty generated field never blocks submission",
+			[]providers.FormField{{Key: "g", Required: true, Generate: &providers.GenerateSpec{Length: 8}}},
+			map[string]string{"g": ""},
+			-1, true,
+		},
+		{
 			"a hidden empty entry is skipped for a later visible empty one",
 			[]providers.FormField{
 				{Key: "mode", Options: []string{"a", "b"}},
@@ -168,6 +174,11 @@ func TestKindOf(t *testing.T) {
 		{"inverted slider alone falls through to entry", providers.FormField{Slider: &providers.SliderSpec{Min: 5, Max: 1}}, KindEntry},
 		{"checkbox", providers.FormField{Checkbox: true}, KindCheckbox},
 		{"checked without checkbox is an entry", providers.FormField{Checked: true}, KindEntry},
+		{"generate alone is generated", providers.FormField{Generate: &providers.GenerateSpec{Length: 8}}, KindGenerated},
+		{"zero generate spec is still generated", providers.FormField{Generate: &providers.GenerateSpec{}}, KindGenerated},
+		{"checkbox beats generate", providers.FormField{Checkbox: true, Generate: &providers.GenerateSpec{}}, KindCheckbox},
+		{"options beat generate", providers.FormField{Options: []string{"x"}, Generate: &providers.GenerateSpec{}}, KindDropdown},
+		{"slider beats generate", providers.FormField{Slider: &providers.SliderSpec{Max: 10}, Generate: &providers.GenerateSpec{}}, KindSlider},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

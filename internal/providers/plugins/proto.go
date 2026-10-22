@@ -43,9 +43,11 @@
 // additive, unknown-ignored.)
 //
 // A form field may also be a slider ("slider", see WireSlider), a checkbox
-// ("checkbox" + "checked") or conditional on earlier fields ("show_when", a
-// list of WireCondition, all of which must hold). (Migration 2026-10: WireFormField.Slider, Checkbox,
-// Checked and ShowWhen added — additive, unknown-ignored.)
+// ("checkbox" + "checked"), a launcher-generated value ("generate", see
+// WireGenerate) or conditional on earlier fields ("show_when", a list of
+// WireCondition, all of which must hold). (Migration 2026-10: WireFormField.
+// Slider, Checkbox, Checked, ShowWhen and Generate added — additive,
+// unknown-ignored.)
 //
 // Every query carries a Seq, and a plugin must echo the seq it is answering:
 // the host drops any message whose seq is not the query it is still waiting
@@ -285,6 +287,11 @@ type WireFormField struct {
 	// Degradation is symmetric: an older host ignores it, shows and submits
 	// every field, so a plugin must ignore keys that do not apply.
 	ShowWhen []WireCondition `json:"show_when,omitempty"`
+	// Generate makes the launcher generate the field's value itself (see
+	// WireGenerate) and submit it; the value is secret material. Degradation:
+	// an older host renders an empty text entry under the same key and
+	// submits "", so a plugin must treat "" as "nothing generated".
+	Generate *WireGenerate `json:"generate,omitempty"`
 }
 
 // WireSlider is the wire form of providers.SliderSpec: an integer range the
@@ -295,6 +302,18 @@ type WireSlider struct {
 	Max     int `json:"max"`
 	Step    int `json:"step,omitempty"`
 	Default int `json:"default,omitempty"`
+}
+
+// WireGenerate is the wire form of providers.GenerateSpec, which documents
+// the resolution order: bytes > 0 ⇒ random bytes in encoding; else pattern;
+// else picks from charset, counted by length_from, length or 16.
+type WireGenerate struct {
+	Charset    string `json:"charset,omitempty"`
+	Pattern    string `json:"pattern,omitempty"`
+	LengthFrom string `json:"length_from,omitempty"`
+	Length     int    `json:"length,omitempty"`
+	Bytes      int    `json:"bytes,omitempty"`
+	Encoding   string `json:"encoding,omitempty"`
 }
 
 // WireCondition is the wire form of providers.Condition: it holds while the
@@ -355,6 +374,12 @@ func wireFormTo(f WireForm, pluginID, resultID string) *providers.Form {
 			fields[i].Slider = &providers.SliderSpec{
 				Min: wf.Slider.Min, Max: wf.Slider.Max,
 				Step: wf.Slider.Step, Default: wf.Slider.Default,
+			}
+		}
+		if g := wf.Generate; g != nil {
+			fields[i].Generate = &providers.GenerateSpec{
+				Charset: g.Charset, Pattern: g.Pattern, LengthFrom: g.LengthFrom,
+				Length: g.Length, Bytes: g.Bytes, Encoding: g.Encoding,
 			}
 		}
 		if len(wf.ShowWhen) > 0 {

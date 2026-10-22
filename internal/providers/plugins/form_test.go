@@ -377,6 +377,47 @@ func TestShowWhenObjectDropsWholeMessage(t *testing.T) {
 	}
 }
 
+// TestWireFormFieldGenerate pins the "generate" spec's trip across the wire.
+func TestWireFormFieldGenerate(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		want  *providers.GenerateSpec
+	}{
+		{
+			name:  "full spec round-trips",
+			field: `{"key":"g","label":"","generate":{"charset":"abc","pattern":"x-[89]","length_from":"len","length":12,"bytes":32,"encoding":"base64url"}}`,
+			want:  &providers.GenerateSpec{Charset: "abc", Pattern: "x-[89]", LengthFrom: "len", Length: 12, Bytes: 32, Encoding: "base64url"},
+		},
+		{
+			name:  "absent stays nil",
+			field: `{"key":"g","label":"G"}`,
+		},
+		{
+			name:  "null stays nil",
+			field: `{"key":"g","label":"G","generate":null}`,
+		},
+		{
+			name:  "empty object is a zero spec",
+			field: `{"key":"g","label":"G","generate":{}}`,
+			want:  &providers.GenerateSpec{},
+		},
+		{
+			name:  "unknown inner key is ignored",
+			field: `{"key":"g","label":"G","generate":{"bytes":16,"encoding":"hex","alphabet":"zz"}}`,
+			want:  &providers.GenerateSpec{Bytes: 16, Encoding: "hex"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decodeField(t, tt.field).Generate
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Generate = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestWireFormFieldLegacy pins forward and backward compatibility of the new
 // field keys: a legacy field decodes with every new field zero, and a field
 // that sets none of them marshals without their keys.
@@ -387,7 +428,7 @@ func TestWireFormFieldLegacy(t *testing.T) {
 	}{
 		{"legacy field decodes with new fields zero", func(t *testing.T) {
 			f := decodeField(t, `{"key":"name","label":"Name","placeholder":"x","required":true,"secret":false}`)
-			if f.Slider != nil || f.Checkbox || f.Checked || len(f.ShowWhen) != 0 {
+			if f.Slider != nil || f.Checkbox || f.Checked || len(f.ShowWhen) != 0 || f.Generate != nil {
 				t.Errorf("field = %+v, want new fields zero", f)
 			}
 		}},
@@ -396,10 +437,19 @@ func TestWireFormFieldLegacy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, key := range []string{"slider", "checkbox", "checked", "show_when"} {
+			for _, key := range []string{"slider", "checkbox", "checked", "show_when", "generate"} {
 				if strings.Contains(string(b), `"`+key+`"`) {
 					t.Errorf("marshal = %s, carries %q", b, key)
 				}
+			}
+		}},
+		{"zero spec fields are omitted on marshal", func(t *testing.T) {
+			b, err := json.Marshal(WireFormField{Key: "k", Generate: &WireGenerate{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(b), `"generate":{}`) {
+				t.Errorf("marshal = %s, want an empty generate object", b)
 			}
 		}},
 	}
