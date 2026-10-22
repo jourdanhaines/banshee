@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"math/big"
+	mrand "math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"
@@ -252,15 +253,37 @@ func generateValue(r io.Reader, spec providers.GenerateSpec, values map[string]s
 	return b.String(), nil
 }
 
-// ElideSecret shortens a long secret for its hidden display: more than 24
-// runes become the first 8, six bullets and the last 8, so the box stays one
-// line while the user can still recognise the value.
-func ElideSecret(s string) string {
-	r := []rune(s)
-	if len(r) <= 24 {
-		return s
+// ObscureMask picks which runes of an n-rune secret its hidden display masks:
+// a quarter of them, rounded, at least one when n >= 1, at uniformly random
+// distinct positions. The positions are independent of the value and reveal
+// nothing about it, so math/rand suffices; a nil r uses the global source.
+func ObscureMask(n int, r *mrand.Rand) []bool {
+	if n <= 0 {
+		return nil
 	}
-	return string(r[:8]) + "••••••" + string(r[len(r)-8:])
+	count := max(1, int(math.Round(float64(n)*0.25)))
+	perm := mrand.Perm
+	if r != nil {
+		perm = r.Perm
+	}
+	mask := make([]bool, n)
+	for _, i := range perm(n)[:count] {
+		mask[i] = true
+	}
+	return mask
+}
+
+// ObscureSecret replaces each rune of s whose mask entry is true with a
+// bullet. Runes past the end of a short mask stay visible and surplus mask
+// entries are ignored, so a stale mask never panics.
+func ObscureSecret(s string, mask []bool) string {
+	r := []rune(s)
+	for i := range min(len(r), len(mask)) {
+		if mask[i] {
+			r[i] = '•'
+		}
+	}
+	return string(r)
 }
 
 // RuneClass groups a secret's runes for colouring, so look-alike characters
@@ -275,7 +298,7 @@ const (
 	RuneBullet
 )
 
-// ClassifyRune returns r's colour class: letters, digits, the elision bullet,
+// ClassifyRune returns r's colour class: letters, digits, the obscuring bullet,
 // and everything else as a symbol.
 func ClassifyRune(r rune) RuneClass {
 	switch {
@@ -293,7 +316,7 @@ func ClassifyRune(r rune) RuneClass {
 const (
 	// SecretAlphaColor colours letters.
 	SecretAlphaColor = "#ffffff"
-	// SecretBulletColor dims the elision bullets so they read as a gap.
+	// SecretBulletColor dims the obscuring bullets so they read as gaps.
 	SecretBulletColor = "#6b7080"
 	// SecretSymbolColor colours punctuation and every other rune.
 	SecretSymbolColor = "#f7768e"

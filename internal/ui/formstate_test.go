@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"maps"
+	mrand "math/rand/v2"
 	"regexp"
 	"slices"
 	"strings"
@@ -603,22 +604,80 @@ func TestGenerateValueReaderFailure(t *testing.T) {
 	}
 }
 
-func TestElideSecret(t *testing.T) {
+func TestObscureMask(t *testing.T) {
 	tests := []struct {
 		name string
-		in   string
-		want string
+		n    int
+		want int
 	}{
-		{"empty", "", ""},
-		{"24 runes kept", "abcdefghijklmnopqrstuvwx", "abcdefghijklmnopqrstuvwx"},
-		{"25 runes elided", "abcdefghijklmnopqrstuvwxy", "abcdefgh••••••rstuvwxy"},
-		{"24 multibyte runes kept", strings.Repeat("é", 24), strings.Repeat("é", 24)},
-		{"25 multibyte runes elided on rune boundaries", "αβγδεζηθ" + strings.Repeat("é", 9) + "ικλμνξοπ", "αβγδεζηθ••••••ικλμνξοπ"},
+		{"zero", 0, 0},
+		{"one", 1, 1},
+		{"two", 2, 1},
+		{"three", 3, 1},
+		{"four", 4, 1},
+		{"eight", 8, 2},
+		{"twenty-four", 24, 6},
+		{"hundred", 100, 25},
+		{"max length", 256, 64},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ElideSecret(tt.in); got != tt.want {
-				t.Errorf("ElideSecret = %q, want %q", got, tt.want)
+			for _, src := range []*mrand.Rand{nil, mrand.New(mrand.NewPCG(1, 2))} {
+				mask := ObscureMask(tt.n, src)
+				if len(mask) != tt.n {
+					t.Fatalf("len(mask) = %d, want %d", len(mask), tt.n)
+				}
+				got := 0
+				for _, m := range mask {
+					if m {
+						got++
+					}
+				}
+				if got != tt.want {
+					t.Errorf("obscured %d of %d, want %d", got, tt.n, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestObscureMaskVaries(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+	}{
+		{"twenty-four runes", 24},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := mrand.New(mrand.NewPCG(1, 2))
+			a, b := ObscureMask(tt.n, r), ObscureMask(tt.n, r)
+			if slices.Equal(a, b) {
+				t.Errorf("two masks from one source are identical: %v", a)
+			}
+		})
+	}
+}
+
+func TestObscureSecret(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		mask []bool
+		want string
+	}{
+		{"empty", "", nil, ""},
+		{"empty with mask", "", []bool{true}, ""},
+		{"masked positions", "abcd", []bool{true, false, false, true}, "•bc•"},
+		{"multibyte runes", "αβγé", []bool{false, true, false, true}, "α•γ•"},
+		{"short mask leaves tail visible", "abcdef", []bool{true, true}, "••cdef"},
+		{"long mask truncated", "ab", []bool{false, true, true, true}, "a•"},
+		{"nil mask shows all", "abc", nil, "abc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ObscureSecret(tt.in, tt.mask); got != tt.want {
+				t.Errorf("ObscureSecret = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -669,10 +728,10 @@ func TestSecretMarkup(t *testing.T) {
 		},
 		{"markup characters are escaped", "<&>", span(SecretSymbolColor, "&lt;&amp;&gt;")},
 		{
-			"elided value",
-			ElideSecret("abcdefgh01234567xyz89abcdef"),
-			span(SecretAlphaColor, "abcdefgh") + span(SecretBulletColor, "••••••") +
-				span(accent, "89") + span(SecretAlphaColor, "abcdef"),
+			"obscured value",
+			ObscureSecret("ab12cd", []bool{false, true, false, true, true, false}),
+			span(SecretAlphaColor, "a") + span(SecretBulletColor, "•") + span(accent, "1") +
+				span(SecretBulletColor, "••") + span(SecretAlphaColor, "d"),
 		},
 	}
 	for _, tt := range tests {

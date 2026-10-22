@@ -3,6 +3,7 @@ package ui
 import (
 	"log"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
@@ -130,8 +131,8 @@ func (i *checkboxInput) grabFocus() { i.c.GrabFocus() }
 func (i *checkboxInput) onChange(f func()) { i.c.ConnectToggled(f) }
 
 // generatedInput is a FormField.Generate field: a read-only box holding a
-// banshee-generated secret, shown elided until the eye toggle reveals it, with
-// a re-roll button. The value is secret material and is never logged.
+// banshee-generated secret, shown with a random quarter of its runes obscured
+// until the eye toggle reveals it, with a re-roll button. The value is secret material and is never logged.
 type generatedInput struct {
 	key      string
 	label    *gtk.Label
@@ -139,6 +140,7 @@ type generatedInput struct {
 	reroll   *gtk.Button
 	spec     providers.GenerateSpec
 	current  string
+	mask     []bool // obscured positions; kept across reveal toggles
 	revealed bool
 	accent   string
 }
@@ -162,20 +164,20 @@ func (i *generatedInput) regenerate(values map[string]string) {
 		v = ""
 	}
 	i.current = v
+	i.mask = ObscureMask(utf8.RuneCountInString(v), nil)
 	i.render()
 }
 
-// render draws the value elided or in full per the reveal state; a revealed
-// value wraps per character because a secret has no word boundaries.
+// render draws the value obscured or in full per the reveal state. Both
+// states are full length, so both wrap per character: a secret has no word
+// boundaries.
 func (i *generatedInput) render() {
-	text := ElideSecret(i.current)
+	text := ObscureSecret(i.current, i.mask)
 	if i.revealed {
 		text = i.current
 	}
 	i.label.SetMarkup(SecretMarkup(text, i.accent))
-	i.label.SetWrap(i.revealed)
 	if i.revealed {
-		i.label.SetWrapMode(pango.WrapChar)
 		i.eye.SetIconName("view-conceal-symbolic")
 		i.eye.SetTooltipText("Hide")
 	} else {
@@ -378,6 +380,8 @@ func (v *formView) addGenerated(row *gtk.Box, f providers.FormField) {
 	label.SetHExpand(true)
 	label.SetCanFocus(false)
 	label.SetSelectable(false)
+	label.SetWrap(true)
+	label.SetWrapMode(pango.WrapChar)
 	box.Append(label)
 
 	eye := gtk.NewToggleButton()
