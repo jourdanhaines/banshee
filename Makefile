@@ -153,6 +153,14 @@ install-plugins:
 		install -m 0644 plugins/screenrec/config        $(CONFIGDIR)/plugins/screenrec/config; \
 		echo "installed screenrec plugin to $(CONFIGDIR)/plugins/screenrec"; \
 	fi
+	@if [ -d $(CONFIGDIR)/plugins/passgen ]; then \
+		echo "keeping existing $(CONFIGDIR)/plugins/passgen"; \
+	else \
+		mkdir -p $(CONFIGDIR)/plugins/passgen; \
+		install -m 0644 plugins/passgen/manifest.json $(CONFIGDIR)/plugins/passgen/manifest.json; \
+		install -m 0755 plugins/passgen/plugin.sh     $(CONFIGDIR)/plugins/passgen/plugin.sh; \
+		echo "installed passgen plugin to $(CONFIGDIR)/plugins/passgen"; \
+	fi
 
 uninstall:
 	-$(BINDIR)/$(BIN) quit 2>/dev/null || true
