@@ -122,7 +122,8 @@ window#banshee-window {
 
 /* Query entry and form fields share one look */
 #banshee-window entry.form-field,
-#banshee-window entry.query {
+#banshee-window entry.query,
+#banshee-window entry.picker-query {
 	background-color: rgba(255, 255, 255, 0.04);
 	background-image: none;
 	border: 1px solid {{ alpha .AccentRGB 0.22 }};
@@ -139,18 +140,22 @@ window#banshee-window {
 #banshee-window entry.form-field:focus,
 #banshee-window entry.form-field:focus-within,
 #banshee-window entry.query:focus,
-#banshee-window entry.query:focus-within {
+#banshee-window entry.query:focus-within,
+#banshee-window entry.picker-query:focus,
+#banshee-window entry.picker-query:focus-within {
 	border-color: {{ alpha .AccentRGB 0.6 }};
 	background-color: rgba(255, 255, 255, 0.06);
 }
 
 #banshee-window entry.form-field > text > placeholder,
-#banshee-window entry.query > text > placeholder {
+#banshee-window entry.query > text > placeholder,
+#banshee-window entry.picker-query > text > placeholder {
 	color: rgba(230, 233, 240, 0.32);
 }
 
 #banshee-window entry.form-field > text > selection,
-#banshee-window entry.query > text > selection {
+#banshee-window entry.query > text > selection,
+#banshee-window entry.picker-query > text > selection {
 	background-color: {{ alpha .AccentRGB 0.35 }};
 	color: #ffffff;
 }
@@ -332,7 +337,8 @@ window#banshee-window {
 /* Dedicated form buttons (Form.SubmitLabel), styled like the dropdown button:
    submit carries the accent, Back stays subtle. */
 #banshee-window button.form-submit,
-#banshee-window button.form-back {
+#banshee-window button.form-back,
+#banshee-window button.picker-back {
 	background-image: none;
 	border-radius: 10px;
 	padding: 8px 12px;
@@ -355,7 +361,8 @@ window#banshee-window {
 	border-color: {{ alpha .AccentRGB 0.8 }};
 }
 
-#banshee-window button.form-back {
+#banshee-window button.form-back,
+#banshee-window button.picker-back {
 	margin-top: 6px;
 	background-color: rgba(255, 255, 255, 0.04);
 	border: 1px solid {{ alpha .AccentRGB 0.22 }};
@@ -363,7 +370,9 @@ window#banshee-window {
 }
 
 #banshee-window button.form-back:focus,
-#banshee-window button.form-back:hover {
+#banshee-window button.form-back:hover,
+#banshee-window button.picker-back:focus,
+#banshee-window button.picker-back:hover {
 	background-color: rgba(255, 255, 255, 0.06);
 	border-color: {{ alpha .AccentRGB 0.6 }};
 	color: #e6e9f0;
@@ -411,6 +420,65 @@ window#banshee-window {
 #banshee-window button.form-generated-toggle:checked {
 	background-color: {{ alpha .AccentRGB 0.22 }};
 	border-color: {{ .Accent }};
+}
+
+/* Picker page (emoji grid): search entry and icon-only Back over a FlowBox of
+   label cells, themed like the results list so the two pages read as one. */
+#banshee-window .picker-view {
+	padding: 0;
+}
+
+#banshee-window button.picker-back {
+	margin: 0 8px 8px 0;
+	padding: 8px 10px;
+	min-width: 28px;
+}
+
+#banshee-window scrolledwindow.picker-scroll,
+#banshee-window scrolledwindow.picker-scroll > viewport,
+#banshee-window flowbox.picker-grid {
+	background-color: transparent;
+}
+
+#banshee-window scrolledwindow.picker-scroll undershoot.top,
+#banshee-window scrolledwindow.picker-scroll undershoot.bottom {
+	background-image: none;
+}
+
+#banshee-window flowbox.picker-grid > flowboxchild {
+	background-color: transparent;
+	border-radius: 8px;
+	padding: 6px 0;
+	transition: background-color 90ms ease-out;
+}
+
+#banshee-window flowbox.picker-grid > flowboxchild:hover {
+	background-color: rgba(255, 255, 255, 0.045);
+}
+
+#banshee-window flowbox.picker-grid > flowboxchild:selected,
+#banshee-window flowbox.picker-grid > flowboxchild:selected:hover {
+	background-color: {{ alpha .AccentRGB 0.16 }};
+}
+
+#banshee-window label.picker-cell {
+	font-size: 28px;
+	color: #f2f5fb;
+}
+
+/* Variant chooser (skin tones): like the dropdown popover, it is its own
+   GtkNative and GTK's light Default theme would paint it white. */
+#banshee-window popover.picker-variants > contents {
+	background-color: rgba({{ .PanelRGB }}, 0.98);
+	border: 1px solid {{ alpha .AccentRGB 0.35 }};
+	border-radius: 12px;
+	padding: 6px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+#banshee-window popover.picker-variants > arrow {
+	background-color: rgba({{ .PanelRGB }}, 0.98);
+	border-color: {{ alpha .AccentRGB 0.35 }};
 }
 
 /* Results list */

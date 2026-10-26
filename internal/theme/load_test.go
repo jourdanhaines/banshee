@@ -56,6 +56,8 @@ func TestGeneratedCSSParses(t *testing.T) {
 		{"generated secret is monospace", `font-family: "Adwaita Mono", "JetBrainsMono Nerd Font", "monospace"`},
 		{"generated secret is bold", "font-weight: 700"},
 		{"generated buttons are square", "min-width: 28px"},
+		{"picker cells are large glyphs", "font-size: 28px"},
+		{"picker variant popover radius", "border-top-left-radius: 12px"},
 	}
 
 	css := roundTrip(t, config.Default())
@@ -139,6 +141,27 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window .result-badge",
 		"#banshee-window .result-preview",
 		"#banshee-window label.empty",
+		"#banshee-window entry.picker-query",
+		"#banshee-window entry:focus.picker-query",
+		"#banshee-window entry:focus-within.picker-query",
+		"#banshee-window entry.picker-query > text > placeholder",
+		"#banshee-window entry.picker-query > text > selection",
+		"#banshee-window button.picker-back",
+		"#banshee-window button:focus.picker-back",
+		"#banshee-window button:hover.picker-back",
+		"#banshee-window .picker-view",
+		"#banshee-window scrolledwindow.picker-scroll",
+		"#banshee-window scrolledwindow.picker-scroll > viewport",
+		"#banshee-window flowbox.picker-grid",
+		"#banshee-window scrolledwindow.picker-scroll undershoot.top",
+		"#banshee-window scrolledwindow.picker-scroll undershoot.bottom",
+		"#banshee-window flowbox.picker-grid > flowboxchild",
+		"#banshee-window flowbox.picker-grid > flowboxchild:hover",
+		"#banshee-window flowbox.picker-grid > flowboxchild:selected",
+		"#banshee-window flowbox.picker-grid > flowboxchild:selected:hover",
+		"#banshee-window label.picker-cell",
+		"#banshee-window popover.picker-variants > contents",
+		"#banshee-window popover.picker-variants > arrow",
 	}
 
 	parsed := map[string]bool{}
