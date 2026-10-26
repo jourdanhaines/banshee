@@ -46,6 +46,9 @@ JSON-described tmux session, exactly as it always has.
   re-copies, Tab deletes an entry. Secret-looking text and password-manager
   copies show up masked, and the history lives only in memory — nothing
   survives a restart.
+- **Emoji picker** — type `emo` (or `emoji`) for a searchable 8-wide grid of
+  every Unicode 18.0 emoji; Enter or a click copies one. Emoji with skin tones
+  open a tone chooser first, mixed-tone couples and handshakes included.
 - **Connectors and plugins** — GitHub and Railway are built in; add your own
   declarative URL connectors or long-running exec plugins.
 
@@ -260,6 +263,40 @@ What you should know about how it treats your data:
   masked entry re-marks it sensitive for other clipboard managers.
 - Watching requires Wayland and `wl-clipboard`; turn the feature off entirely
   with `clipboard_history = false`.
+
+## Emoji picker
+
+Type `emo` (or keep going — every prefix of `emoji` from `emo` up triggers)
+and press Enter on the **Emoji picker** row to open a searchable grid. Text
+after the trigger pre-fills the search, so `emoji heart` opens straight onto
+the hearts; the row also turns up for a plain fuzzy query like `picker`.
+
+```
+┌──────────────────────────────────────────────┐
+│  ←  heart                                    │
+├──────────────────────────────────────────────┤
+│   ❤️   🧡   💛   💚   💙   💜   🖤   🤍      │
+│   🤎   💔   ❣️   💕   💞   💓   💗   💖      │
+│   💘   💝   💟   🫀   🫶   😍   🥰   😻      │
+└──────────────────────────────────────────────┘
+```
+
+The search matches each emoji's name and its CLDR keywords, and every word
+must match (`face grin` finds 😀 *grinning face*), best matches first.
+
+- **Arrows** move the highlight (`Ctrl-J`/`K`/`N`/`P` too); **Up** from the
+  top row returns to the search box.
+- **Enter** copies the highlighted emoji — or the first one, if you are still
+  in the search box. A click copies too. Hovering a cell shows its name.
+- **Esc** (or the back arrow) goes back to the results.
+- **Skin tones** — an emoji that has them opens a tone chooser instead of
+  copying: the default yellow first, then the five tones, and for two-person
+  emoji (couples, kisses, handshakes) every mixed combination. Arrows and
+  Enter work the same there; Esc closes just the chooser.
+
+The dataset is Unicode Emoji 18.0 with CLDR 49 English keywords, embedded in
+the binary — nothing is fetched at runtime. Regenerate it with
+`go generate ./internal/providers/emoji/`.
 
 ## Screen recording
 
