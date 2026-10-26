@@ -46,7 +46,7 @@ JSON-described tmux session, exactly as it always has.
   re-copies, Tab deletes an entry. Secret-looking text and password-manager
   copies show up masked, and the history lives only in memory — nothing
   survives a restart.
-- **Emoji picker** — type `emo` (or `emoji`) for a searchable 8-wide grid of
+- **Emoji picker** — type `emo` (or `emoji`) for a searchable 12-wide grid of
   every Unicode 18.0 emoji; Enter or a click copies one. Emoji with skin tones
   open a tone chooser first, mixed-tone couples and handshakes included.
 - **Connectors and plugins** — GitHub and Railway are built in; add your own
@@ -275,9 +275,9 @@ the hearts; the row also turns up for a plain fuzzy query like `picker`.
 ┌──────────────────────────────────────────────┐
 │  ←  heart                                    │
 ├──────────────────────────────────────────────┤
-│   ❤️   🧡   💛   💚   💙   💜   🖤   🤍      │
-│   🤎   💔   ❣️   💕   💞   💓   💗   💖      │
-│   💘   💝   💟   🫀   🫶   😍   🥰   😻      │
+│    ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕       │
+│    💞 💓 💗 💖 💘 💝 💟 🫀 🫶 😍 🥰 😻       │
+│    🩷 🩵 🩶 💌 💋 😘 💑 💏 🫰 🤟 😽 🫂       │
 └──────────────────────────────────────────────┘
 ```
 

@@ -39,10 +39,11 @@ func TestPickerColumns(t *testing.T) {
 		cols int
 		want int
 	}{
-		{"unset uses default", 0, 8},
-		{"negative uses default", -3, 8},
+		{"unset uses default", 0, 12},
+		{"negative uses default", -3, 12},
 		{"explicit", 5, 5},
-		{"explicit default", 8, 8},
+		{"explicit default", 12, 12},
+		{"explicit eight", 8, 8},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

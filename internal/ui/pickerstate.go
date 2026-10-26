@@ -9,7 +9,7 @@ import (
 )
 
 // DefaultPickerColumns is the grid width used when Picker.Columns is unset.
-const DefaultPickerColumns = 8
+const DefaultPickerColumns = 12
 
 // PickerColumns returns the grid width for p: its Columns, or
 // DefaultPickerColumns when the provider left it unset (or set it nonsensically).

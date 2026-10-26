@@ -257,7 +257,7 @@ type PickerItem struct {
 type Picker struct {
 	// Title is the page title, used for the search placeholder.
 	Title string
-	// Columns is the number of cells per row; 0 means the UI default (8).
+	// Columns is the number of cells per row; 0 means the UI default (12).
 	Columns int
 	// Query is the initial text for the page's search entry.
 	Query string
