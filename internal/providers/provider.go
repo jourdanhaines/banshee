@@ -34,6 +34,11 @@
 // Migration 2026-10: FormField.Slider, Checkbox, Checked, ShowWhen (a list of
 // Condition, ANDed) and Generate added — additive, zero value inert. A UI that
 // ignores them renders every field as before and submits every field.
+//
+// Migration 2026-10b: Picker, PickerItem, Result.Picker and CatEmoji added for
+// the built-in emoji picker — additive, zero value inert. A provider that
+// never sets Picker behaves exactly as before; Picker is not carried by the
+// exec plugin protocol.
 package providers
 
 import (
@@ -53,6 +58,7 @@ const (
 	CatConnector Category = 20 // "Open <repo> on <Connector>"
 	CatDirectory Category = 30 // "Open <repo> directory"
 	CatCalc      Category = 35 // inline calculator answer
+	CatEmoji     Category = 36 // the "Emoji picker" row; above CatApp so the MinScore threshold never drops it
 	CatTOTP      Category = 37 // inline TOTP code rows; sits above CatApp so the MinScore threshold never drops them
 	CatClipboard Category = 38 // clipboard-history rows; above CatApp for the same reason as CatTOTP — the provider self-thresholds
 	CatApp       Category = 40 // installed applications
@@ -228,6 +234,39 @@ type Form struct {
 	Build       func(values map[string]string) (Action, error)
 }
 
+// PickerItem is one cell of a Picker grid. It exists so a picker can carry
+// searchable metadata and grouped variants (skin tones) alongside the glyph.
+type PickerItem struct {
+	// Value is the text copied to the clipboard on activation; it is also
+	// the cell's visible glyph.
+	Value string
+	// Label is the human name: searched, and shown as the cell's tooltip.
+	Label string
+	// Keywords are extra searchable terms.
+	Keywords []string
+	// Variants, when non-empty, make activation open a chooser of the item
+	// itself followed by Variants instead of copying (skin tones). A
+	// variant's own Keywords and Variants are unused.
+	Variants []PickerItem
+}
+
+// Picker describes an in-launcher grid page: a search entry over a grid of
+// cells. It exists for large fixed choice sets (emoji) that a row list
+// renders poorly. Result.Picker != nil replaces the primary activation, like
+// Result.Form.
+type Picker struct {
+	// Title is the page title, used for the search placeholder.
+	Title string
+	// Columns is the number of cells per row; 0 means the UI default (8).
+	Columns int
+	// Query is the initial text for the page's search entry.
+	Query string
+	// Items are the grid cells in display order. The slice is shared and
+	// read-only: a provider may hand the same backing slice to every query,
+	// so consumers must never mutate it.
+	Items []PickerItem
+}
+
 // Result is a single launcher row.
 type Result struct {
 	// ID is stable within one query generation, unique per provider.
@@ -250,6 +289,11 @@ type Result struct {
 	// Build's action on submit. AltAction still dispatches directly (or does
 	// nothing when nil), bypassing the form.
 	Form *Form
+	// Picker, when non-nil, replaces the primary activation like Form: the
+	// launcher opens an in-launcher grid page and activating a cell copies its
+	// Value to the clipboard (ActClipboardCopy). Form wins when both are set.
+	// AltAction still dispatches directly. Action may be zero.
+	Picker *Picker
 	// Expiry, when non-zero, marks the row's displayed content as valid only
 	// until that instant — a rotating TOTP code, say. The UI drains a progress
 	// bar toward it and re-runs the current query once it passes, so the row
