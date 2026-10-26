@@ -36,6 +36,7 @@ import (
 	"github.com/jourdanhaines/banshee/internal/providers/calc"
 	"github.com/jourdanhaines/banshee/internal/providers/cliphist"
 	"github.com/jourdanhaines/banshee/internal/providers/connectors"
+	"github.com/jourdanhaines/banshee/internal/providers/emoji"
 	"github.com/jourdanhaines/banshee/internal/providers/lastaction"
 	"github.com/jourdanhaines/banshee/internal/providers/plugins"
 	"github.com/jourdanhaines/banshee/internal/providers/procs"
@@ -163,6 +164,7 @@ func New(cfg config.Config) *Launcher {
 	b.reg.Register(b.conn)
 	b.reg.Register(repos.New(b.idx))
 	b.reg.Register(calc.New())
+	b.reg.Register(emoji.New(fuzzy.Score))
 	b.reg.Register(totp.New(fuzzy.Score, totp.WithSetupState(b.totpSetup)))
 	b.reg.Register(cliphist.New(b.clips, fuzzy.Score))
 	b.reg.Register(b.apps)

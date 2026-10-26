@@ -15,6 +15,7 @@ func TestCategoryLabel(t *testing.T) {
 		{providers.CatGitHub, "github"},
 		{providers.CatConnector, "connector"},
 		{providers.CatDirectory, "directory"},
+		{providers.CatEmoji, "emoji"},
 		{providers.CatApp, "app"},
 		{providers.CatKill, "kill"},
 		{providers.CatPlugin, "plugin"},

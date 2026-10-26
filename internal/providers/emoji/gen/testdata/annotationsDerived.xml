@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE ldml SYSTEM "../../common/dtd/ldml.dtd">
+<!-- Fixture trimmed from CLDR common/annotationsDerived/en.xml. -->
+<ldml>
+	<identity>
+		<version number="$Revision$"/>
+		<language type="en"/>
+	</identity>
+	<annotations>
+		<annotation cp="😀">derived smile</annotation>
+		<annotation cp="#⃣">keycap</annotation>
+		<annotation cp="#⃣" type="tts">keycap: #</annotation>
+		<annotation cp="🇺🇸">flag</annotation>
+		<annotation cp="🇺🇸" type="tts">flag: United States</annotation>
+		<annotation cp="👨‍🦰">adult | man | red hair</annotation>
+		<annotation cp="👨‍🦰" type="tts">man: red hair</annotation>
+	</annotations>
+</ldml>

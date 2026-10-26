@@ -32,14 +32,30 @@ const (
 	KeyFormCancel
 	// KeyFormSubmit validates and submits an open form (Enter).
 	KeyFormSubmit
+	// KeyPickerUp moves the picker highlight, or the variant popover's, up.
+	KeyPickerUp
+	// KeyPickerDown moves the picker highlight, or the variant popover's, down.
+	KeyPickerDown
+	// KeyPickerLeft moves the picker highlight, or the variant popover's, left.
+	KeyPickerLeft
+	// KeyPickerRight moves the picker highlight, or the variant popover's, right.
+	KeyPickerRight
+	// KeyPickerActivate copies the highlighted (or first visible) cell, or
+	// opens its variants (Enter).
+	KeyPickerActivate
+	// KeyPickerCancel closes an open variant popover, else returns to the
+	// results view (Esc).
+	KeyPickerCancel
 )
 
-// UIMode selects the keymap: the results list or an open form.
+// UIMode selects the keymap: the results list, an open form, or the picker
+// grid.
 type UIMode int
 
 const (
 	ModeResults UIMode = iota
 	ModeForm
+	ModePicker
 )
 
 // String implements fmt.Stringer for readable test failures.
@@ -61,6 +77,18 @@ func (a KeyAction) String() string {
 		return "form-cancel"
 	case KeyFormSubmit:
 		return "form-submit"
+	case KeyPickerUp:
+		return "picker-up"
+	case KeyPickerDown:
+		return "picker-down"
+	case KeyPickerLeft:
+		return "picker-left"
+	case KeyPickerRight:
+		return "picker-right"
+	case KeyPickerActivate:
+		return "picker-activate"
+	case KeyPickerCancel:
+		return "picker-cancel"
 	default:
 		return "pass"
 	}
@@ -78,6 +106,11 @@ func (a KeyAction) String() string {
 // ModeForm is deliberately minimal: Esc cancels back to the results, Enter
 // submits, and everything else — including Tab — passes through so GTK's own
 // focus chain moves between the form's fields and text editing keeps working.
+//
+// ModePicker drives the grid while the search entry keeps focus: Esc cancels,
+// Enter activates, the arrows and Ctrl-J/K/N/P move the highlight, and Ctrl-W
+// deletes a word. Left/Right with Shift or Ctrl pass through so they still
+// select or jump words in the entry; Tab and typing pass too.
 func KeyFor(keyval uint, state gdk.ModifierType, mode UIMode) KeyAction {
 	if mode == ModeForm {
 		switch keyval {
@@ -91,6 +124,10 @@ func KeyFor(keyval uint, state gdk.ModifierType, mode UIMode) KeyAction {
 
 	ctrl := state&gdk.ControlMask != 0
 	shift := state&gdk.ShiftMask != 0
+
+	if mode == ModePicker {
+		return pickerKeyFor(keyval, ctrl, shift)
+	}
 
 	switch keyval {
 	case gdk.KEY_Escape:
@@ -130,6 +167,41 @@ func KeyFor(keyval uint, state gdk.ModifierType, mode UIMode) KeyAction {
 	return KeyPass
 }
 
+// pickerKeyFor is KeyFor's ModePicker branch.
+func pickerKeyFor(keyval uint, ctrl, shift bool) KeyAction {
+	switch keyval {
+	case gdk.KEY_Escape:
+		return KeyPickerCancel
+	case gdk.KEY_Return, gdk.KEY_KP_Enter, gdk.KEY_ISO_Enter:
+		return KeyPickerActivate
+	case gdk.KEY_Up:
+		return KeyPickerUp
+	case gdk.KEY_Down:
+		return KeyPickerDown
+	case gdk.KEY_Left:
+		if !shift && !ctrl {
+			return KeyPickerLeft
+		}
+	case gdk.KEY_Right:
+		if !shift && !ctrl {
+			return KeyPickerRight
+		}
+	case gdk.KEY_j, gdk.KEY_J, gdk.KEY_n, gdk.KEY_N:
+		if ctrl {
+			return KeyPickerDown
+		}
+	case gdk.KEY_k, gdk.KEY_K, gdk.KEY_p, gdk.KEY_P:
+		if ctrl {
+			return KeyPickerUp
+		}
+	case gdk.KEY_w, gdk.KEY_W:
+		if ctrl {
+			return KeyDeleteWord
+		}
+	}
+	return KeyPass
+}
+
 // newKeyController returns the window-level key controller. It runs in the
 // capture phase so navigation keys are intercepted before the focused entry
 // consumes them — the entry must keep focus (so typing keeps working) while
@@ -138,33 +210,51 @@ func (l *Launcher) newKeyController() *gtk.EventControllerKey {
 	keys := gtk.NewEventControllerKey()
 	keys.SetPropagationPhase(gtk.PhaseCapture)
 	keys.ConnectKeyPressed(func(keyval, _ uint, state gdk.ModifierType) bool {
-		switch KeyFor(keyval, state, l.mode()) {
-		case KeyHide:
-			l.Hide()
-		case KeyNext:
-			l.MoveSelection(1)
-		case KeyPrev:
-			l.MoveSelection(-1)
-		case KeyActivate:
-			l.Activate(false)
-		case KeyActivateAlt:
-			l.Activate(true)
-		case KeyDeleteWord:
-			l.deleteWordBeforeCursor()
-		case KeyFormCancel:
-			l.closeForm(true)
-		case KeyFormSubmit:
-			// Not always ours: Enter inside a form dropdown belongs to the
-			// widget. The decision needs the focused widget, which KeyFor
-			// (a pure keyval→action mapping, testable without a display)
-			// deliberately knows nothing about, so it lives on the launcher.
-			if !l.submitFormOrPass() {
-				return false
-			}
-		default:
-			return false // not ours: let the focused widget have it
-		}
-		return true
+		return l.handleKey(keyval, state)
 	})
 	return keys
+}
+
+// handleKey runs the launcher's response to a key press and reports whether
+// it consumed the key; false lets the focused widget have it.
+func (l *Launcher) handleKey(keyval uint, state gdk.ModifierType) bool {
+	switch KeyFor(keyval, state, l.mode()) {
+	case KeyHide:
+		l.Hide()
+	case KeyNext:
+		l.MoveSelection(1)
+	case KeyPrev:
+		l.MoveSelection(-1)
+	case KeyActivate:
+		l.Activate(false)
+	case KeyActivateAlt:
+		l.Activate(true)
+	case KeyDeleteWord:
+		l.deleteWordBeforeCursor()
+	case KeyFormCancel:
+		l.closeForm(true)
+	case KeyFormSubmit:
+		// Not always ours: Enter inside a form dropdown belongs to the
+		// widget. The decision needs the focused widget, which KeyFor
+		// (a pure keyval→action mapping, testable without a display)
+		// deliberately knows nothing about, so it lives on the launcher.
+		if !l.submitFormOrPass() {
+			return false
+		}
+	case KeyPickerUp:
+		return l.pickerMove(GridUp)
+	case KeyPickerDown:
+		return l.pickerMove(GridDown)
+	case KeyPickerLeft:
+		return l.pickerMove(GridLeft)
+	case KeyPickerRight:
+		return l.pickerMove(GridRight)
+	case KeyPickerActivate:
+		l.pickerActivate()
+	case KeyPickerCancel:
+		l.pickerCancel()
+	default:
+		return false // not ours: let the focused widget have it
+	}
+	return true
 }

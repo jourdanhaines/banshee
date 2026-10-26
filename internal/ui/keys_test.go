@@ -63,6 +63,33 @@ func TestKeyFor(t *testing.T) {
 		{"form: ctrl-j passes", gdk.KEY_j, gdk.ControlMask, ModeForm, KeyPass},
 		{"form: ctrl-w passes", gdk.KEY_w, gdk.ControlMask, ModeForm, KeyPass},
 		{"form: letters type", gdk.KEY_a, 0, ModeForm, KeyPass},
+
+		{"picker: escape cancels", gdk.KEY_Escape, 0, ModePicker, KeyPickerCancel},
+		{"picker: shift-escape cancels", gdk.KEY_Escape, gdk.ShiftMask, ModePicker, KeyPickerCancel},
+		{"picker: enter activates", gdk.KEY_Return, 0, ModePicker, KeyPickerActivate},
+		{"picker: keypad enter activates", gdk.KEY_KP_Enter, 0, ModePicker, KeyPickerActivate},
+		{"picker: shift-enter activates", gdk.KEY_Return, gdk.ShiftMask, ModePicker, KeyPickerActivate},
+		{"picker: up", gdk.KEY_Up, 0, ModePicker, KeyPickerUp},
+		{"picker: down", gdk.KEY_Down, 0, ModePicker, KeyPickerDown},
+		{"picker: left", gdk.KEY_Left, 0, ModePicker, KeyPickerLeft},
+		{"picker: right", gdk.KEY_Right, 0, ModePicker, KeyPickerRight},
+		{"picker: shift-left selects in entry", gdk.KEY_Left, gdk.ShiftMask, ModePicker, KeyPass},
+		{"picker: ctrl-right jumps word in entry", gdk.KEY_Right, gdk.ControlMask, ModePicker, KeyPass},
+		{"picker: ctrl-j down", gdk.KEY_j, gdk.ControlMask, ModePicker, KeyPickerDown},
+		{"picker: ctrl-n down", gdk.KEY_n, gdk.ControlMask, ModePicker, KeyPickerDown},
+		{"picker: ctrl-k up", gdk.KEY_k, gdk.ControlMask, ModePicker, KeyPickerUp},
+		{"picker: ctrl-p up", gdk.KEY_p, gdk.ControlMask, ModePicker, KeyPickerUp},
+		{"picker: ctrl-w deletes word", gdk.KEY_w, gdk.ControlMask, ModePicker, KeyDeleteWord},
+		{"picker: ctrl-shift-W deletes word", gdk.KEY_W, gdk.ControlMask | gdk.ShiftMask, ModePicker, KeyDeleteWord},
+		{"picker: tab passes", gdk.KEY_Tab, 0, ModePicker, KeyPass},
+		{"picker: plain j types", gdk.KEY_j, 0, ModePicker, KeyPass},
+		{"picker: letters type", gdk.KEY_a, 0, ModePicker, KeyPass},
+		{"picker: space types", gdk.KEY_space, 0, ModePicker, KeyPass},
+		{"picker: backspace edits", gdk.KEY_BackSpace, 0, ModePicker, KeyPass},
+		{"picker: home edits", gdk.KEY_Home, 0, ModePicker, KeyPass},
+		{"picker: ctrl-a selects all", gdk.KEY_a, gdk.ControlMask, ModePicker, KeyPass},
+		{"picker: ctrl-v pastes", gdk.KEY_v, gdk.ControlMask, ModePicker, KeyPass},
+		{"picker: alt-j is not ours", gdk.KEY_j, gdk.AltMask, ModePicker, KeyPass},
 	}
 
 	for _, tt := range tests {
@@ -83,7 +110,15 @@ func TestKeyActionString(t *testing.T) {
 		KeyActivate:    "activate",
 		KeyActivateAlt: "activate-alt",
 		KeyFormCancel:  "form-cancel",
+		KeyDeleteWord:  "delete-word",
 		KeyFormSubmit:  "form-submit",
+
+		KeyPickerUp:       "picker-up",
+		KeyPickerDown:     "picker-down",
+		KeyPickerLeft:     "picker-left",
+		KeyPickerRight:    "picker-right",
+		KeyPickerActivate: "picker-activate",
+		KeyPickerCancel:   "picker-cancel",
 	}
 	for a, want := range tests {
 		if got := a.String(); got != want {
@@ -94,9 +129,9 @@ func TestKeyActionString(t *testing.T) {
 
 // TestTypingIsNeverSwallowed guards the property that matters most: with no
 // modifiers held, every printable ASCII key must fall through to the entry —
-// in both modes.
+// in every mode.
 func TestTypingIsNeverSwallowed(t *testing.T) {
-	for _, mode := range []UIMode{ModeResults, ModeForm} {
+	for _, mode := range []UIMode{ModeResults, ModeForm, ModePicker} {
 		for r := ' '; r <= '~'; r++ {
 			if got := KeyFor(uint(r), 0, mode); got != KeyPass {
 				t.Errorf("KeyFor(%q, none, %v) = %v, want pass", r, mode, got)

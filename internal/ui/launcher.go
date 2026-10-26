@@ -24,6 +24,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
 	"github.com/jourdanhaines/banshee/internal/config"
+	"github.com/jourdanhaines/banshee/internal/fuzzy"
 	"github.com/jourdanhaines/banshee/internal/launch"
 	"github.com/jourdanhaines/banshee/internal/layershell"
 	"github.com/jourdanhaines/banshee/internal/providers"
@@ -61,7 +62,7 @@ type Launcher struct {
 
 	win     *gtk.ApplicationWindow
 	panel   *gtk.Box
-	stack   *gtk.Stack // "main" (query + results) / "form" pages
+	stack   *gtk.Stack // "main" (query + results) / "form" / "picker" pages
 	mainBox *gtk.Box
 	formBox *gtk.Box // persistent form page; contents rebuilt per openForm
 	entry   *gtk.Entry
@@ -71,6 +72,13 @@ type Launcher struct {
 	// form is the open form view; nil means the results view is active and
 	// is what mode() derives the keymap from.
 	form *formView
+
+	// pickerPage is the persistent picker page, built once in build. Its cell
+	// pool survives Hide so reopening is cheap; Reload drops it.
+	pickerPage *pickerView
+	// pickerOpen reports whether the picker page is up; mode() derives
+	// ModePicker from it.
+	pickerOpen bool
 
 	debounce *Debouncer
 	sel      Selection
@@ -193,7 +201,12 @@ const formTransition = 150 * time.Millisecond
 //	      │   ├─ ProgressBar .code-timer   (shared TOTP drain, opacity-toggled)
 //	      │   └─ ScrolledWindow .results-scroll
 //	      │      └─ ListBox .results (SelectionModeBrowse)
-//	      └─ "form": Box (persistent page, contents rebuilt per form)
+//	      ├─ "form": Box (persistent page, contents rebuilt per form)
+//	      └─ "picker": Box .picker-view (persistent page, cell pool reused)
+//	          ├─ Box: Button .picker-back, Entry .picker-query
+//	          ├─ ScrolledWindow .picker-scroll
+//	          │  └─ FlowBox .picker-grid
+//	          └─ Popover .picker-variants (variant chooser)
 func (l *Launcher) build() {
 	l.applyTheme()
 
@@ -253,13 +266,18 @@ func (l *Launcher) build() {
 	// kills the slide animation, so the page itself is never removed. The
 	// stack stays vertically homogeneous (the default), so the form page
 	// adopts the results page's fixed height and the panel never resizes —
-	// the same no-jitter rationale as the min==max scroll height above.
+	// the same no-jitter rationale as the min==max scroll height above. The
+	// picker page is permanent for the same reasons.
 	l.formBox = gtk.NewBox(gtk.OrientationVertical, 0)
+
+	l.pickerPage = newPickerView(fuzzy.Score)
+	l.pickerPage.connect(l.activatePickerCell, l.copyPicked, func() { l.closePicker(true) }, l.pickerVariantsClosed)
 
 	l.stack = gtk.NewStack()
 	l.stack.SetTransitionDuration(uint(formTransition.Milliseconds()))
 	l.stack.AddNamed(l.mainBox, "main")
 	l.stack.AddNamed(l.formBox, "form")
+	l.stack.AddNamed(l.pickerPage.root, "picker")
 	l.panel.Append(l.stack)
 
 	l.win.SetChild(l.panel)
@@ -355,8 +373,8 @@ func (l *Launcher) Hide() {
 	if l.win == nil || !l.visible {
 		return
 	}
-	// Discard any open form first — a stale l.form would leave the keymap in
-	// ModeForm and trap Esc on the next show.
+	// Discard any open form or picker first — a stale one would leave the
+	// keymap in ModeForm/ModePicker and trap Esc on the next show.
 	l.resetToResults()
 	l.debounce.Cancel()
 	l.cancelQuery()
@@ -380,12 +398,18 @@ func (l *Launcher) Hide() {
 func (l *Launcher) Visible() bool { return l.visible }
 
 // Reload drops cached state that a configuration or environment change may
-// have invalidated (application list, stylesheet) and refreshes the visible
-// results. Call SetConfig first when banshee.conf itself changed.
+// have invalidated (application list, stylesheet, picker cell pool) and
+// refreshes the visible results. An open form or picker is closed first: the
+// provider data behind it may have changed. Call SetConfig first when
+// banshee.conf itself changed.
 func (l *Launcher) Reload() {
+	l.resetToResults()
 	l.apps = nil
 	l.builtins = nil
 	l.previews = nil
+	if l.pickerPage != nil {
+		l.pickerPage.drop()
+	}
 	l.applyTheme()
 	if l.visible {
 		l.debounce.Fire(func() { l.runQuery(l.entry.Text()) })
@@ -427,6 +451,11 @@ func (l *Launcher) Activate(alt bool) {
 		l.openForm(res)
 		return
 	}
+	// A picker result likewise opens the grid page; Form wins when both set.
+	if !alt && res.Picker != nil {
+		l.openPicker(res)
+		return
+	}
 
 	action := res.Action
 	if alt {
@@ -447,10 +476,14 @@ func (l *Launcher) Activate(alt bool) {
 	}
 }
 
-// mode reports which keymap is active: ModeForm while a form is open.
+// mode reports which keymap is active: ModeForm while a form is open,
+// ModePicker while the picker page is up.
 func (l *Launcher) mode() UIMode {
 	if l.form != nil {
 		return ModeForm
+	}
+	if l.pickerOpen {
+		return ModePicker
 	}
 	return ModeResults
 }
@@ -553,13 +586,147 @@ func (l *Launcher) submitForm() {
 	}
 }
 
-// resetToResults is the no-animation teardown used by Hide and Show: whatever
-// view is up, the next paint is the results page.
+// openPicker loads res.Picker into the picker page, slides it in and focuses
+// its search entry. Like openForm, the in-flight query is left alone.
+func (l *Launcher) openPicker(res providers.Result) {
+	if l.stack == nil || l.pickerPage == nil || res.Picker == nil {
+		return
+	}
+	l.pickerPage.load(res)
+	l.pickerOpen = true
+	l.stack.SetTransitionType(gtk.StackTransitionTypeSlideLeft)
+	l.stack.SetVisibleChildName("picker")
+	// Deferred to idle so the grab lands after the transition maps the page.
+	e := l.pickerPage.entry
+	glib.IdleAdd(func() {
+		if l.pickerOpen {
+			e.GrabFocus()
+			e.SetPosition(-1)
+		}
+	})
+}
+
+// closePicker slides back to the results view. refocus re-grabs the query
+// entry (Esc, the back button).
+func (l *Launcher) closePicker(refocus bool) {
+	if !l.pickerOpen || l.stack == nil {
+		return
+	}
+	// Cleared first so the popover's closed handler does not refocus the
+	// picker entry on its way out.
+	l.pickerOpen = false
+	l.pickerPage.closeVariants()
+	l.stack.SetTransitionType(gtk.StackTransitionTypeSlideRight)
+	l.stack.SetVisibleChildName("main")
+	if refocus && l.entry != nil {
+		l.entry.GrabFocus()
+		l.entry.SetPosition(-1)
+	}
+}
+
+// pickerMove moves the picker highlight, or the variant popover's. It
+// reports false for Left/Right while the highlight is in the entry, so the
+// key reaches the entry and moves its caret.
+func (l *Launcher) pickerMove(dir GridDir) bool {
+	v := l.pickerPage
+	if v == nil {
+		return false
+	}
+	if v.variantsOpen() {
+		v.movePop(dir)
+		return true
+	}
+	if v.state.Highlight < 0 && (dir == GridLeft || dir == GridRight) {
+		return false
+	}
+	if v.state.Move(dir, true) {
+		v.applyHighlight()
+	}
+	return true
+}
+
+// pickerActivate handles Enter on the picker page: copy the popover's
+// highlighted variant, else act on the highlighted (or first visible) cell.
+func (l *Launcher) pickerActivate() {
+	v := l.pickerPage
+	if v == nil {
+		return
+	}
+	if v.variantsOpen() {
+		if it, ok := v.popState.Target(); ok {
+			l.copyPicked(it)
+		}
+		return
+	}
+	if j := v.state.TargetIndex(); j >= 0 {
+		v.state.Highlight = j
+		v.applyHighlight()
+		l.activatePickerCell(j)
+	}
+}
+
+// activatePickerCell acts on visible cell j: an item with variants opens the
+// variant chooser, any other is copied.
+func (l *Launcher) activatePickerCell(j int) {
+	v := l.pickerPage
+	if v == nil || j < 0 || j >= len(v.state.Visible) || j >= len(v.cells) {
+		return
+	}
+	it := v.state.Items[v.state.Visible[j]]
+	if len(it.Variants) > 0 {
+		v.openVariants(it, v.cells[j])
+		return
+	}
+	l.copyPicked(it)
+}
+
+// pickerCancel handles Esc on the picker page: close the variant popover if
+// it is up, else return to the results view.
+func (l *Launcher) pickerCancel() {
+	if l.pickerPage != nil && l.pickerPage.variantsOpen() {
+		l.pickerPage.closeVariants()
+		return
+	}
+	l.closePicker(true)
+}
+
+// pickerVariantsClosed returns focus to the picker entry once the variant
+// popover goes away (Esc, a click outside), unless the picker itself closed.
+func (l *Launcher) pickerVariantsClosed() {
+	if !l.pickerOpen || l.pickerPage == nil {
+		return
+	}
+	l.pickerPage.entry.GrabFocus()
+	l.pickerPage.entry.SetPosition(-1)
+}
+
+// copyPicked copies it.Value to the clipboard, hiding the window before
+// dispatching for the same reasons as Activate and submitForm.
+func (l *Launcher) copyPicked(it providers.PickerItem) {
+	if it.Value == "" {
+		return
+	}
+	l.Hide()
+	if l.disp == nil {
+		l.notify("Nothing is wired up to copy " + it.Label)
+		return
+	}
+	if err := l.disp.Dispatch(providers.Action{Kind: providers.ActClipboardCopy, Text: it.Value}); err != nil {
+		l.notify("Could not copy “" + it.Label + "”: " + err.Error())
+	}
+}
+
+// resetToResults is the no-animation teardown used by Hide, Show and Reload:
+// whatever view is up, the next paint is the results page.
 func (l *Launcher) resetToResults() {
-	if l.form == nil || l.stack == nil {
+	if l.stack == nil || (l.form == nil && !l.pickerOpen) {
 		return
 	}
 	l.form = nil
+	l.pickerOpen = false
+	if l.pickerPage != nil {
+		l.pickerPage.closeVariants()
+	}
 	l.stack.SetTransitionType(gtk.StackTransitionTypeNone)
 	l.stack.SetVisibleChildName("main")
 }
@@ -569,12 +736,16 @@ func (l *Launcher) resetToResults() {
 // ::changed, so the debounced requery happens exactly as if the user had
 // backspaced.
 func (l *Launcher) deleteWordBeforeCursor() {
-	if l.entry == nil {
+	e := l.entry
+	if l.pickerOpen && l.pickerPage != nil {
+		e = l.pickerPage.entry
+	}
+	if e == nil {
 		return
 	}
-	pos := l.entry.Position()
-	if start := DeleteWordStart(l.entry.Text(), pos); start < pos {
-		l.entry.DeleteText(start, pos)
+	pos := e.Position()
+	if start := DeleteWordStart(e.Text(), pos); start < pos {
+		e.DeleteText(start, pos)
 	}
 }
 
@@ -750,29 +921,12 @@ func (l *Launcher) applySelection() {
 	l.scrollToRow(row)
 }
 
-// scrollToRow keeps the selected row inside the viewport. Rows appended in
-// this same main-loop iteration have no allocation yet, so the clamp is
-// deferred to idle when the row has not been sized.
+// scrollToRow keeps the selected row inside the viewport.
 func (l *Launcher) scrollToRow(row *gtk.ListBoxRow) {
 	if l.scroll == nil || row == nil {
 		return
 	}
-	clamp := func() {
-		adj := l.scroll.VAdjustment()
-		if adj == nil {
-			return
-		}
-		a := row.Allocation()
-		if a == nil {
-			return
-		}
-		adj.ClampPage(float64(a.Y()), float64(a.Y()+a.Height()))
-	}
-	if a := row.Allocation(); a != nil && a.Height() > 0 {
-		clamp()
-		return
-	}
-	glib.IdleAdd(clamp)
+	clampIntoView(l.scroll, &row.Widget)
 }
 
 // Notify surfaces msg the same way a failed activation does. It exists for
