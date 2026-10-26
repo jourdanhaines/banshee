@@ -60,7 +60,7 @@ func TestNewWiring(t *testing.T) {
 	t.Cleanup(b.host.Shutdown)
 
 	t.Run("every provider is registered", func(t *testing.T) {
-		want := []string{"lastaction", "sessions", "connectors", "repos", "calc", "totp", "clipboard", "apps", "procs", "plugins"}
+		want := []string{"lastaction", "sessions", "connectors", "repos", "calc", "emoji", "totp", "clipboard", "apps", "procs", "plugins"}
 		got := map[string]bool{}
 		for _, p := range b.reg.Providers() {
 			got[p.Name()] = true
