@@ -6,10 +6,32 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 
 	"github.com/jourdanhaines/banshee/internal/fuzzy"
 	"github.com/jourdanhaines/banshee/internal/providers"
 )
+
+// Cell width bounds: cellMinWidth fits the widest real emoji at the theme's
+// 28px (35 px measured), and 12 of them plus spacing stay under the 640 px
+// panel; cellMaxChars caps a cell's natural width.
+const (
+	cellMinWidth = 44
+	cellMaxChars = 3
+)
+
+// newCellLabel builds a grid or popover cell label with a capped width. A
+// glyph a font can't render as one cluster (or a missing-font fallback) would
+// otherwise widen every homogeneous cell and the panel; ellipsising it is cheaper.
+func newCellLabel(text string) *gtk.Label {
+	label := gtk.NewLabel(text)
+	label.AddCSSClass("picker-cell")
+	label.SetEllipsize(pango.EllipsizeEnd)
+	label.SetMaxWidthChars(cellMaxChars)
+	label.SetSizeRequest(cellMinWidth, -1)
+	label.SetXAlign(0.5)
+	return label
+}
 
 // Sentinels for pickerView.shown.
 const (
@@ -188,8 +210,7 @@ func (v *pickerView) refilter() {
 // ensureCells grows the pool to at least n hidden cells.
 func (v *pickerView) ensureCells(n int) {
 	for len(v.cells) < n {
-		label := gtk.NewLabel("")
-		label.AddCSSClass("picker-cell")
+		label := newCellLabel("")
 		c := gtk.NewFlowBoxChild()
 		c.SetChild(label)
 		c.SetCanFocus(false)
@@ -250,8 +271,7 @@ func (v *pickerView) openVariants(it providers.PickerItem, anchor *gtk.FlowBoxCh
 	v.popCells = v.popCells[:0]
 	list := append([]providers.PickerItem{it}, it.Variants...)
 	for _, e := range list {
-		label := gtk.NewLabel(e.Value)
-		label.AddCSSClass("picker-cell")
+		label := newCellLabel(e.Value)
 		c := gtk.NewFlowBoxChild()
 		c.SetChild(label)
 		c.SetCanFocus(false)

@@ -38,7 +38,7 @@ func pickerLike() providers.Result {
 			Label: fmt.Sprintf("item 0005 tone %d", k),
 		})
 	}
-	return providers.Result{Title: "Emoji picker", Picker: &providers.Picker{Title: "Emoji", Columns: 8, Items: items}}
+	return providers.Result{Title: "Emoji picker", Picker: &providers.Picker{Title: "Emoji", Items: items}}
 }
 
 func TestPickerSmoke(t *testing.T) {
@@ -95,6 +95,8 @@ func TestPickerSmoke(t *testing.T) {
 			t.Errorf("open: %d cells, want 1900", n)
 		}
 		checkSize("open", h0, w0)
+		// Items U+1F850/U+1F852 are 75 px arrows: this guards that one wide
+		// glyph never widens the homogeneous grid, and with it the panel.
 		if gw := v.grid.AllocatedWidth(); gw > w0 {
 			t.Errorf("open: grid width %d exceeds window width %d", gw, w0)
 		}
