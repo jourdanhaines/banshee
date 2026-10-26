@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE ldml SYSTEM "../../common/dtd/ldml.dtd">
+<!-- Fixture trimmed from CLDR common/annotations/en.xml. -->
+<ldml>
+	<identity>
+		<version number="$Revision$"/>
+		<language type="en"/>
+	</identity>
+	<annotations>
+		<annotation cp="😀">face | grin</annotation>
+		<annotation cp="😀" type="tts">grinning face</annotation>
+		<annotation cp="☝">finger | hand | index | point | up</annotation>
+		<annotation cp="☝" type="tts">index pointing up</annotation>
+		<annotation cp="👋">hand | wave | Waving Hand | waving | hand</annotation>
+		<annotation cp="👋" type="tts">waving hand</annotation>
+	</annotations>
+</ldml>

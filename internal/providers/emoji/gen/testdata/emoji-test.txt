@@ -1,0 +1,62 @@
+# emoji-test.txt
+# Date: 2026-08-01, 00:00:00 GMT
+# © 2026 Unicode®, Inc.
+#
+# Emoji Keyboard/Display Test Data for UTS #51
+# Version: 18.0
+#
+# For documentation and usage, see https://www.unicode.org/reports/tr51
+
+# group: Smileys & Emotion
+
+# subgroup: face-smiling
+1F600                                                  ; fully-qualified     # 😀 E1.0 grinning face
+1F603                                                  ; fully-qualified     # 😃 E0.6 grinning face with big eyes
+# group: People & Body
+
+# subgroup: hand-single-finger
+261D FE0F                                              ; fully-qualified     # ☝️ E0.6 index pointing up
+261D                                                   ; unqualified         # ☝ E0.6 index pointing up
+261D 1F3FB                                             ; fully-qualified     # ☝🏻 E1.0 index pointing up: light skin tone
+261D 1F3FC                                             ; fully-qualified     # ☝🏼 E1.0 index pointing up: medium-light skin tone
+261D 1F3FD                                             ; fully-qualified     # ☝🏽 E1.0 index pointing up: medium skin tone
+261D 1F3FE                                             ; fully-qualified     # ☝🏾 E1.0 index pointing up: medium-dark skin tone
+261D 1F3FF                                             ; fully-qualified     # ☝🏿 E1.0 index pointing up: dark skin tone
+# subgroup: hand-fingers-open
+1F44B                                                  ; fully-qualified     # 👋 E0.6 waving hand
+1F44B 1F3FB                                            ; fully-qualified     # 👋🏻 E1.0 waving hand: light skin tone
+1F44B 1F3FC                                            ; fully-qualified     # 👋🏼 E1.0 waving hand: medium-light skin tone
+1F44B 1F3FD                                            ; fully-qualified     # 👋🏽 E1.0 waving hand: medium skin tone
+1F44B 1F3FE                                            ; fully-qualified     # 👋🏾 E1.0 waving hand: medium-dark skin tone
+1F44B 1F3FF                                            ; fully-qualified     # 👋🏿 E1.0 waving hand: dark skin tone
+# subgroup: person
+1F468                                                  ; fully-qualified     # 👨 E0.6 man
+1F468 200D 1F9B0                                       ; fully-qualified     # 👨‍🦰 E11.0 man: red hair
+1F468 1F3FB 200D 1F9B0                                 ; fully-qualified     # 👨🏻‍🦰 E11.0 man: light skin tone, red hair
+# subgroup: family
+1F48F                                                  ; fully-qualified     # 💏 E0.6 kiss
+1F48F 1F3FB                                            ; fully-qualified     # 💏🏻 E13.1 kiss: light skin tone
+1F9D1 1F3FB 200D 2764 FE0F 200D 1F48B 200D 1F9D1 1F3FC ; fully-qualified     # 🧑🏻‍❤️‍💋‍🧑🏼 E13.1 kiss: person, person, light skin tone, medium-light skin tone
+1F9D1 1F3FB 200D 2764 200D 1F48B 200D 1F9D1 1F3FC      ; minimally-qualified # 🧑🏻‍❤‍💋‍🧑🏼 E13.1 kiss: person, person, light skin tone, medium-light skin tone
+# subgroup: hands
+1F91D                                                  ; fully-qualified     # 🤝 E3.0 handshake
+1FAF1 1F3FB 200D 1FAF2 1F3FC                           ; fully-qualified     # 🫱🏻‍🫲🏼 E14.0 handshake: light skin tone, medium skin tone
+# group: Component
+
+# subgroup: skin-tone
+1F3FB                                                  ; component           # 🏻 E1.0 light skin tone
+# subgroup: hair-style
+1F9B0                                                  ; component           # 🦰 E11.0 red hair
+# group: Symbols
+
+# subgroup: keycap
+0023 FE0F 20E3                                         ; fully-qualified     # #️⃣ E0.6 keycap: #
+0023 20E3                                              ; unqualified         # #⃣ E0.6 keycap: #
+# group: Flags
+
+# subgroup: country-flag
+1F1FA 1F1F8                                            ; fully-qualified     # 🇺🇸 E0.6 flag: United States
+# subgroup: subdivision-flag
+1F3F4 E0067 E0062 E0065 E006E E0067 E007F              ; fully-qualified     # 🏴󠁧󠁢󠁥󠁮󠁧󠁿 E5.0 flag: England
+
+#EOF
