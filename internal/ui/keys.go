@@ -210,33 +210,51 @@ func (l *Launcher) newKeyController() *gtk.EventControllerKey {
 	keys := gtk.NewEventControllerKey()
 	keys.SetPropagationPhase(gtk.PhaseCapture)
 	keys.ConnectKeyPressed(func(keyval, _ uint, state gdk.ModifierType) bool {
-		switch KeyFor(keyval, state, l.mode()) {
-		case KeyHide:
-			l.Hide()
-		case KeyNext:
-			l.MoveSelection(1)
-		case KeyPrev:
-			l.MoveSelection(-1)
-		case KeyActivate:
-			l.Activate(false)
-		case KeyActivateAlt:
-			l.Activate(true)
-		case KeyDeleteWord:
-			l.deleteWordBeforeCursor()
-		case KeyFormCancel:
-			l.closeForm(true)
-		case KeyFormSubmit:
-			// Not always ours: Enter inside a form dropdown belongs to the
-			// widget. The decision needs the focused widget, which KeyFor
-			// (a pure keyval→action mapping, testable without a display)
-			// deliberately knows nothing about, so it lives on the launcher.
-			if !l.submitFormOrPass() {
-				return false
-			}
-		default:
-			return false // not ours: let the focused widget have it
-		}
-		return true
+		return l.handleKey(keyval, state)
 	})
 	return keys
+}
+
+// handleKey runs the launcher's response to a key press and reports whether
+// it consumed the key; false lets the focused widget have it.
+func (l *Launcher) handleKey(keyval uint, state gdk.ModifierType) bool {
+	switch KeyFor(keyval, state, l.mode()) {
+	case KeyHide:
+		l.Hide()
+	case KeyNext:
+		l.MoveSelection(1)
+	case KeyPrev:
+		l.MoveSelection(-1)
+	case KeyActivate:
+		l.Activate(false)
+	case KeyActivateAlt:
+		l.Activate(true)
+	case KeyDeleteWord:
+		l.deleteWordBeforeCursor()
+	case KeyFormCancel:
+		l.closeForm(true)
+	case KeyFormSubmit:
+		// Not always ours: Enter inside a form dropdown belongs to the
+		// widget. The decision needs the focused widget, which KeyFor
+		// (a pure keyval→action mapping, testable without a display)
+		// deliberately knows nothing about, so it lives on the launcher.
+		if !l.submitFormOrPass() {
+			return false
+		}
+	case KeyPickerUp:
+		return l.pickerMove(GridUp)
+	case KeyPickerDown:
+		return l.pickerMove(GridDown)
+	case KeyPickerLeft:
+		return l.pickerMove(GridLeft)
+	case KeyPickerRight:
+		return l.pickerMove(GridRight)
+	case KeyPickerActivate:
+		l.pickerActivate()
+	case KeyPickerCancel:
+		l.pickerCancel()
+	default:
+		return false // not ours: let the focused widget have it
+	}
+	return true
 }
