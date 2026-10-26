@@ -166,10 +166,12 @@ func (v *pickerView) load(res providers.Result) {
 	for j := range v.shown {
 		v.shown[j] = cellUnknown
 	}
-	// SetText fires ::changed only when the text differs, so refilter runs
-	// explicitly too; it is idempotent.
+	// SetText fires ::changed (and so refilter) only when the text differs.
+	same := v.entry.Text() == p.Query
 	v.entry.SetText(p.Query)
-	v.refilter()
+	if same {
+		v.refilter()
+	}
 	v.entry.SetPosition(-1)
 }
 
@@ -200,10 +202,9 @@ func (v *pickerView) ensureCells(n int) {
 	}
 }
 
-// render writes state.Visible into the cell pool in order, touching only
-// cells whose item changed. Filtering is done here rather than through
-// FlowBox.SetFilterFunc/SetSortFunc: those call back into Go once per child
-// (and n·log n times for the sort) on every keystroke.
+// render writes state.Visible into the pool in order (hidden cells trail
+// visible ones), touching only changed cells. No SetFilterFunc/SetSortFunc:
+// they call back into Go per child (n·log n for sort) on every keystroke.
 func (v *pickerView) render() {
 	for j, c := range v.cells {
 		want := cellHidden
@@ -265,21 +266,30 @@ func (v *pickerView) openVariants(it providers.PickerItem, anchor *gtk.FlowBoxCh
 	v.popState = NewPickerState(list, cols, false)
 	v.applyPopHighlight()
 
-	if b, ok := anchor.ComputeBounds(v.root); ok {
-		r := gdk.NewRectangle(int(b.X()), int(b.Y()), int(b.Width()), int(b.Height()))
-		v.pop.SetPointingTo(&r)
-	}
 	v.popOpen = true
-	v.pop.Popup()
+	// Anchor at idle: applyHighlight may have just moved the scroll adjustment,
+	// and ComputeBounds would otherwise read the pre-scroll layout.
+	glib.IdleAdd(func() bool {
+		if !v.popOpen {
+			return false
+		}
+		if b, ok := anchor.ComputeBounds(v.root); ok {
+			r := gdk.NewRectangle(int(b.X()), int(b.Y()), int(b.Width()), int(b.Height()))
+			v.pop.SetPointingTo(&r)
+		}
+		v.pop.Popup()
+		return false
+	})
 }
 
 // variantsOpen reports whether the variant popover is up.
 func (v *pickerView) variantsOpen() bool { return v.popOpen }
 
-// closeVariants pops the variant popover down; its closed handler resets
-// popOpen.
+// closeVariants pops the variant popover down. popOpen is cleared here too,
+// so a popup still pending at idle is skipped.
 func (v *pickerView) closeVariants() {
 	if v.popOpen {
+		v.popOpen = false
 		v.pop.Popdown()
 	}
 }
@@ -309,10 +319,9 @@ func (v *pickerView) drop() {
 	v.state = PickerState{}
 }
 
-// clampIntoView scrolls sw so w is inside its viewport. w's allocation must
-// be relative to sw's child (a ListBox row or FlowBox child). Widgets added in
-// this same main-loop iteration have no allocation yet, so the clamp is
-// deferred to idle when w has not been sized.
+// clampIntoView scrolls sw so w (a direct row/child of sw's child) is in view.
+// A widget added this main-loop iteration has no allocation yet, so the clamp
+// is then deferred to idle.
 func clampIntoView(sw *gtk.ScrolledWindow, w *gtk.Widget) {
 	if sw == nil || w == nil {
 		return

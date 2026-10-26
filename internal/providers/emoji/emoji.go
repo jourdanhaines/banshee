@@ -51,7 +51,7 @@ func (p *Provider) Name() string { return "emoji" }
 
 // Query returns the picker row at TriggerScore when q starts with the
 // trigger (the remainder seeds the picker's search), or at its fuzzy score
-// when q matches the row title. Empty queries return nothing.
+// when q prefix-matches the row title or "picker". Empty queries return nothing.
 func (p *Provider) Query(ctx context.Context, q string) ([]providers.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -62,10 +62,23 @@ func (p *Provider) Query(ctx context.Context, q string) ([]providers.Result, err
 	if on, rest := parseTrigger(q); on {
 		return []providers.Result{p.row(TriggerScore, rest)}, nil
 	}
-	if s, ok := p.score(strings.TrimSpace(q), title); ok && s > 0 {
-		return []providers.Result{p.row(s, "")}, nil
+	// Only a prefix-grade match surfaces the row: CatEmoji is never MinScore
+	// thresholded, so any subsequence ("ice", "mic") would otherwise match.
+	q = strings.TrimSpace(q)
+	best, found := 0, false
+	for _, cand := range []string{title, "picker"} {
+		if s, ok := p.score(q, cand); ok && (!found || s > best) {
+			best, found = s, true
+		}
 	}
-	return nil, nil
+	if !found || best < fuzzy.PrefixBonus {
+		return nil, nil
+	}
+	// The untriggered path never outranks a trigger row.
+	if best >= TriggerScore {
+		best = TriggerScore - 1
+	}
+	return []providers.Result{p.row(best, "")}, nil
 }
 
 // row builds the picker result. Action stays zero: the launcher's picker page
@@ -99,7 +112,12 @@ func parseTrigger(q string) (triggered bool, query string) {
 	if len(word) < len("emo") || !strings.HasPrefix("emoji", word) {
 		return false, ""
 	}
-	return true, strings.TrimSpace(rest)
+	rest = strings.TrimSpace(rest)
+	// Typing the row's own title ("emoji pick") opens the full grid.
+	if rest != "" && strings.HasPrefix("picker", strings.ToLower(rest)) {
+		rest = ""
+	}
+	return true, rest
 }
 
 // parse reads the generated TSV (format documented in its header). It never
