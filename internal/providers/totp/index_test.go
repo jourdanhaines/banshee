@@ -580,3 +580,254 @@ func TestEntryParamsProduceCodes(t *testing.T) {
 		t.Fatalf("Code = %q, want %q", got, want)
 	}
 }
+
+func TestIndexRemove(t *testing.T) {
+	start := func() Index {
+		return Index{V: 1, Entries: []Entry{{Name: "aws"}, {Name: "GitHub"}, {Name: "gitlab"}}}
+	}
+	tests := []struct {
+		name      string
+		remove    string
+		wantOK    bool
+		wantNames []string
+	}{
+		{"middle keeps order", "GitHub", true, []string{"aws", "gitlab"}},
+		{"case insensitive", "github", true, []string{"aws", "gitlab"}},
+		{"trimmed", "  aws ", true, []string{"GitHub", "gitlab"}},
+		{"last", "gitlab", true, []string{"aws", "GitHub"}},
+		{"missing", "bitbucket", false, []string{"aws", "GitHub", "gitlab"}},
+		{"empty", "  ", false, []string{"aws", "GitHub", "gitlab"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := start()
+			if ok := idx.Remove(tt.remove); ok != tt.wantOK {
+				t.Fatalf("Remove = %v, want %v", ok, tt.wantOK)
+			}
+			var names []string
+			for _, e := range idx.Entries {
+				names = append(names, e.Name)
+			}
+			if !reflect.DeepEqual(names, tt.wantNames) {
+				t.Fatalf("names = %v, want %v", names, tt.wantNames)
+			}
+		})
+	}
+}
+
+func TestIndexRename(t *testing.T) {
+	start := func() Index {
+		return Index{V: 1, Entries: []Entry{{Name: "aws", Digits: 8}, {Name: "GitHub"}}}
+	}
+	tests := []struct {
+		name      string
+		old, new  string
+		wantErr   string
+		wantNames []string
+		wantPrev  string // prevName of the renamed entry, checked when no error
+	}{
+		{name: "rename", old: "aws", new: "amazon", wantNames: []string{"amazon", "GitHub"}, wantPrev: "aws"},
+		{name: "old matched case insensitively", old: "github", new: "gh", wantNames: []string{"aws", "gh"}, wantPrev: "GitHub"},
+		{name: "new name trimmed", old: "aws", new: "  amazon  ", wantNames: []string{"amazon", "GitHub"}, wantPrev: "aws"},
+		{name: "case-only rename of itself", old: "GitHub", new: "github", wantNames: []string{"aws", "github"}, wantPrev: "GitHub"},
+		{name: "same name", old: "aws", new: "aws", wantNames: []string{"aws", "GitHub"}, wantPrev: "aws"},
+		{name: "collision", old: "aws", new: "github", wantErr: "already exists", wantNames: []string{"aws", "GitHub"}},
+		{name: "empty new name", old: "aws", new: "   ", wantErr: "needs a name", wantNames: []string{"aws", "GitHub"}},
+		{name: "missing old", old: "gitlab", new: "gl", wantErr: "no entry", wantNames: []string{"aws", "GitHub"}},
+		{name: "empty old", old: "", new: "gl", wantErr: "no entry", wantNames: []string{"aws", "GitHub"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := start()
+			err := idx.Rename(tt.old, tt.new)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Rename error = %v, want one mentioning %q", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("Rename: %v", err)
+			}
+			var names []string
+			for _, e := range idx.Entries {
+				names = append(names, e.Name)
+			}
+			if !reflect.DeepEqual(names, tt.wantNames) {
+				t.Fatalf("names = %v, want %v", names, tt.wantNames)
+			}
+			if tt.wantErr == "" {
+				e, _ := idx.Find(tt.new)
+				if e.prevName != tt.wantPrev {
+					t.Errorf("prevName = %q, want %q", e.prevName, tt.wantPrev)
+				}
+			}
+		})
+	}
+}
+
+func TestIndexRenameTwiceKeepsFirstPrevName(t *testing.T) {
+	idx := Index{V: 1, Entries: []Entry{{Name: "aws"}}}
+	if err := idx.Rename("aws", "amazon"); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.Rename("amazon", "AWS prod"); err != nil {
+		t.Fatal(err)
+	}
+	if got := idx.Entries[0]; got.Name != "AWS prod" || got.prevName != "aws" {
+		t.Fatalf("entry = {Name:%q prevName:%q}, want {AWS prod aws}", got.Name, got.prevName)
+	}
+}
+
+// readRawEntries reads path back as raw JSON for the merge tests.
+func readRawEntries(t *testing.T, path string) (map[string]any, []map[string]any) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(data, &top); err != nil {
+		t.Fatal(err)
+	}
+	var entries []map[string]any
+	if raw, ok := top["entries"].([]any); ok {
+		for _, r := range raw {
+			e, ok := r.(map[string]any)
+			if !ok {
+				t.Fatalf("entry = %v, want an object", r)
+			}
+			entries = append(entries, e)
+		}
+	}
+	return top, entries
+}
+
+// TestSaveIndexRenamePreservesUnknownFields: an entry's unknown keys belong to
+// the account, not the label, so a rename must carry them to the new name.
+func TestSaveIndexRenamePreservesUnknownFields(t *testing.T) {
+	const before = `{
+  "v": 1,
+  "backend": "plaintext",
+  "entries": [
+    {"name": "aws", "note": "prod account", "digits": 8},
+    {"name": "github", "color": "blue"}
+  ]
+}`
+	tests := []struct {
+		name    string
+		renames [][2]string
+	}{
+		{name: "single rename", renames: [][2]string{{"aws", "amazon"}}},
+		{name: "two renames before one save", renames: [][2]string{{"aws", "amazon"}, {"amazon", "amazon prod"}}},
+		{name: "case-only rename", renames: [][2]string{{"aws", "AWS"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "totp.json")
+			if err := os.WriteFile(path, []byte(before), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			idx, err := LoadIndex(path)
+			if err != nil {
+				t.Fatalf("LoadIndex: %v", err)
+			}
+			for _, r := range tt.renames {
+				if err := idx.Rename(r[0], r[1]); err != nil {
+					t.Fatalf("Rename(%q, %q): %v", r[0], r[1], err)
+				}
+			}
+			if err := SaveIndex(path, idx); err != nil {
+				t.Fatalf("SaveIndex: %v", err)
+			}
+			// A second save of the same in-memory index finds the entry under
+			// its new name on disk.
+			if err := SaveIndex(path, idx); err != nil {
+				t.Fatalf("second SaveIndex: %v", err)
+			}
+
+			want := tt.renames[len(tt.renames)-1][1]
+			_, entries := readRawEntries(t, path)
+			if len(entries) != 2 {
+				t.Fatalf("entries = %v, want 2", entries)
+			}
+			if entries[0]["name"] != want {
+				t.Fatalf("first entry name = %v, want %q", entries[0]["name"], want)
+			}
+			if entries[0]["note"] != "prod account" {
+				t.Errorf("renamed entry \"note\" = %v, want it preserved", entries[0]["note"])
+			}
+			if entries[0]["digits"] != float64(8) {
+				t.Errorf("renamed entry \"digits\" = %v, want 8", entries[0]["digits"])
+			}
+			if entries[1]["color"] != "blue" {
+				t.Errorf("untouched entry \"color\" = %v, want it preserved", entries[1]["color"])
+			}
+			if _, leaked := entries[1]["note"]; leaked {
+				t.Errorf("untouched entry inherited the renamed entry's key: %v", entries[1])
+			}
+		})
+	}
+}
+
+// TestSaveIndexRemoveLastEntryDropsEntriesKey: an empty account list leaves no
+// "entries" key behind, while unknown top-level keys still survive.
+func TestSaveIndexRemoveLastEntryDropsEntriesKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "totp.json")
+	const before = `{"v":1,"backend":"plaintext","future":"kept","entries":[{"name":"aws","note":"x"}]}`
+	if err := os.WriteFile(path, []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := LoadIndex(path)
+	if err != nil {
+		t.Fatalf("LoadIndex: %v", err)
+	}
+	if !idx.Remove("aws") {
+		t.Fatal("Remove(aws) = false, want true")
+	}
+	if err := SaveIndex(path, idx); err != nil {
+		t.Fatalf("SaveIndex: %v", err)
+	}
+	top, _ := readRawEntries(t, path)
+	if _, ok := top["entries"]; ok {
+		t.Errorf("\"entries\" = %v, want the key dropped", top["entries"])
+	}
+	if top["future"] != "kept" {
+		t.Errorf("top-level \"future\" = %v, want it preserved", top["future"])
+	}
+	if top["backend"] != "plaintext" {
+		t.Errorf("\"backend\" = %v, want plaintext", top["backend"])
+	}
+}
+
+func TestEntryHasNotesRoundTrip(t *testing.T) {
+	tests := []struct {
+		name     string
+		hasNotes bool
+		wantKey  bool
+	}{
+		{"set", true, true},
+		{"unset omits key", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "totp.json")
+			idx := Index{V: 1, Backend: "plaintext", Entries: []Entry{{Name: "aws", HasNotes: tt.hasNotes}}}
+			if err := SaveIndex(path, idx); err != nil {
+				t.Fatalf("SaveIndex: %v", err)
+			}
+			_, entries := readRawEntries(t, path)
+			if _, ok := entries[0]["has_notes"]; ok != tt.wantKey {
+				t.Errorf("has_notes present = %v, want %v (%v)", ok, tt.wantKey, entries[0])
+			}
+			if _, ok := entries[0]["prevName"]; ok {
+				t.Errorf("prevName leaked to disk: %v", entries[0])
+			}
+			got, err := LoadIndex(path)
+			if err != nil {
+				t.Fatalf("LoadIndex: %v", err)
+			}
+			if got.Entries[0].HasNotes != tt.hasNotes {
+				t.Errorf("HasNotes = %v, want %v", got.Entries[0].HasNotes, tt.hasNotes)
+			}
+		})
+	}
+}

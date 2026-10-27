@@ -18,10 +18,10 @@ import (
 // future banshee's index survives being opened by an older binary.
 const IndexVersion = 1
 
-// Entry is one TOTP account's non-secret metadata. The seed itself never
-// appears here — it lives in an internal/secrets Store under totp/<Name> —
-// which is what lets this file be a plain 0644 JSON blob and lets the user
-// switch storage backends without rewriting their account list.
+// Entry is one TOTP account's non-secret metadata. The seed and any notes never
+// appear here — they live in an internal/secrets Store under totp/<Name> and
+// totp-notes/<Name> — which is what lets this file be a plain 0644 JSON blob and
+// lets the user switch storage backends without rewriting their account list.
 type Entry struct {
 	// Name is the user-chosen label. It is the identity of the entry: the
 	// launcher fuzzy-matches it and the secret key is derived from it.
@@ -43,6 +43,14 @@ type Entry struct {
 	// becomes a question once a second manager is configured, and an index
 	// written before that keeps its byte-for-byte shape.
 	Backend string `json:"backend,omitempty"`
+	// HasNotes marks that notes exist under the entry's secrets key, so the
+	// list can show it without a secrets read. Display-only, never
+	// authoritative: the secrets store decides whether notes exist.
+	HasNotes bool `json:"has_notes,omitempty"`
+
+	// prevName is the on-disk name a rename moved away from, so SaveIndex can
+	// find the raw entry and keep its unknown keys. Never serialized.
+	prevName string
 }
 
 // Params resolves the entry's algorithm parameters, substituting the RFC
@@ -239,7 +247,13 @@ func SaveIndex(path string, idx Index) error {
 	if len(idx.Entries) > 0 {
 		entries := make([]map[string]json.RawMessage, 0, len(idx.Entries))
 		for _, e := range idx.Entries {
-			merged, err := mergeKnown(priorEntries[foldName(e.Name)], e, entryKeys)
+			// A renamed entry is still stored under its old name on disk, unless
+			// this index was already saved once; match whichever is there.
+			prior, ok := priorEntries[foldName(e.prevName)]
+			if e.prevName == "" || !ok {
+				prior = priorEntries[foldName(e.Name)]
+			}
+			merged, err := mergeKnown(prior, e, entryKeys)
 			if err != nil {
 				return err
 			}
@@ -400,5 +414,55 @@ func (idx *Index) Add(e Entry) error {
 		idx.V = IndexVersion
 	}
 	idx.Entries = append(idx.Entries, e)
+	return nil
+}
+
+// Remove deletes the entry called name, matched like Find, keeping the rest in
+// order. It reports whether an entry was removed.
+func (idx *Index) Remove(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for i, e := range idx.Entries {
+		if strings.EqualFold(e.Name, name) {
+			idx.Entries = slices.Delete(idx.Entries, i, i+1)
+			return true
+		}
+	}
+	return false
+}
+
+// Rename changes the name of the entry called old (matched like Find) to
+// newName. A name held by a different entry is refused for the same reason Add
+// refuses it; a case-only rename of the entry itself is allowed.
+func (idx *Index) Rename(old, newName string) error {
+	newName = strings.TrimSpace(newName)
+	if newName == "" {
+		return errors.New("totp: entry needs a name")
+	}
+	old = strings.TrimSpace(old)
+	at := -1
+	for i, e := range idx.Entries {
+		if old != "" && strings.EqualFold(e.Name, old) {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		return fmt.Errorf("totp: no entry named %q", old)
+	}
+	for i, e := range idx.Entries {
+		if i != at && strings.EqualFold(e.Name, newName) {
+			return fmt.Errorf("totp: an entry named %q already exists", newName)
+		}
+	}
+	e := &idx.Entries[at]
+	// The first rename wins: until SaveIndex runs, the disk still holds the
+	// original name, however many renames happened since.
+	if e.prevName == "" {
+		e.prevName = e.Name
+	}
+	e.Name = newName
 	return nil
 }
