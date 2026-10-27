@@ -1863,6 +1863,39 @@ func TestSetupMoreReopens(t *testing.T) {
 	})
 }
 
+// TestManageReopensOnEditQuery covers the entry rows' AltAction: like the
+// storage hint it only navigates, so wired it reopens on the manage query and
+// unwired it names that query; only a missing entry name is an error.
+func TestManageReopensOnEditQuery(t *testing.T) {
+	manage := providers.Action{Kind: ActTOTPManage, Argv: []string{"github"}}
+	t.Run("wired", func(t *testing.T) {
+		h := newWizardHarness(t, twoEntryIndex(), stockedStore())
+		if err := h.disp.Dispatch(manage); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		if q := h.waitReopened(t); q != "totp edit github" {
+			t.Errorf("reopened on %q, want %q", q, "totp edit github")
+		}
+	})
+	t.Run("unwired", func(t *testing.T) {
+		h := newHarness(t, twoEntryIndex(), stockedStore())
+		if err := h.disp.Dispatch(manage); err != nil {
+			t.Fatalf("Dispatch with no Reopen: %v", err)
+		}
+		if msg := h.waitNotified(t); !strings.Contains(msg, "totp edit github") {
+			t.Errorf("notification %q does not name the manage query", msg)
+		}
+	})
+	for _, argv := range [][]string{nil, {""}, {"  "}} {
+		t.Run(fmt.Sprintf("no name %q", argv), func(t *testing.T) {
+			h := newWizardHarness(t, twoEntryIndex(), stockedStore())
+			if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPManage, Argv: argv}); err == nil {
+				t.Error("Dispatch with no entry name succeeded, want an error")
+			}
+		})
+	}
+}
+
 // TestSetupAppendsManagers is the accumulating half of setup: a second choice
 // must join the first rather than replace it, or every seed in the first manager
 // would become unreachable the moment a user tried a second one.

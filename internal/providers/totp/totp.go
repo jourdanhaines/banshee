@@ -38,6 +38,15 @@ const (
 	SetupMoreScore = 5
 )
 
+// Scores of the manage block "totp edit <name>" renders. All three rows are
+// CatTOTP, so Category cannot tiebreak and Title would alphabetise them
+// Back/Delete/Edit; fixed descending scores keep Edit, Delete, Back.
+const (
+	manageEditScore   = TriggerScore
+	manageDeleteScore = TriggerScore - 10
+	manageBackScore   = TriggerScore - 20
+)
+
 // setupToken is the word after the trigger that reopens the manager chooser
 // ("totp setup"). It is a query rather than a mode or a flag because the
 // provider holds no state between queries: the chooser has to be reachable from
@@ -49,6 +58,26 @@ const setupToken = "setup"
 // chooser: the trigger plus setupToken, spelled once so the hint row's handler
 // and the query parser cannot disagree.
 const reopenSetupQuery = "totp " + setupToken
+
+// editToken is the word after the trigger that opens an entry's manage rows
+// ("totp edit <name>"), reached from an entry row's AltAction. Like setupToken
+// it is a query so the provider needs no state between queries.
+const editToken = "edit"
+
+// editQuery is the query that lands on name's manage rows, spelled once so the
+// manage handler and parseEdit cannot disagree.
+func editQuery(name string) string { return "totp " + editToken + " " + name }
+
+// parseEdit recognizes "edit <name>" in a triggered filter. The verb matches
+// case-insensitively; the name keeps its inner spaces and must be non-empty.
+func parseEdit(filter string) (name string, ok bool) {
+	verb, rest, found := strings.Cut(filter, " ")
+	if !found || !strings.EqualFold(verb, editToken) {
+		return "", false
+	}
+	name = strings.TrimSpace(rest)
+	return name, name != ""
+}
 
 // configurableBackends is every secrets manager a user can actually configure
 // today. It is what decides whether the "add another secrets manager" hint is
@@ -85,8 +114,10 @@ const queryTimeout = 2 * time.Second
 
 // Icon theme names used by this provider's rows.
 const (
-	iconEntry = "security-high-symbolic"
-	iconAdd   = "list-add-symbolic"
+	iconEntry  = "security-high-symbolic"
+	iconAdd    = "list-add-symbolic"
+	iconEdit   = "document-edit-symbolic"
+	iconDelete = "user-trash-symbolic"
 )
 
 // Option configures a Provider.
@@ -207,6 +238,8 @@ func (p *Provider) Name() string { return "totp" }
 //   - "totp setup" reopens the chooser for the managers not configured yet, so
 //     a second one can be added without a settings screen. With all of them
 //     configured it falls through to the ordinary listing.
+//   - "totp edit <name>" renders that entry's manage rows (Edit, Delete, Back);
+//     an unknown name, or a bare "totp edit", falls through to the listing.
 //   - While a backend failure is recorded in the shared SetupState, the trigger
 //     renders the setup wizard instead of any of the above.
 //
@@ -268,18 +301,6 @@ func (p *Provider) Query(ctx context.Context, q string) ([]providers.Result, err
 		}
 		return p.setupResults(nil), nil
 	}
-	// The chooser token, for adding a manager to the ones already configured.
-	// It deliberately shadows the fuzzy filter: an entry literally named "setup"
-	// stops being reachable by "totp setup" while any manager is unconfigured.
-	// That is accepted — the entry is still reachable by its bare name and by
-	// any other filter, while the alternative is a settings surface banshee does
-	// not have.
-	if triggered && strings.EqualFold(filter, setupToken) {
-		if rows := p.setupResults(configured); len(rows) > 0 {
-			return rows, nil
-		}
-	}
-
 	def := idx.DefaultBackend()
 	// One open per distinct manager per query, cached: several entries usually
 	// share a manager, and opening a store may construct a client. A failed open
@@ -301,6 +322,28 @@ func (p *Provider) Query(ctx context.Context, q string) ([]providers.Result, err
 		return s
 	}
 	multi := len(configured) > 1
+
+	// The chooser and manage tokens. Both deliberately shadow the fuzzy filter:
+	// an entry literally named "setup" stops being reachable by "totp setup"
+	// while any manager is unconfigured, and a filter such as "edit github" opens
+	// github's manage rows rather than fuzzy-matching an entry named like it.
+	// That is accepted — such an entry is still reachable by its bare name and by
+	// any other filter, while the alternative is a settings surface banshee does
+	// not have.
+	if triggered && strings.EqualFold(filter, setupToken) {
+		if rows := p.setupResults(configured); len(rows) > 0 {
+			return rows, nil
+		}
+	}
+	if triggered {
+		if name, ok := parseEdit(filter); ok {
+			if e, found := idx.Find(name); found {
+				b := e.BackendOr(def)
+				return p.manageResults(ctx, openFor(b), e, backendLabel(b, multi))
+			}
+		}
+	}
+
 	now := p.now()
 
 	var out []providers.Result
@@ -378,16 +421,19 @@ func (p *Provider) matchScore(triggered bool, filter, q, name string) (int, bool
 // queryTimeout, which is why the abort check consults the caller's ctx rather
 // than the bounded one: only a cancelled query aborts, because that means the
 // user has already typed the next character.
+//
+// Every row carries an AltAction (Tab / Shift+Enter) that opens its manage rows.
 func (p *Provider) entryResult(ctx context.Context, st openedStore, e Entry, score int, now time.Time, label string) (providers.Result, error) {
 	params := e.Params()
 	res := providers.Result{
-		ID:       "totp:" + e.Name,
-		Title:    e.Name,
-		Icon:     providers.Icon{ThemeName: iconEntry},
-		Category: providers.CatTOTP,
-		Score:    score,
-		Action:   providers.Action{Kind: ActTOTPCopy, Argv: []string{e.Name}},
-		Period:   time.Duration(params.Period) * time.Second,
+		ID:        "totp:" + e.Name,
+		Title:     e.Name,
+		Icon:      providers.Icon{ThemeName: iconEntry},
+		Category:  providers.CatTOTP,
+		Score:     score,
+		Action:    providers.Action{Kind: ActTOTPCopy, Argv: []string{e.Name}},
+		AltAction: &providers.Action{Kind: ActTOTPManage, Argv: []string{e.Name}},
+		Period:    time.Duration(params.Period) * time.Second,
 	}
 	if st.err != nil {
 		// The manager itself could not be opened — an unknown name in the index,
@@ -432,9 +478,112 @@ func (p *Provider) entryResult(ctx context.Context, st openedStore, e Entry, sco
 		res.Subtitle = withLabel(unavailable(err), label)
 		return res, nil
 	}
-	res.Subtitle = withLabel(FormatCode(code), label)
+	sub := FormatCode(code)
+	if e.HasNotes {
+		sub = withLabel(sub, "notes")
+	}
+	res.Subtitle = withLabel(sub, label)
 	res.Expiry = ExpiryOf(now, params.Period)
 	return res, nil
+}
+
+// manageResults renders e's manage block: Edit (rename + notes), Delete
+// (confirmed) and Back, in that order, all read from the manager st holds.
+//
+// The notes field is rendered only when its current value was actually read:
+// handleUpdate treats a missing "notes" key as keep and a present empty one as
+// clear, so an empty field shown after a failed read would wipe notes on save.
+func (p *Provider) manageResults(ctx context.Context, st openedStore, e Entry, label string) ([]providers.Result, error) {
+	name := e.Name
+	editSub := withLabel("Rename, or edit its notes", label)
+	var notesField *providers.FormField
+	switch {
+	case st.err != nil:
+		editSub = withLabel("secrets backend unavailable", label)
+	case st.auth:
+		// Reading notes would need the password per keystroke; rename only.
+		editSub = withLabel("Rename only — notes are kept", label)
+	default:
+		getCtx, cancel := context.WithTimeout(ctx, p.queryTimeout)
+		notes, err := st.store.Get(getCtx, notesKey(name), secrets.Credential{})
+		cancel()
+		switch {
+		case err == nil, errors.Is(err, secrets.ErrNotFound):
+			if err != nil {
+				notes = ""
+			}
+			notesField = &providers.FormField{Key: "notes", Label: "Notes", Multiline: true, Value: notes}
+		default:
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			editSub = withLabel("Rename only — notes could not be read", label)
+		}
+	}
+
+	editFields := []providers.FormField{{Key: "name", Label: "Name", Value: name, Required: true}}
+	if notesField != nil {
+		editFields = append(editFields, *notesField)
+	}
+	var deleteFields []providers.FormField
+	if st.auth {
+		editFields = append(editFields, credentialField())
+		deleteFields = []providers.FormField{credentialField()}
+	}
+	auth := st.auth
+
+	edit := providers.Result{
+		ID:       "totp:edit:" + name,
+		Title:    "Edit " + name,
+		Subtitle: editSub,
+		Icon:     providers.Icon{ThemeName: iconEdit},
+		Category: providers.CatTOTP,
+		Score:    manageEditScore,
+		Form: &providers.Form{
+			Title:       "Edit " + name,
+			SubmitLabel: "Save",
+			Fields:      editFields,
+			Build: func(values map[string]string) (providers.Action, error) {
+				if strings.TrimSpace(values["name"]) == "" {
+					return providers.Action{}, errors.New("a name is required")
+				}
+				if auth && strings.TrimSpace(values["credential"]) == "" {
+					return providers.Action{}, errCredentialRequired
+				}
+				return providers.Action{Kind: ActTOTPUpdate, Argv: []string{name}, Values: values}, nil
+			},
+		},
+	}
+	del := providers.Result{
+		ID:       "totp:delete:" + name,
+		Title:    "Delete " + name,
+		Subtitle: withLabel("Removes the seed and its notes", label),
+		Icon:     providers.Icon{ThemeName: iconDelete},
+		Category: providers.CatTOTP,
+		Score:    manageDeleteScore,
+		Form: &providers.Form{
+			Title:       "Delete " + name + "?",
+			SubmitLabel: "Delete",
+			Fields:      deleteFields,
+			Build: func(values map[string]string) (providers.Action, error) {
+				if auth && strings.TrimSpace(values["credential"]) == "" {
+					return providers.Action{}, errCredentialRequired
+				}
+				return providers.Action{Kind: ActTOTPDelete, Argv: []string{name}, Values: values}, nil
+			},
+		},
+	}
+	back := providers.Result{
+		// Not "totp:edit:back": an entry literally named "back" would collide.
+		ID:       "totp:manage:back",
+		Title:    "Back",
+		Subtitle: "Return to your codes",
+		Icon:     providers.Icon{ThemeName: iconWizardBack},
+		Category: providers.CatTOTP,
+		Score:    manageBackScore,
+		Action:   providers.Action{Kind: ActTOTPWizardReset},
+	}
+	return []providers.Result{edit, del, back}, nil
 }
 
 // backendLabel is the manager name a row is tagged with, or "" while only one

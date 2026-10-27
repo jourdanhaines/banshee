@@ -401,20 +401,388 @@ func TestQueryEntryRowShape(t *testing.T) {
 		t.Fatalf("Query() rows = %d, want 1", len(res))
 	}
 	want := providers.Result{
-		ID:       "totp:github",
-		Title:    "github",
-		Subtitle: "324 550",
-		Icon:     providers.Icon{ThemeName: "security-high-symbolic"},
-		Category: providers.CatTOTP,
-		Score:    100,
-		Action:   providers.Action{Kind: ActTOTPCopy, Argv: []string{"github"}},
-		Expiry:   time.Unix(fixedUnix+10, 0),
+		ID:        "totp:github",
+		Title:     "github",
+		Subtitle:  "324 550",
+		Icon:      providers.Icon{ThemeName: "security-high-symbolic"},
+		Category:  providers.CatTOTP,
+		Score:     100,
+		Action:    providers.Action{Kind: ActTOTPCopy, Argv: []string{"github"}},
+		AltAction: &providers.Action{Kind: ActTOTPManage, Argv: []string{"github"}},
+		Expiry:    time.Unix(fixedUnix+10, 0),
 		// Period rides with Expiry: the UI drains a bar over the window ending
 		// there and cannot know how long that window was without being told.
 		Period: 30 * time.Second,
 	}
 	if !reflect.DeepEqual(res[0], want) {
 		t.Errorf("Query() = %+v, want %+v", res[0], want)
+	}
+}
+
+// TestQueryEntryRowsCarryManageAlt pins the manage AltAction on every shape an
+// entry row can take, and only on entry rows.
+func TestQueryEntryRowsCarryManageAlt(t *testing.T) {
+	wantAlt := func(name string) *providers.Action {
+		return &providers.Action{Kind: ActTOTPManage, Argv: []string{name}}
+	}
+	auth := stockedStore()
+	auth.auth = true
+	failing := stockedStore()
+	failing.getErr = errors.New("boom")
+	tests := []struct {
+		name  string
+		open  func(string) (secrets.Store, error)
+		entry string
+	}{
+		{name: "normal", open: func(string) (secrets.Store, error) { return stockedStore(), nil }, entry: "github"},
+		{name: "auth form", open: func(string) (secrets.Store, error) { return auth, nil }, entry: "github"},
+		{name: "failed open", open: func(string) (secrets.Store, error) { return nil, errors.New("no") }, entry: "github"},
+		{name: "degraded read", open: func(string) (secrets.Store, error) { return failing, nil }, entry: "github"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := New(substringScorer,
+				WithIndexPath(writeIndex(t, twoEntryIndex())),
+				WithOpenStore(tt.open),
+				WithNow(fixedNow),
+			)
+			res, err := p.Query(context.Background(), "totp")
+			if err != nil {
+				t.Fatalf("Query() error: %v", err)
+			}
+			for _, r := range res {
+				switch r.ID {
+				case "totp:github", "totp:gitlab":
+					if !reflect.DeepEqual(r.AltAction, wantAlt(r.Title)) {
+						t.Errorf("%s AltAction = %+v, want %+v", r.ID, r.AltAction, wantAlt(r.Title))
+					}
+				default:
+					if r.AltAction != nil {
+						t.Errorf("%s AltAction = %+v, want nil", r.ID, r.AltAction)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestQueryEditToken(t *testing.T) {
+	manage := []string{"totp:edit:github", "totp:delete:github", "totp:manage:back"}
+	normal := []string{"totp:github", "totp:gitlab", "totp:add", "totp:setup:more"}
+	spaced := Index{V: IndexVersion, Backend: "plaintext", Entries: []Entry{{Name: "work github"}, {Name: "github"}}}
+	tests := []struct {
+		name    string
+		idx     Index
+		state   *SetupState
+		query   string
+		wantIDs []string
+	}{
+		{name: "edit token opens the manage rows", idx: twoEntryIndex(), query: "totp edit github", wantIDs: manage},
+		{name: "verb and name are case-insensitive", idx: twoEntryIndex(), query: "OTP EDIT GitHub", wantIDs: manage},
+		{name: "extra spaces around the name", idx: twoEntryIndex(), query: "totp edit   github  ", wantIDs: manage},
+		{
+			name:    "a name with a space",
+			idx:     spaced,
+			query:   "totp edit work github",
+			wantIDs: []string{"totp:edit:work github", "totp:delete:work github", "totp:manage:back"},
+		},
+		// substringScorer finds no entry containing "edit nope", so only the
+		// trailing rows remain: proof the normal listing ran.
+		{name: "unknown name falls through", idx: twoEntryIndex(), query: "totp edit nope", wantIDs: []string{"totp:add", "totp:setup:more"}},
+		{name: "bare edit falls through", idx: twoEntryIndex(), query: "totp edit", wantIDs: []string{"totp:add", "totp:setup:more"}},
+		{name: "untriggered edit stays silent", idx: twoEntryIndex(), query: "edit github", wantIDs: nil},
+		{
+			name:    "an applicable wizard failure wins",
+			idx:     keyringIndex(),
+			state:   failedState(secrets.BackendKeyring, "no bus"),
+			query:   "totp edit github",
+			wantIDs: []string{"totp:wizard:status", "totp:wizard:keyring:daemon", "totp:wizard:keyring:create", "totp:wizard:keyring:install", "totp:wizard:keyring:dbus", "totp:wizard:retry"},
+		},
+		{name: "bare trigger still lists", idx: twoEntryIndex(), query: "totp", wantIDs: normal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := New(substringScorer,
+				WithIndexPath(writeIndex(t, tt.idx)),
+				WithOpenStore(func(string) (secrets.Store, error) { return stockedStore(), nil }),
+				WithNow(fixedNow),
+				WithSetupState(tt.state),
+				WithLookPath(noPackageManager),
+			)
+			res, err := p.Query(context.Background(), tt.query)
+			if err != nil {
+				t.Fatalf("Query(%q) error: %v", tt.query, err)
+			}
+			if got := ids(res); !reflect.DeepEqual(got, tt.wantIDs) {
+				t.Errorf("Query(%q) ids = %v, want %v", tt.query, got, tt.wantIDs)
+			}
+		})
+	}
+
+	t.Run("scores descend so the block keeps its order", func(t *testing.T) {
+		p := newProvider(t, twoEntryIndex(), stockedStore(), substringScorer)
+		res, err := p.Query(context.Background(), "totp edit github")
+		if err != nil {
+			t.Fatalf("Query() error: %v", err)
+		}
+		var got []int
+		for _, r := range res {
+			got = append(got, r.Score)
+			if r.Category != providers.CatTOTP {
+				t.Errorf("%s Category = %v, want CatTOTP", r.ID, r.Category)
+			}
+		}
+		if want := []int{800, 790, 780}; !reflect.DeepEqual(got, want) {
+			t.Errorf("scores = %v, want %v", got, want)
+		}
+		back := res[2]
+		if back.Title != "Back" || back.Action.Kind != ActTOTPWizardReset || back.Icon.ThemeName != iconWizardBack {
+			t.Errorf("back row = %+v, want a wizard-reset Back row", back)
+		}
+	})
+}
+
+// fieldKeys lists a form's field keys in order.
+func fieldKeys(f *providers.Form) []string {
+	var out []string
+	for _, fl := range f.Fields {
+		out = append(out, fl.Key)
+	}
+	return out
+}
+
+func TestQueryEditRowForms(t *testing.T) {
+	notesIdx := Index{V: IndexVersion, Backend: "plaintext", Entries: []Entry{{Name: "github", HasNotes: true}}}
+	tests := []struct {
+		name string
+		idx  Index
+		// store builds the vault; nil means opening the manager fails.
+		store        func() *fakeStore
+		wantEditKeys []string
+		wantNotes    string
+		wantSubtitle string
+		wantDelKeys  []string
+		wantNoReads  bool
+	}{
+		{
+			name: "notes prefill from the store",
+			idx:  notesIdx,
+			store: func() *fakeStore {
+				s := stockedStore()
+				s.values[notesKey("github")] = "backup: 1111\n2222"
+				return s
+			},
+			wantEditKeys: []string{"name", "notes"},
+			wantNotes:    "backup: 1111\n2222",
+			wantSubtitle: "Rename, or edit its notes",
+		},
+		{
+			name:         "no notes stored shows an empty field",
+			idx:          twoEntryIndex(),
+			store:        stockedStore,
+			wantEditKeys: []string{"name", "notes"},
+			wantSubtitle: "Rename, or edit its notes",
+		},
+		{
+			name: "unreadable notes drop the field",
+			idx:  notesIdx,
+			store: func() *fakeStore {
+				s := stockedStore()
+				s.opErr = map[string]error{"get " + notesKey("github"): errors.New("boom")}
+				return s
+			},
+			wantEditKeys: []string{"name"},
+			wantSubtitle: "Rename only — notes could not be read",
+		},
+		{
+			name: "per-access manager asks for a password and reads nothing",
+			idx:  twoEntryIndex(),
+			store: func() *fakeStore {
+				s := stockedStore()
+				s.auth = true
+				return s
+			},
+			wantEditKeys: []string{"name", "credential"},
+			wantDelKeys:  []string{"credential"},
+			wantSubtitle: "Rename only — notes are kept",
+			wantNoReads:  true,
+		},
+		{
+			name:         "unopenable manager drops the field",
+			idx:          twoEntryIndex(),
+			store:        nil,
+			wantEditKeys: []string{"name"},
+			wantSubtitle: "secrets backend unavailable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var store *fakeStore
+			open := func(string) (secrets.Store, error) { return nil, errors.New("no store") }
+			if tt.store != nil {
+				store = tt.store()
+				open = func(string) (secrets.Store, error) { return store, nil }
+			}
+			p := New(substringScorer, WithIndexPath(writeIndex(t, tt.idx)), WithOpenStore(open), WithNow(fixedNow))
+			res, err := p.Query(context.Background(), "totp edit github")
+			if err != nil {
+				t.Fatalf("Query() error: %v", err)
+			}
+			edit, ok := rowByID(res, "totp:edit:github")
+			if !ok {
+				t.Fatalf("no edit row in %v", ids(res))
+			}
+			del, _ := rowByID(res, "totp:delete:github")
+			if edit.Title != "Edit github" || edit.Icon.ThemeName != iconEdit {
+				t.Errorf("edit row title/icon = %q/%q", edit.Title, edit.Icon.ThemeName)
+			}
+			if edit.Subtitle != tt.wantSubtitle {
+				t.Errorf("edit subtitle = %q, want %q", edit.Subtitle, tt.wantSubtitle)
+			}
+			if edit.Form == nil || del.Form == nil {
+				t.Fatal("edit or delete row has no form")
+			}
+			if edit.Form.Title != "Edit github" || edit.Form.SubmitLabel != "Save" {
+				t.Errorf("edit form title/label = %q/%q", edit.Form.Title, edit.Form.SubmitLabel)
+			}
+			if got := fieldKeys(edit.Form); !reflect.DeepEqual(got, tt.wantEditKeys) {
+				t.Errorf("edit fields = %v, want %v", got, tt.wantEditKeys)
+			}
+			nameF := edit.Form.Fields[0]
+			if nameF.Value != "github" || !nameF.Required {
+				t.Errorf("name field = %+v, want prefilled and required", nameF)
+			}
+			for _, f := range edit.Form.Fields {
+				if f.Key == "notes" && (!f.Multiline || f.Value != tt.wantNotes) {
+					t.Errorf("notes field = %+v, want multiline with %q", f, tt.wantNotes)
+				}
+			}
+			if del.Form.Title != "Delete github?" || del.Form.SubmitLabel != "Delete" || del.Icon.ThemeName != iconDelete {
+				t.Errorf("delete form = %q/%q icon %q", del.Form.Title, del.Form.SubmitLabel, del.Icon.ThemeName)
+			}
+			if got := fieldKeys(del.Form); !reflect.DeepEqual(got, tt.wantDelKeys) {
+				t.Errorf("delete fields = %v, want %v", got, tt.wantDelKeys)
+			}
+			if tt.wantNoReads && len(store.opLog()) != 0 {
+				t.Errorf("store ops = %v, want none", store.opLog())
+			}
+		})
+	}
+}
+
+func TestQueryEditRowBuild(t *testing.T) {
+	tests := []struct {
+		name    string
+		auth    bool
+		row     string
+		values  map[string]string
+		want    providers.Action
+		wantErr bool
+	}{
+		{
+			name:   "edit builds an update",
+			row:    "totp:edit:github",
+			values: map[string]string{"name": "gh", "notes": "x"},
+			want:   providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"}, Values: map[string]string{"name": "gh", "notes": "x"}},
+		},
+		{name: "edit with a blank name fails", row: "totp:edit:github", values: map[string]string{"name": "  "}, wantErr: true},
+		{
+			name:   "edit with a password",
+			auth:   true,
+			row:    "totp:edit:github",
+			values: map[string]string{"name": "gh", "credential": "pw"},
+			want:   providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"}, Values: map[string]string{"name": "gh", "credential": "pw"}},
+		},
+		{name: "edit with a blank password fails", auth: true, row: "totp:edit:github", values: map[string]string{"name": "gh", "credential": " "}, wantErr: true},
+		{
+			name:   "delete builds a delete",
+			row:    "totp:delete:github",
+			values: map[string]string{},
+			want:   providers.Action{Kind: ActTOTPDelete, Argv: []string{"github"}, Values: map[string]string{}},
+		},
+		{
+			name:   "delete with a password",
+			auth:   true,
+			row:    "totp:delete:github",
+			values: map[string]string{"credential": "pw"},
+			want:   providers.Action{Kind: ActTOTPDelete, Argv: []string{"github"}, Values: map[string]string{"credential": "pw"}},
+		},
+		{name: "delete with a blank password fails", auth: true, row: "totp:delete:github", values: map[string]string{"credential": ""}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := stockedStore()
+			store.auth = tt.auth
+			p := newProvider(t, twoEntryIndex(), store, substringScorer)
+			res, err := p.Query(context.Background(), "totp edit github")
+			if err != nil {
+				t.Fatalf("Query() error: %v", err)
+			}
+			row, ok := rowByID(res, tt.row)
+			if !ok || row.Form == nil {
+				t.Fatalf("no form row %q in %v", tt.row, ids(res))
+			}
+			got, err := row.Form.Build(tt.values)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("Build(%v) = %+v, want an error", tt.values, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Build error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Build() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestQueryEditLabels covers the manager label on the manage block and the
+// notes marker on an entry row.
+func TestQueryEditLabels(t *testing.T) {
+	keyring := newFakeStore("keyring")
+	keyring.values["totp/github"] = testSeed
+	plaintext := newFakeStore("plaintext")
+	plaintext.values["totp/gitlab"] = testSeed
+	idx := multiIndex()
+	idx.Entries[0].HasNotes = true
+	p := New(substringScorer,
+		WithIndexPath(writeIndex(t, idx)),
+		WithOpenStore(storeSwitch(map[string]*fakeStore{"keyring": keyring, "plaintext": plaintext})),
+		WithNow(fixedNow),
+	)
+	res, err := p.Query(context.Background(), "totp edit github")
+	if err != nil {
+		t.Fatalf("Query() error: %v", err)
+	}
+	want := map[string]string{
+		"totp:edit:github":   "Rename, or edit its notes · keyring",
+		"totp:delete:github": "Removes the seed and its notes · keyring",
+	}
+	for id, sub := range want {
+		if row, _ := rowByID(res, id); row.Subtitle != sub {
+			t.Errorf("%s subtitle = %q, want %q", id, row.Subtitle, sub)
+		}
+	}
+	// Only the keyring vault holds github, so it alone is asked for notes.
+	if got := keyring.opLog(); !reflect.DeepEqual(got, []string{"get " + notesKey("github")}) {
+		t.Errorf("keyring ops = %v, want one notes read", got)
+	}
+	if got := plaintext.opLog(); len(got) != 0 {
+		t.Errorf("plaintext ops = %v, want none", got)
+	}
+
+	res, err = p.Query(context.Background(), "totp")
+	if err != nil {
+		t.Fatalf("Query() error: %v", err)
+	}
+	if row, _ := rowByID(res, "totp:github"); row.Subtitle != "324 550 · notes · keyring" {
+		t.Errorf("github subtitle = %q, want the notes marker before the manager", row.Subtitle)
+	}
+	if row, _ := rowByID(res, "totp:gitlab"); strings.Contains(row.Subtitle, "notes") {
+		t.Errorf("gitlab subtitle = %q, want no notes marker", row.Subtitle)
 	}
 }
 
@@ -1135,6 +1503,41 @@ func TestQueryBoundsAWedgedBackend(t *testing.T) {
 	if !res[0].Expiry.IsZero() {
 		t.Errorf("Expiry = %v, want zero (nothing is counting down)", res[0].Expiry)
 	}
+}
+
+// TestQueryEditCancelledDuringNotesRead proves a notes read cut short by the
+// caller's cancellation aborts the query rather than rendering a rename-only row.
+func TestQueryEditCancelledDuringNotesRead(t *testing.T) {
+	store := &hangingStore{fakeStore{name: "keyring", blocking: true, values: map[string]string{}}}
+	idx := Index{V: IndexVersion, Backend: "keyring", Entries: []Entry{{Name: "github"}}}
+	p := New(substringScorer,
+		WithIndexPath(writeIndex(t, idx)),
+		WithOpenStore(func(string) (secrets.Store, error) { return store, nil }),
+		WithNow(fixedNow),
+		WithQueryTimeout(time.Minute),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := p.Query(ctx, "totp edit github"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Query() error = %v, want the caller's context error", err)
+	}
+
+	t.Run("the provider's own bound degrades instead", func(t *testing.T) {
+		p := New(substringScorer,
+			WithIndexPath(writeIndex(t, idx)),
+			WithOpenStore(func(string) (secrets.Store, error) { return store, nil }),
+			WithNow(fixedNow),
+			WithQueryTimeout(20*time.Millisecond),
+		)
+		res, err := p.Query(context.Background(), "totp edit github")
+		if err != nil {
+			t.Fatalf("Query() error = %v, want a degraded edit row", err)
+		}
+		edit, _ := rowByID(res, "totp:edit:github")
+		if edit.Subtitle != "Rename only — notes could not be read" || len(edit.Form.Fields) != 1 {
+			t.Errorf("edit row = %q with %d fields, want rename only", edit.Subtitle, len(edit.Form.Fields))
+		}
+	})
 }
 
 func TestQueryHonorsContext(t *testing.T) {

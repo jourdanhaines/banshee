@@ -38,6 +38,9 @@ const (
 	// ActTOTPDelete removes the entry named Argv[0]: seed, notes and index row.
 	// Values["credential"] carries the unlock password, when needed.
 	ActTOTPDelete = "totp-delete"
+	// ActTOTPManage reopens the launcher on the manage rows (Edit, Delete,
+	// Back) of the entry named Argv[0]; it is every entry row's AltAction.
+	ActTOTPManage = "totp-manage"
 )
 
 // Timeouts bounding the backend calls the handlers make. They are generous
@@ -222,6 +225,7 @@ func RegisterHandlersWith(dispatch *launch.Dispatcher, deps Deps) {
 	dispatch.Register(ActTOTPWizardFix, deps.handleWizardFix)
 	dispatch.Register(ActTOTPUpdate, deps.handleUpdate)
 	dispatch.Register(ActTOTPDelete, deps.handleDelete)
+	dispatch.Register(ActTOTPManage, deps.handleManage)
 }
 
 // backendUnusable reports whether err means the secrets backend itself is
@@ -317,6 +321,8 @@ func (d Deps) wizardWouldRender(backend string, fromSetup bool) bool {
 // handleWizardReset abandons the wizard and returns the user to the ordinary
 // rows — during first-time setup that means the backend chooser, because an
 // index with no backend renders the setup rows once the failure is forgotten.
+// The manage block's Back row reuses it; clearing a stale, unshown failure there
+// is harmless.
 func (d Deps) handleWizardReset(providers.Action) error {
 	d.State.Clear()
 	if d.Reopen != nil {
@@ -339,6 +345,22 @@ func (d Deps) handleSetupMore(providers.Action) error {
 		return nil
 	}
 	d.Reopen(reopenSetupQuery)
+	return nil
+}
+
+// handleManage puts the named entry's manage rows on screen by reopening the
+// launcher on editQuery, mirroring handleSetupMore: an unwired Reopen gets the
+// typeable query named in a notification instead.
+func (d Deps) handleManage(a providers.Action) error {
+	if len(a.Argv) == 0 || strings.TrimSpace(a.Argv[0]) == "" {
+		return fmt.Errorf("totp-manage: no entry name")
+	}
+	name := a.Argv[0]
+	if d.Reopen == nil {
+		d.Notify(fmt.Sprintf("type %q to edit or delete it", editQuery(name)))
+		return nil
+	}
+	d.Reopen(editQuery(name))
 	return nil
 }
 
