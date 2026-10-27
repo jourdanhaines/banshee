@@ -658,6 +658,12 @@ var errCredentialRequired = errors.New("a password is required")
 // package secrets.
 func secretKey(name string) string { return "totp/" + name }
 
+// notesKey maps an entry name onto the key holding its notes, which live in the
+// same secrets Store as its seed because they can hold backup codes. The prefix
+// differs from secretKey's at byte 4 ('-' against '/'), so no entry name can
+// make a notes key collide with a seed key.
+func notesKey(name string) string { return "totp-notes/" + name }
+
 // unavailable renders a backend failure as a short subtitle. It classifies the
 // sentinel errors instead of printing err, both because a Store error can name
 // the key and because a row is not the place for a stack of wrapping.

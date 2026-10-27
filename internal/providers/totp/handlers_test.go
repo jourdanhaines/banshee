@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1894,7 +1895,663 @@ func TestSetupAppendsManagers(t *testing.T) {
 
 func TestDispatchRejectsUnregisteredKind(t *testing.T) {
 	h := newHarness(t, twoEntryIndex(), stockedStore())
-	if err := h.disp.Dispatch(providers.Action{Kind: "totp-delete"}); err == nil {
+	if err := h.disp.Dispatch(providers.Action{Kind: "totp-frobnicate"}); err == nil {
 		t.Error("Dispatch of an unregistered kind succeeded, want an error")
+	}
+}
+
+// editCreated is the creation stamp the edit fixtures carry, so a test can
+// prove a rename keeps it.
+var editCreated = time.Unix(fixedUnix-86400, 0).UTC()
+
+// editIndex is the fixture the update and delete tests edit: "github" has notes
+// and metadata a rename must carry, "gitlab" is a bystander.
+func editIndex(backend string) Index {
+	return Index{
+		V:       IndexVersion,
+		Backend: backend,
+		Entries: []Entry{
+			{Name: "github", Issuer: "GitHub", Created: editCreated, HasNotes: true},
+			{Name: "gitlab"},
+		},
+	}
+}
+
+// editStore holds the seeds and github's notes behind editIndex.
+func editStore(name string) *fakeStore {
+	s := newFakeStore(name)
+	s.values["totp/github"] = testSeed
+	s.values["totp-notes/github"] = "backup codes"
+	s.values["totp/gitlab"] = testSeed
+	return s
+}
+
+// parkedStore holds the first Get or Delete until release is closed, which is
+// how a test proves Dispatch returned while the backend call was still waiting.
+type parkedStore struct {
+	*fakeStore
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newParkedStore(inner *fakeStore) *parkedStore {
+	return &parkedStore{fakeStore: inner, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (p *parkedStore) park() {
+	p.once.Do(func() { close(p.entered) })
+	<-p.release
+}
+
+func (p *parkedStore) Get(ctx context.Context, key string, cred secrets.Credential) (string, error) {
+	p.park()
+	return p.fakeStore.Get(ctx, key, cred)
+}
+
+func (p *parkedStore) Delete(ctx context.Context, key string, cred secrets.Credential) error {
+	p.park()
+	return p.fakeStore.Delete(ctx, key, cred)
+}
+
+// waitReopenedAfterNotify drains the toast a handler raised before it reopened
+// the launcher, then the reopen itself.
+func (h *wizardHarness) waitReopenedAfterNotify(t *testing.T) (msg, query string) {
+	t.Helper()
+	msg = h.waitNotified(t)
+	select {
+	case query = <-h.reopened:
+	case <-time.After(asyncWait):
+		t.Fatal("timed out waiting for the launcher to be reopened")
+	}
+	return msg, query
+}
+
+func entryNames(idx Index) []string {
+	var out []string
+	for _, e := range idx.Entries {
+		out = append(out, e.Name)
+	}
+	return out
+}
+
+func TestDeleteRemovesKeysThenIndex(t *testing.T) {
+	tests := []struct {
+		name  string
+		wired bool
+	}{
+		{name: "wired reopens the list", wired: true},
+		{name: "unwired toasts", wired: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := editStore("plaintext")
+			var h *harness
+			var wh *wizardHarness
+			if tt.wired {
+				wh = newWizardHarness(t, editIndex("plaintext"), store)
+				h = wh.harness
+			} else {
+				h = newHarness(t, editIndex("plaintext"), store)
+			}
+			if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPDelete, Argv: []string{"GitHub"}}); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			if want := []string{"del totp/github", "del totp-notes/github"}; !reflect.DeepEqual(store.opLog(), want) {
+				t.Errorf("ops = %v, want %v", store.opLog(), want)
+			}
+			if got := entryNames(h.index(t)); !reflect.DeepEqual(got, []string{"gitlab"}) {
+				t.Errorf("entries = %v, want only the bystander", got)
+			}
+			if _, ok := store.get("totp/gitlab"); !ok {
+				t.Error("the bystander's seed was removed")
+			}
+			if tt.wired {
+				if q := wh.waitReopened(t); q != "totp" {
+					t.Errorf("reopened on %q, want %q", q, "totp")
+				}
+				wh.assertQuiet(t)
+			} else if msg := h.waitNotified(t); !strings.Contains(msg, "deleted") {
+				t.Errorf("notification %q does not confirm the delete", msg)
+			}
+		})
+	}
+}
+
+func TestDeleteToleratesMissingKeys(t *testing.T) {
+	tests := []struct {
+		name   string
+		absent []string
+	}{
+		{name: "no notes stored", absent: []string{"totp-notes/github"}},
+		{name: "seed already gone", absent: []string{"totp/github"}},
+		{name: "both already gone", absent: []string{"totp/github", "totp-notes/github"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := editStore("plaintext")
+			for _, k := range tt.absent {
+				delete(store.values, k)
+			}
+			h := newHarness(t, editIndex("plaintext"), store)
+			if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPDelete, Argv: []string{"github"}}); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			if _, ok := h.index(t).Find("github"); ok {
+				t.Error("entry still listed after a delete whose keys were already gone")
+			}
+		})
+	}
+}
+
+func TestDeleteStoreErrorLeavesIndex(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wired      bool
+		wantWizard bool
+		wantWord   string
+	}{
+		{name: "backend refuses, wizard wired", err: errors.New("collection is locked"), wired: true, wantWizard: true},
+		{name: "backend refuses, unwired", err: errors.New("collection is locked"), wantWord: "could not delete"},
+		{name: "backend wants a password", err: secrets.ErrAuthRequired, wired: true, wantWord: "password"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := editStore("keyring")
+			store.blocking = true
+			store.opErr = map[string]error{"del totp/github": tt.err}
+			var h *harness
+			var wh *wizardHarness
+			if tt.wired {
+				wh = newWizardHarness(t, editIndex("keyring"), store)
+				h = wh.harness
+			} else {
+				h = newHarness(t, editIndex("keyring"), store)
+			}
+			if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPDelete, Argv: []string{"github"}}); err != nil {
+				t.Fatalf("Dispatch returned %v, want the delete to run detached", err)
+			}
+			if tt.wantWizard {
+				wh.waitReopened(t)
+				wh.assertQuiet(t)
+				if backend, msg, _, ok := wh.state.Snapshot(); !ok || backend != "keyring" || !strings.Contains(msg, "github") {
+					t.Errorf("recorded failure = (%q, %q, %v), want keyring naming the entry", backend, msg, ok)
+				}
+			} else {
+				if msg := h.waitNotified(t); !strings.Contains(msg, tt.wantWord) {
+					t.Errorf("notification %q does not mention %q", msg, tt.wantWord)
+				}
+				if wh != nil {
+					wh.assertNotReopened(t)
+				}
+			}
+			if want := []string{"del totp/github"}; !reflect.DeepEqual(store.opLog(), want) {
+				t.Errorf("ops = %v, want the delete to stop at the failing key", store.opLog())
+			}
+			if _, ok := h.index(t).Find("github"); !ok {
+				t.Error("index lost the entry although its keys were not removed")
+			}
+			if _, ok := store.get("totp-notes/github"); !ok {
+				t.Error("notes were removed after the seed delete failed")
+			}
+		})
+	}
+}
+
+func TestDeleteDetachesForBlockingBackend(t *testing.T) {
+	inner := editStore("keyring")
+	inner.blocking = true
+	parked := newParkedStore(inner)
+	h := newWizardHarnessOpen(t, editIndex("keyring"), inner,
+		func(string) (secrets.Store, error) { return parked, nil })
+
+	if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPDelete, Argv: []string{"github"}}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	select {
+	case <-parked.entered:
+	case <-time.After(asyncWait):
+		t.Fatal("timed out waiting for the detached delete to reach the backend")
+	}
+	if _, ok := h.index(t).Find("github"); !ok {
+		t.Error("index pruned before the backend delete finished")
+	}
+	close(parked.release)
+	if q := h.waitReopened(t); q != "totp" {
+		t.Errorf("reopened on %q, want %q", q, "totp")
+	}
+	if _, ok := h.index(t).Find("github"); ok {
+		t.Error("entry still listed after the detached delete finished")
+	}
+}
+
+func TestEntryEditSynchronousRejections(t *testing.T) {
+	tests := []struct {
+		name    string
+		idx     Index
+		argv    []string
+		values  map[string]string
+		openErr error
+		wantS   string
+	}{
+		{name: "no name", idx: editIndex("plaintext"), wantS: "no entry name"},
+		{name: "blank name", idx: editIndex("plaintext"), argv: []string{" "}, wantS: "no entry name"},
+		{name: "unknown entry", idx: editIndex("plaintext"), argv: []string{"nope"}, wantS: "no entry named"},
+		{
+			name:  "nothing configured",
+			idx:   Index{V: IndexVersion, Entries: []Entry{{Name: "github"}}},
+			argv:  []string{"github"},
+			wantS: "no secrets backend",
+		},
+		{
+			name:    "store does not open",
+			idx:     editIndex("plaintext"),
+			argv:    []string{"github"},
+			openErr: errors.New("vault missing"),
+			wantS:   "vault missing",
+		},
+	}
+	for _, kind := range []string{ActTOTPDelete, ActTOTPUpdate} {
+		for _, tt := range tests {
+			t.Run(kind+"/"+tt.name, func(t *testing.T) {
+				store := editStore("plaintext")
+				h := newHarnessOpen(t, tt.idx, store, func(string) (secrets.Store, error) {
+					if tt.openErr != nil {
+						return nil, tt.openErr
+					}
+					return store, nil
+				})
+				values := map[string]string{"name": "renamed"}
+				err := h.disp.Dispatch(providers.Action{Kind: kind, Argv: tt.argv, Values: values})
+				if err == nil || !strings.Contains(err.Error(), tt.wantS) {
+					t.Fatalf("Dispatch error = %v, want one mentioning %q", err, tt.wantS)
+				}
+				if ops := store.opLog(); len(ops) != 0 {
+					t.Errorf("store was called %v by a rejected action", ops)
+				}
+			})
+		}
+	}
+}
+
+func TestUpdateRenameMovesKeysInOrder(t *testing.T) {
+	store := editStore("plaintext")
+	h := newWizardHarness(t, editIndex("plaintext"), store)
+	action := providers.Action{
+		Kind:   ActTOTPUpdate,
+		Argv:   []string{"github"},
+		Values: map[string]string{"name": " work ", "notes": " new codes\nline two "},
+	}
+	if err := h.disp.Dispatch(action); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	want := []string{"get totp/github", "set totp/work", "set totp-notes/work", "del totp/github", "del totp-notes/github"}
+	if got := store.opLog(); !reflect.DeepEqual(got, want) {
+		t.Errorf("ops = %v, want %v", got, want)
+	}
+	if v, _ := store.get("totp/work"); v != testSeed {
+		t.Errorf("new seed = %q, want the old one copied", v)
+	}
+	if v, _ := store.get("totp-notes/work"); v != "new codes\nline two" {
+		t.Errorf("new notes = %q, want the trimmed submission", v)
+	}
+	idx := h.index(t)
+	e, ok := idx.Find("work")
+	if !ok {
+		t.Fatalf("no renamed entry; entries = %v", entryNames(idx))
+	}
+	if e.Issuer != "GitHub" || !e.Created.Equal(editCreated) || !e.HasNotes {
+		t.Errorf("renamed entry = %+v, want issuer, created and has_notes carried over", e)
+	}
+	if got := entryNames(idx); !reflect.DeepEqual(got, []string{"work", "gitlab"}) {
+		t.Errorf("entries = %v, want the rename in place", got)
+	}
+	if q := h.waitReopened(t); q != "totp" {
+		t.Errorf("reopened on %q, want %q", q, "totp")
+	}
+	h.assertQuiet(t)
+}
+
+func TestUpdateCaseOnlyRenameMovesKeys(t *testing.T) {
+	store := editStore("plaintext")
+	h := newHarness(t, editIndex("plaintext"), store)
+	action := providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"}, Values: map[string]string{"name": "GitHub"}}
+	if err := h.disp.Dispatch(action); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	want := []string{
+		"get totp/github", "get totp-notes/github",
+		"set totp/GitHub", "set totp-notes/GitHub",
+		"del totp/github", "del totp-notes/github",
+	}
+	if got := store.opLog(); !reflect.DeepEqual(got, want) {
+		t.Errorf("ops = %v, want %v", got, want)
+	}
+	if got := entryNames(h.index(t)); !reflect.DeepEqual(got, []string{"GitHub", "gitlab"}) {
+		t.Errorf("entries = %v, want the new spelling", got)
+	}
+}
+
+func TestUpdateRejectsCollision(t *testing.T) {
+	tests := []struct {
+		name    string
+		newName string
+		wantS   string
+	}{
+		{name: "another entry's name", newName: "gitlab", wantS: "already exists"},
+		{name: "another entry's name in another case", newName: "GITLAB", wantS: "already exists"},
+		{name: "blank name", newName: "   ", wantS: "name is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := editStore("plaintext")
+			h := newHarness(t, editIndex("plaintext"), store)
+			action := providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"}, Values: map[string]string{"name": tt.newName}}
+			err := h.disp.Dispatch(action)
+			if err == nil || !strings.Contains(err.Error(), tt.wantS) {
+				t.Fatalf("Dispatch error = %v, want one mentioning %q", err, tt.wantS)
+			}
+			if ops := store.opLog(); len(ops) != 0 {
+				t.Errorf("store was called %v by a refused update", ops)
+			}
+			if got := entryNames(h.index(t)); !reflect.DeepEqual(got, []string{"github", "gitlab"}) {
+				t.Errorf("entries = %v, want the index untouched", got)
+			}
+		})
+	}
+}
+
+func TestUpdateSameNameNotes(t *testing.T) {
+	tests := []struct {
+		name         string
+		values       map[string]string
+		storedNotes  bool
+		wantOps      []string
+		wantNotes    string
+		wantPresent  bool
+		wantHasNotes bool
+	}{
+		{
+			name:         "notes are written",
+			values:       map[string]string{"name": "github", "notes": "  fresh codes "},
+			storedNotes:  true,
+			wantOps:      []string{"set totp-notes/github"},
+			wantNotes:    "fresh codes",
+			wantPresent:  true,
+			wantHasNotes: true,
+		},
+		{
+			name:         "empty notes delete the key",
+			values:       map[string]string{"name": "github", "notes": "  \n "},
+			storedNotes:  true,
+			wantOps:      []string{"del totp-notes/github"},
+			wantHasNotes: false,
+		},
+		{
+			name:         "empty notes with none stored",
+			values:       map[string]string{"name": "github", "notes": ""},
+			wantOps:      []string{"del totp-notes/github"},
+			wantHasNotes: false,
+		},
+		{
+			name:         "no notes key keeps them",
+			values:       map[string]string{"name": " github "},
+			storedNotes:  true,
+			wantOps:      nil,
+			wantNotes:    "backup codes",
+			wantPresent:  true,
+			wantHasNotes: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := editStore("plaintext")
+			if !tt.storedNotes {
+				delete(store.values, "totp-notes/github")
+			}
+			h := newWizardHarness(t, editIndex("plaintext"), store)
+			if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"}, Values: tt.values}); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			if got := store.opLog(); !reflect.DeepEqual(got, tt.wantOps) {
+				t.Errorf("ops = %v, want %v", got, tt.wantOps)
+			}
+			v, ok := store.get("totp-notes/github")
+			if ok != tt.wantPresent || v != tt.wantNotes {
+				t.Errorf("stored notes = %q (present %v), want %q (present %v)", v, ok, tt.wantNotes, tt.wantPresent)
+			}
+			if e, _ := h.index(t).Find("github"); e.HasNotes != tt.wantHasNotes {
+				t.Errorf("HasNotes = %v, want %v", e.HasNotes, tt.wantHasNotes)
+			}
+			if q := h.waitReopened(t); q != "totp" {
+				t.Errorf("reopened on %q, want %q", q, "totp")
+			}
+		})
+	}
+}
+
+func TestUpdateRenameNotes(t *testing.T) {
+	tests := []struct {
+		name         string
+		values       map[string]string
+		storedNotes  bool
+		wantNotes    string
+		wantPresent  bool
+		wantHasNotes bool
+	}{
+		{
+			name:         "absent field copies stored notes",
+			values:       map[string]string{"name": "work"},
+			storedNotes:  true,
+			wantNotes:    "backup codes",
+			wantPresent:  true,
+			wantHasNotes: true,
+		},
+		{
+			name:   "absent field with none stored",
+			values: map[string]string{"name": "work"},
+		},
+		{
+			name:        "given empty notes drop them",
+			values:      map[string]string{"name": "work", "notes": ""},
+			storedNotes: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := editStore("plaintext")
+			if !tt.storedNotes {
+				delete(store.values, "totp-notes/github")
+			}
+			h := newHarness(t, editIndex("plaintext"), store)
+			if err := h.disp.Dispatch(providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"}, Values: tt.values}); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			v, ok := store.get("totp-notes/work")
+			if ok != tt.wantPresent || v != tt.wantNotes {
+				t.Errorf("new notes = %q (present %v), want %q (present %v)", v, ok, tt.wantNotes, tt.wantPresent)
+			}
+			if _, ok := store.get("totp-notes/github"); ok {
+				t.Error("old notes key survived the rename")
+			}
+			e, found := h.index(t).Find("work")
+			if !found || e.HasNotes != tt.wantHasNotes {
+				t.Errorf("renamed entry = %+v (found %v), want HasNotes %v", e, found, tt.wantHasNotes)
+			}
+		})
+	}
+}
+
+func TestUpdateRenameAborts(t *testing.T) {
+	tests := []struct {
+		name    string
+		opErr   map[string]error
+		noSeed  bool
+		wantOps []string
+	}{
+		{
+			name:    "seed missing",
+			noSeed:  true,
+			wantOps: []string{"get totp/github"},
+		},
+		{
+			name:    "notes unreadable",
+			opErr:   map[string]error{"get totp-notes/github": errors.New("locked")},
+			wantOps: []string{"get totp/github", "get totp-notes/github"},
+		},
+		{
+			name:  "new notes write refused rolls back the new seed",
+			opErr: map[string]error{"set totp-notes/work": errors.New("full")},
+			wantOps: []string{
+				"get totp/github", "get totp-notes/github",
+				"set totp/work", "set totp-notes/work", "del totp/work",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := editStore("plaintext")
+			store.opErr = tt.opErr
+			if tt.noSeed {
+				delete(store.values, "totp/github")
+			}
+			h := newHarness(t, editIndex("plaintext"), store)
+			action := providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"}, Values: map[string]string{"name": "work"}}
+			if err := h.disp.Dispatch(action); err == nil || !strings.Contains(err.Error(), "github") {
+				t.Fatalf("Dispatch error = %v, want one naming the entry", err)
+			}
+			if got := store.opLog(); !reflect.DeepEqual(got, tt.wantOps) {
+				t.Errorf("ops = %v, want %v", got, tt.wantOps)
+			}
+			if _, ok := store.get("totp/work"); ok {
+				t.Error("a new seed key was left behind")
+			}
+			if got := entryNames(h.index(t)); !reflect.DeepEqual(got, []string{"github", "gitlab"}) {
+				t.Errorf("entries = %v, want the index untouched", got)
+			}
+		})
+	}
+}
+
+func TestUpdateIndexFailureRollsBackNewKeys(t *testing.T) {
+	store := editStore("plaintext")
+	h := newHarness(t, editIndex("plaintext"), store)
+	blockIndexWrites(t, h.indexPath)
+	action := providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"}, Values: map[string]string{"name": "work"}}
+	if err := h.disp.Dispatch(action); err == nil {
+		t.Fatal("Dispatch succeeded, want the index write failure reported")
+	}
+	for _, k := range []string{"totp/work", "totp-notes/work"} {
+		if _, ok := store.get(k); ok {
+			t.Errorf("%s survived the failed rename", k)
+		}
+	}
+	for _, k := range []string{"totp/github", "totp-notes/github"} {
+		if _, ok := store.get(k); !ok {
+			t.Errorf("%s was removed although the index still names it", k)
+		}
+	}
+	if got := entryNames(h.index(t)); !reflect.DeepEqual(got, []string{"github", "gitlab"}) {
+		t.Errorf("entries = %v, want the index untouched", got)
+	}
+}
+
+func TestUpdateOldKeyCleanupFailureToasts(t *testing.T) {
+	store := editStore("plaintext")
+	store.opErr = map[string]error{"del totp/github": errors.New("refused")}
+	h := newWizardHarness(t, editIndex("plaintext"), store)
+	action := providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"}, Values: map[string]string{"name": "work"}}
+	if err := h.disp.Dispatch(action); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	msg, q := h.waitReopenedAfterNotify(t)
+	if !strings.Contains(msg, "old key could not be removed") {
+		t.Errorf("notification %q does not report the leftover key", msg)
+	}
+	if strings.Contains(msg, testSeed) {
+		t.Error("the notification carries the seed")
+	}
+	if q != "totp" {
+		t.Errorf("reopened on %q, want %q", q, "totp")
+	}
+	if _, _, _, ok := h.state.Snapshot(); ok {
+		t.Error("a cleanup failure recorded a wizard failure")
+	}
+	if _, ok := h.index(t).Find("work"); !ok {
+		t.Error("index not renamed although the new keys landed")
+	}
+	if v, _ := store.get("totp/work"); v != testSeed {
+		t.Errorf("new seed = %q, want it kept", v)
+	}
+}
+
+func TestUpdateDetachesForBlockingBackend(t *testing.T) {
+	inner := editStore("keyring")
+	inner.blocking = true
+	parked := newParkedStore(inner)
+	h := newWizardHarnessOpen(t, editIndex("keyring"), inner,
+		func(string) (secrets.Store, error) { return parked, nil })
+
+	action := providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"}, Values: map[string]string{"name": "work"}}
+	if err := h.disp.Dispatch(action); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	select {
+	case <-parked.entered:
+	case <-time.After(asyncWait):
+		t.Fatal("timed out waiting for the detached update to reach the backend")
+	}
+	if _, ok := h.index(t).Find("github"); !ok {
+		t.Error("index renamed before the backend calls finished")
+	}
+	close(parked.release)
+	if q := h.waitReopened(t); q != "totp" {
+		t.Errorf("reopened on %q, want %q", q, "totp")
+	}
+	if _, ok := h.index(t).Find("work"); !ok {
+		t.Error("index not renamed after the detached update finished")
+	}
+}
+
+func TestEntryEditForwardsCredential(t *testing.T) {
+	tests := []struct {
+		name   string
+		action providers.Action
+	}{
+		{
+			name: "rename",
+			action: providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"},
+				Values: map[string]string{"name": "work", "credential": "hunter2"}},
+		},
+		{
+			name: "notes",
+			action: providers.Action{Kind: ActTOTPUpdate, Argv: []string{"github"},
+				Values: map[string]string{"name": "github", "notes": "x", "credential": "hunter2"}},
+		},
+		{
+			name:   "delete",
+			action: providers.Action{Kind: ActTOTPDelete, Argv: []string{"github"}, Values: map[string]string{"credential": "hunter2"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := editStore("nimbus")
+			store.auth = true
+			h := newHarness(t, editIndex("nimbus"), store)
+			if err := h.disp.Dispatch(tt.action); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if len(store.creds) == 0 || len(store.creds) != len(store.ops) {
+				t.Fatalf("creds = %d for ops %v, want one per call", len(store.creds), store.ops)
+			}
+			for i, c := range store.creds {
+				if c.Password != "hunter2" {
+					t.Errorf("call %q saw credential %q, want the submitted password", store.ops[i], c.Password)
+				}
+			}
+		})
 	}
 }

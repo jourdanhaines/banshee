@@ -31,6 +31,13 @@ const (
 	// ActTOTPSetupMore reopens the launcher on the manager chooser, so a second
 	// secrets backend can be configured alongside the first.
 	ActTOTPSetupMore = "totp-setup-more"
+	// ActTOTPUpdate renames and/or re-notes the entry named Argv[0]. Values
+	// carry "name" (the new name), optionally "notes" — a missing key keeps the
+	// stored notes, it never clears them — and optionally "credential".
+	ActTOTPUpdate = "totp-update"
+	// ActTOTPDelete removes the entry named Argv[0]: seed, notes and index row.
+	// Values["credential"] carries the unlock password, when needed.
+	ActTOTPDelete = "totp-delete"
 )
 
 // Timeouts bounding the backend calls the handlers make. They are generous
@@ -40,6 +47,7 @@ const (
 	copyTimeout  = 15 * time.Second
 	addTimeout   = 15 * time.Second
 	probeTimeout = 15 * time.Second
+	editTimeout  = 15 * time.Second
 	// fixTimeout bounds the repair command a wizard fix row runs, and nothing
 	// else. The setup that follows a successful fix takes a fresh probeTimeout
 	// rather than the remainder of this one: a repair that succeeded after
@@ -212,6 +220,8 @@ func RegisterHandlersWith(dispatch *launch.Dispatcher, deps Deps) {
 	dispatch.Register(ActTOTPSetupMore, deps.handleSetupMore)
 	dispatch.Register(ActTOTPWizardReset, deps.handleWizardReset)
 	dispatch.Register(ActTOTPWizardFix, deps.handleWizardFix)
+	dispatch.Register(ActTOTPUpdate, deps.handleUpdate)
+	dispatch.Register(ActTOTPDelete, deps.handleDelete)
 }
 
 // backendUnusable reports whether err means the secrets backend itself is
@@ -227,7 +237,9 @@ func RegisterHandlersWith(dispatch *launch.Dispatcher, deps Deps) {
 // handler timeout is exactly the wedged-daemon case the wizard exists for, and
 // telling the user "timed out" once in a toast leaves them nowhere to go.
 //
-// It is applied only at store.Get and store.Set call sites. An index read, a
+// It is applied only at store.Get, store.Set and store.Delete call sites; an
+// ErrNotFound from Delete is success (the key is already gone) and never reaches
+// it. An index read, a
 // base32 decode or a clipboard write can fail for reasons that have nothing to
 // do with the backend, and routing those to the wizard would blame the vault for
 // a full disk.
@@ -798,4 +810,282 @@ func (d Deps) handleSetup(a providers.Action) error {
 		d.Reopen(reopenQuery)
 	}
 	return nil
+}
+
+// entryTarget is an existing entry resolved for an edit, along with the index it
+// was found in and the store holding its seed.
+type entryTarget struct {
+	idx     Index
+	entry   Entry
+	backend string
+	store   secrets.Store
+}
+
+// lookupEntry runs the cheap, local checks every entry edit shares, so a bad
+// Argv, an unknown name or an unopenable backend is a real dispatcher error.
+func (d Deps) lookupEntry(kind string, a providers.Action) (entryTarget, error) {
+	if len(a.Argv) == 0 || strings.TrimSpace(a.Argv[0]) == "" {
+		return entryTarget{}, fmt.Errorf("%s: no entry name", kind)
+	}
+	name := strings.TrimSpace(a.Argv[0])
+	idx, err := LoadIndex(d.IndexPath)
+	if err != nil {
+		return entryTarget{}, err
+	}
+	if len(idx.Configured()) == 0 {
+		return entryTarget{}, errors.New("totp: no secrets backend configured yet")
+	}
+	entry, ok := idx.Find(name)
+	if !ok {
+		return entryTarget{}, fmt.Errorf("totp: no entry named %q", name)
+	}
+	backend := entry.BackendOr(idx.DefaultBackend())
+	store, err := d.OpenStore(backend)
+	if err != nil {
+		return entryTarget{}, err
+	}
+	return entryTarget{idx: idx, entry: entry, backend: backend, store: store}, nil
+}
+
+// entryOp is one edit of an existing entry, split by what a failure indicts:
+// apply makes the backend calls (and may open the wizard), record writes the
+// index (a disk problem, always a toast), after is best-effort cleanup that
+// reports its own failures. done is the toast shown when Reopen is not wired.
+type entryOp struct {
+	apply  func(ctx context.Context) error
+	record func(ctx context.Context) error
+	after  func(ctx context.Context)
+	done   string
+}
+
+// runEntryOp runs op on the GTK-safe path for store: detached for a Blocking
+// backend (see handleAdd), synchronously otherwise. what names the edit in
+// messages (delete "github"), never a value.
+func (d Deps) runEntryOp(store secrets.Store, backend, what string, op entryOp) error {
+	if store.Blocking() {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), editTimeout)
+			defer cancel()
+			if err := op.apply(ctx); err != nil {
+				switch {
+				case errors.Is(err, secrets.ErrAuthRequired):
+					d.Notify(fmt.Sprintf("%s needs your password to %s", backend, what))
+				case backendUnusable(err):
+					d.reportUnusable(backend, fmt.Errorf("could not %s: %w", what, err))
+				default:
+					d.Notify(fmt.Sprintf("could not %s: %v", what, err))
+				}
+				return
+			}
+			if err := d.finishEntryOp(ctx, what, op); err != nil {
+				d.Notify(err.Error())
+			}
+		}()
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), editTimeout)
+	defer cancel()
+	if err := op.apply(ctx); err != nil {
+		wrapped := fmt.Errorf("could not %s: %w", what, err)
+		// Same routing as handleAdd's synchronous path: an unwired caller keeps
+		// getting the error back from Dispatch.
+		if d.wizardWired() && backendUnusable(err) {
+			d.reportUnusable(backend, wrapped)
+			return nil
+		}
+		return wrapped
+	}
+	return d.finishEntryOp(ctx, what, op)
+}
+
+// finishEntryOp is everything after a successful apply. The clear comes first
+// for the reason handleAdd gives: the backend has just proved itself.
+func (d Deps) finishEntryOp(ctx context.Context, what string, op entryOp) error {
+	d.State.Clear()
+	if err := op.record(ctx); err != nil {
+		return fmt.Errorf("could not %s: %w", what, err)
+	}
+	if op.after != nil {
+		op.after(ctx)
+	}
+	d.reopenOr(op.done)
+	return nil
+}
+
+// reopenOr puts the user back on the entry list, or toasts msg when no Reopen
+// is wired.
+func (d Deps) reopenOr(msg string) {
+	if d.Reopen != nil {
+		d.Reopen(reopenQuery)
+		return
+	}
+	d.Notify(msg)
+}
+
+// deleteKey removes key, treating an already-absent key as success.
+func deleteKey(ctx context.Context, store secrets.Store, key string, cred secrets.Credential) error {
+	if err := store.Delete(ctx, key, cred); err != nil && !errors.Is(err, secrets.ErrNotFound) {
+		return err
+	}
+	return nil
+}
+
+// setHasNotes re-reads the index (it may have changed while the backend call
+// waited) and records whether the entry now has notes.
+func (d Deps) setHasNotes(name string, has bool) error {
+	idx, err := LoadIndex(d.IndexPath)
+	if err != nil {
+		return err
+	}
+	for i := range idx.Entries {
+		if strings.EqualFold(idx.Entries[i].Name, name) {
+			idx.Entries[i].HasNotes = has
+			return SaveIndex(d.IndexPath, idx)
+		}
+	}
+	return fmt.Errorf("totp: no entry named %q", name)
+}
+
+// handleDelete removes an entry's seed and notes from its store, then its index
+// row. Keys go first so a failed delete leaves the entry listed and retryable;
+// because ErrNotFound counts as success, a half-done delete simply retries.
+func (d Deps) handleDelete(a providers.Action) error {
+	t, err := d.lookupEntry(ActTOTPDelete, a)
+	if err != nil {
+		return err
+	}
+	name := t.entry.Name
+	cred := secrets.Credential{Password: a.Values["credential"]}
+	return d.runEntryOp(t.store, t.backend, fmt.Sprintf("delete %q", name), entryOp{
+		apply: func(ctx context.Context) error {
+			if err := deleteKey(ctx, t.store, secretKey(name), cred); err != nil {
+				return err
+			}
+			return deleteKey(ctx, t.store, notesKey(name), cred)
+		},
+		record: func(context.Context) error {
+			idx, err := LoadIndex(d.IndexPath)
+			if err != nil {
+				return err
+			}
+			if !idx.Remove(name) {
+				return nil
+			}
+			return SaveIndex(d.IndexPath, idx)
+		},
+		done: fmt.Sprintf("deleted TOTP entry %q", name),
+	})
+}
+
+// handleUpdate renames an entry and/or replaces its notes.
+//
+// A rename copies the seed (and notes) to the new keys, then renames the index
+// row, then drops the old keys — so a crash at any point leaves at worst an
+// orphan key, never a listed entry without a seed.
+func (d Deps) handleUpdate(a providers.Action) error {
+	t, err := d.lookupEntry(ActTOTPUpdate, a)
+	if err != nil {
+		return err
+	}
+	newName := strings.TrimSpace(a.Values["name"])
+	if newName == "" {
+		return errors.New("totp: a name is required")
+	}
+	old := t.entry.Name
+	if o, ok := t.idx.Find(newName); ok && !strings.EqualFold(o.Name, old) {
+		return fmt.Errorf("totp: an entry named %q already exists", newName)
+	}
+	notes, notesGiven := a.Values["notes"]
+	notes = strings.TrimSpace(notes)
+	// Exact comparison: backend keys are case-sensitive, so a case-only rename
+	// still has to move the keys.
+	renamed := newName != old
+	cred := secrets.Credential{Password: a.Values["credential"]}
+	what := fmt.Sprintf("update %q", old)
+	done := fmt.Sprintf("updated TOTP entry %q", newName)
+
+	if !renamed {
+		if !notesGiven {
+			d.reopenOr(done)
+			return nil
+		}
+		return d.runEntryOp(t.store, t.backend, what, entryOp{
+			apply: func(ctx context.Context) error {
+				// Empty notes delete the key rather than storing "".
+				if notes == "" {
+					return deleteKey(ctx, t.store, notesKey(old), cred)
+				}
+				return t.store.Set(ctx, notesKey(old), notes, cred)
+			},
+			record: func(context.Context) error { return d.setHasNotes(old, notes != "") },
+			done:   done,
+		})
+	}
+
+	finalNotes := notes
+	return d.runEntryOp(t.store, t.backend, what, entryOp{
+		apply: func(ctx context.Context) error {
+			seed, err := t.store.Get(ctx, secretKey(old), cred)
+			if err != nil {
+				return err
+			}
+			if !notesGiven {
+				v, err := t.store.Get(ctx, notesKey(old), cred)
+				if err != nil && !errors.Is(err, secrets.ErrNotFound) {
+					return err
+				}
+				finalNotes = v
+			}
+			if err := t.store.Set(ctx, secretKey(newName), seed, cred); err != nil {
+				return err
+			}
+			if finalNotes != "" {
+				if err := t.store.Set(ctx, notesKey(newName), finalNotes, cred); err != nil {
+					_ = deleteKey(ctx, t.store, secretKey(newName), cred)
+					return err
+				}
+			}
+			return nil
+		},
+		record: func(ctx context.Context) error {
+			err := d.renameInIndex(old, newName, finalNotes != "")
+			if err != nil {
+				// Best effort: the old keys still back the old row, so the new
+				// ones are only orphans if this cleanup fails too.
+				_ = deleteKey(ctx, t.store, secretKey(newName), cred)
+				_ = deleteKey(ctx, t.store, notesKey(newName), cred)
+			}
+			return err
+		},
+		after: func(ctx context.Context) {
+			// Never the wizard: the rename itself succeeded, and the leftover is
+			// an orphan the backend can be asked to drop again later.
+			for _, key := range []string{secretKey(old), notesKey(old)} {
+				if err := deleteKey(ctx, t.store, key, cred); err != nil {
+					d.Notify(fmt.Sprintf("renamed %q, but its old key could not be removed: %v", old, err))
+					return
+				}
+			}
+		},
+		done: done,
+	})
+}
+
+// renameInIndex re-reads the index and renames old to newName, recording
+// whether the entry has notes.
+func (d Deps) renameInIndex(old, newName string, hasNotes bool) error {
+	idx, err := LoadIndex(d.IndexPath)
+	if err != nil {
+		return err
+	}
+	if err := idx.Rename(old, newName); err != nil {
+		return err
+	}
+	for i := range idx.Entries {
+		if idx.Entries[i].Name == newName {
+			idx.Entries[i].HasNotes = hasNotes
+		}
+	}
+	return SaveIndex(d.IndexPath, idx)
 }

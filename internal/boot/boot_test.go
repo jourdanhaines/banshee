@@ -90,6 +90,8 @@ func TestNewWiring(t *testing.T) {
 			"totp-wizard-reset",
 			"totp-wizard-fix",
 			"totp-setup-more",
+			"totp-update",
+			"totp-delete",
 			"clip-copy",
 			"clip-delete",
 		}

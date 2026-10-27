@@ -43,6 +43,12 @@ type fakeStore struct {
 	getErr  error
 	setErr  error
 	delErr  error
+	// ops logs every call in order as "get <key>", "set <key>" or "del <key>",
+	// so a test can pin the exact write order a handler follows.
+	ops []string
+	// opErr fails one specific call, keyed by the same "<verb> <key>" string
+	// ops records, for the tests that break a single step of a sequence.
+	opErr map[string]error
 }
 
 func newFakeStore(name string) *fakeStore {
@@ -62,6 +68,10 @@ func (f *fakeStore) Get(ctx context.Context, key string, cred secrets.Credential
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.creds = append(f.creds, cred)
+	f.ops = append(f.ops, "get "+key)
+	if err := f.opErr["get "+key]; err != nil {
+		return "", err
+	}
 	if f.getErr != nil {
 		return "", f.getErr
 	}
@@ -76,6 +86,10 @@ func (f *fakeStore) Set(ctx context.Context, key, value string, cred secrets.Cre
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.creds = append(f.creds, cred)
+	f.ops = append(f.ops, "set "+key)
+	if err := f.opErr["set "+key]; err != nil {
+		return err
+	}
 	if f.setErr != nil {
 		return f.setErr
 	}
@@ -86,8 +100,18 @@ func (f *fakeStore) Set(ctx context.Context, key, value string, cred secrets.Cre
 func (f *fakeStore) Delete(ctx context.Context, key string, cred secrets.Credential) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.creds = append(f.creds, cred)
+	f.ops = append(f.ops, "del "+key)
+	if err := f.opErr["del "+key]; err != nil {
+		return err
+	}
 	if f.delErr != nil {
 		return f.delErr
+	}
+	// An absent key is ErrNotFound, wrapped the way the real backends wrap it,
+	// so the handlers are proved to match it with errors.Is.
+	if _, ok := f.values[key]; !ok {
+		return fmt.Errorf("delete %s: %w", key, secrets.ErrNotFound)
 	}
 	f.deleted = append(f.deleted, key)
 	delete(f.values, key)
@@ -108,6 +132,13 @@ func (f *fakeStore) lastCred() secrets.Credential {
 		return secrets.Credential{}
 	}
 	return f.creds[len(f.creds)-1]
+}
+
+// opLog returns a copy of every call made so far, in order.
+func (f *fakeStore) opLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ops...)
 }
 
 func (f *fakeStore) deletedKeys() []string {
