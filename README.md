@@ -212,9 +212,18 @@ in-launcher form:
   SHA-256/512) are honored; the RFC defaults are 6 digits, 30 seconds, SHA-1.
 
 The seed is written to the chosen manager first and the index entry second, so
-a failed write never leaves you with an entry that has no seed behind it. There
-is no delete row — remove an entry by editing `totp.json` and clearing its key
-from the manager holding it.
+a failed write never leaves you with an entry that has no seed behind it.
+
+**Editing and deleting** — press Tab (or Shift+Enter) on an entry to open its
+manage rows; typing `totp edit <name>` gets you there too. **Edit** renames the
+entry and edits its free-text **Notes** (backup codes, a description — Enter
+inserts a newline, Ctrl+Enter or the Save button saves). Notes are stored in the
+same secrets manager as the seed, never in `totp.json`; an entry with notes is
+tagged `· notes` in the list. **Delete** asks for confirmation, then removes the
+seed, its notes and the index entry. A rename writes the new keys before
+dropping the old ones, so an interrupted rename never loses a seed. With a
+manager that asks a password per access both forms prompt for it, and Edit can
+only rename — notes are kept as they are.
 
 ## Clipboard history
 
