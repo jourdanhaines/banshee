@@ -39,6 +39,11 @@
 // the built-in emoji picker — additive, zero value inert. A provider that
 // never sets Picker behaves exactly as before; Picker is not carried by the
 // exec plugin protocol.
+//
+// Migration 2026-10c: FormField.Value and FormField.Multiline added for
+// prefilled and multi-line entries — additive, zero value inert. An older UI
+// renders an empty single-line entry; neither is carried by the exec plugin
+// protocol.
 package providers
 
 import (
@@ -169,6 +174,15 @@ type FormField struct {
 	// holds (AND). A hidden field is omitted from Action.Values and never
 	// fails Required.
 	ShowWhen []Condition
+	// Value prefills an entry or multi-line field, so an edit form opens on
+	// the current value; inert on every other kind. On a Secret field it is
+	// secret material and must never be logged.
+	Value string
+	// Multiline renders the field as a wrapping multi-line text area, where
+	// Enter inserts a newline and Ctrl+Enter submits. Precedence Options >
+	// Slider > Checkbox > Generate > Multiline > entry; Secret beats it,
+	// because a text area cannot mask its contents.
+	Multiline bool
 }
 
 // SliderSpec bounds an integer slider field. The UI normalizes it rather than

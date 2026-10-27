@@ -72,6 +72,9 @@ type Launcher struct {
 	// form is the open form view; nil means the results view is active and
 	// is what mode() derives the keymap from.
 	form *formView
+	// enterHeld is true between an Enter press and its release, so a form
+	// opened by that press starts unarmed (see formView.enterArmed).
+	enterHeld bool
 
 	// pickerPage is the persistent picker page, built once in build. Its cell
 	// pool survives Hide so reopening is cheap; Reload drops it.
@@ -349,6 +352,8 @@ func (l *Launcher) Show(query string) {
 	// A form left open by a previous show is stale state: showing always
 	// starts at the results view.
 	l.resetToResults()
+	// An Enter released while hidden never reached us.
+	l.enterHeld = false
 
 	// Setting the text fires ::changed and schedules a debounced query; the
 	// explicit Fire below supersedes it so the first paint is immediate.
@@ -497,6 +502,7 @@ func (l *Launcher) openForm(res providers.Result) {
 		return
 	}
 	l.form = newFormView(res, theme.ParamsFor(l.cfg).Accent)
+	l.form.enterArmed = !l.enterHeld
 	l.form.connectButtons(l.submitForm, func() { l.closeForm(true) })
 
 	for c := l.formBox.FirstChild(); c != nil; c = l.formBox.FirstChild() {
@@ -541,10 +547,23 @@ func (l *Launcher) closeForm(refocus bool) {
 //
 // A form with a submit button (see EnterSubmits) hands every Enter to GTK,
 // which is what routes Enter on the focused button to its clicked handler.
+//
+// A focused multi-line field also gets Enter, as a newline; Ctrl+Enter
+// submits from there (submitFormForce).
 func (l *Launcher) submitFormOrPass() bool {
-	if l.form != nil && !EnterSubmits(l.form.form) {
+	if l.form != nil && (!EnterSubmits(l.form.form) || l.form.textViewFocused()) {
 		return false
 	}
+	if l.form != nil && l.form.dropdownListOpen() {
+		return false
+	}
+	l.submitForm()
+	return true
+}
+
+// submitFormForce handles Ctrl+Enter while a form is open: it submits from
+// any field, button form or not, yielding only to an open dropdown list.
+func (l *Launcher) submitFormForce() bool {
 	if l.form != nil && l.form.dropdownListOpen() {
 		return false
 	}

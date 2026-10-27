@@ -36,7 +36,15 @@ type formView struct {
 
 	// submit and back exist only when form.SubmitLabel is set.
 	submit, back *gtk.Button
+
+	// enterArmed gates Enter submits until the Enter that opened the form is
+	// released, so its auto-repeat cannot run straight into a confirm form.
+	enterArmed bool
 }
+
+// multilineHeight is a multi-line field's fixed viewport height (about five
+// lines); longer text scrolls inside it, keeping the panel height constant.
+const multilineHeight = 116
 
 // formInput is one field's widget, seen only through what the form actually
 // asks of it. It exists so a field can be an entry, dropdown, slider or
@@ -67,6 +75,28 @@ func (i *entryInput) markError() {
 func (i *entryInput) grabFocus() { i.e.GrabFocus() }
 
 func (i *entryInput) onChange(f func()) { i.e.ConnectChanged(f) }
+
+// multilineInput is a FormField.Multiline text area: a wrapping TextView in
+// a fixed-height ScrolledWindow that carries the entry look.
+type multilineInput struct {
+	box *gtk.ScrolledWindow
+	tv  *gtk.TextView
+}
+
+func (i *multilineInput) value() string {
+	buf := i.tv.Buffer()
+	start, end := buf.Bounds()
+	return buf.Text(start, end, false)
+}
+
+func (i *multilineInput) markError() {
+	i.box.AddCSSClass("error")
+	i.tv.GrabFocus()
+}
+
+func (i *multilineInput) grabFocus() { i.tv.GrabFocus() }
+
+func (i *multilineInput) onChange(f func()) { i.tv.Buffer().ConnectChanged(f) }
 
 // dropdownInput is a fixed-choice field (FormField.Options). The option
 // strings are kept alongside the widget because GtkDropDown reports a
@@ -193,7 +223,7 @@ func (i *generatedInput) render() {
 // and a scale ignores it, so only the button submits. Without it, Enter
 // submits from any field and Space toggles a checkbox.
 func newFormView(res providers.Result, accent string) *formView {
-	v := &formView{res: res, form: *res.Form, accent: accent}
+	v := &formView{res: res, form: *res.Form, accent: accent, enterArmed: true}
 
 	v.root = gtk.NewBox(gtk.OrientationVertical, 0)
 	v.root.AddCSSClass("form-view")
@@ -236,6 +266,8 @@ func newFormView(res providers.Result, accent string) *formView {
 			v.addCheckbox(row, f)
 		case KindGenerated:
 			v.addGenerated(row, f)
+		case KindMultiline:
+			v.addMultiline(row, f)
 		default:
 			v.addEntry(row, f)
 		}
@@ -253,7 +285,7 @@ func newFormView(res providers.Result, accent string) *formView {
 		return v
 	}
 
-	hint := gtk.NewLabel("Enter to save · Esc to go back")
+	hint := gtk.NewLabel(FormHint(v.form))
 	hint.AddCSSClass("form-hint")
 	hint.SetXAlign(0)
 	v.root.Append(hint)
@@ -305,6 +337,7 @@ func (v *formView) addEntry(row *gtk.Box, f providers.FormField) {
 	entry := gtk.NewEntry()
 	entry.AddCSSClass("form-field")
 	entry.SetPlaceholderText(f.Placeholder)
+	entry.SetText(f.Value)
 	entry.SetHExpand(true)
 	if f.Secret {
 		// A plain masked Entry, not gtk.PasswordEntry: it keeps every field
@@ -318,6 +351,34 @@ func (v *formView) addEntry(row *gtk.Box, f providers.FormField) {
 	entry.ConnectChanged(func() { entry.RemoveCSSClass("error") })
 	row.Append(entry)
 	v.inputs = append(v.inputs, &entryInput{e: entry})
+}
+
+// addMultiline appends f's multi-line text area to row and registers it as
+// an input. Tab is not accepted, so it still moves focus between fields.
+func (v *formView) addMultiline(row *gtk.Box, f providers.FormField) {
+	tv := gtk.NewTextView()
+	tv.AddCSSClass("form-field")
+	tv.SetWrapMode(gtk.WrapWordChar)
+	tv.SetAcceptsTab(false)
+	tv.SetTopMargin(8)
+	tv.SetBottomMargin(8)
+	tv.SetLeftMargin(12)
+	tv.SetRightMargin(12)
+	tv.Buffer().SetText(f.Value)
+
+	box := gtk.NewScrolledWindow()
+	box.AddCSSClass("form-multiline")
+	box.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
+	// Min before max: GTK rejects a max below the current min.
+	box.SetMinContentHeight(multilineHeight)
+	box.SetMaxContentHeight(multilineHeight)
+	box.SetPropagateNaturalHeight(true)
+	box.SetHExpand(true)
+	box.SetChild(tv)
+
+	tv.Buffer().ConnectChanged(func() { box.RemoveCSSClass("error") })
+	row.Append(box)
+	v.inputs = append(v.inputs, &multilineInput{box: box, tv: tv})
 }
 
 // addDropdown appends f's fixed-choice dropdown to row and registers it as an
@@ -416,7 +477,8 @@ func (v *formView) values() map[string]string {
 	return out
 }
 
-// focusFirst puts the keyboard on the first visible field.
+// focusFirst puts the keyboard on the first visible field, or on the submit
+// button of a form with none (a zero-field confirm form).
 func (v *formView) focusFirst() {
 	for i, in := range v.inputs {
 		if v.rows[i].Visible() {
@@ -424,6 +486,23 @@ func (v *formView) focusFirst() {
 			return
 		}
 	}
+	if v.submit != nil {
+		v.submit.GrabFocus()
+	}
+}
+
+// textViewFocused reports whether a multi-line field holds the keyboard, so
+// plain Enter inserts a newline there instead of submitting.
+func (v *formView) textViewFocused() bool {
+	if v == nil {
+		return false
+	}
+	for _, in := range v.inputs {
+		if m, ok := in.(*multilineInput); ok && m.tv.IsFocus() {
+			return true
+		}
+	}
+	return false
 }
 
 // markError highlights field i as failing validation and focuses it.

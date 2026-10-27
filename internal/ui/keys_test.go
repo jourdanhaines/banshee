@@ -56,6 +56,9 @@ func TestKeyFor(t *testing.T) {
 		{"form: enter submits", gdk.KEY_Return, 0, ModeForm, KeyFormSubmit},
 		{"form: keypad enter submits", gdk.KEY_KP_Enter, 0, ModeForm, KeyFormSubmit},
 		{"form: shift-enter still submits", gdk.KEY_Return, gdk.ShiftMask, ModeForm, KeyFormSubmit},
+		{"form: ctrl-enter force-submits", gdk.KEY_Return, gdk.ControlMask, ModeForm, KeyFormSubmitForce},
+		{"form: ctrl-keypad-enter force-submits", gdk.KEY_KP_Enter, gdk.ControlMask, ModeForm, KeyFormSubmitForce},
+		{"form: ctrl-shift-enter force-submits", gdk.KEY_Return, gdk.ControlMask | gdk.ShiftMask, ModeForm, KeyFormSubmitForce},
 		{"form: tab passes for focus chain", gdk.KEY_Tab, 0, ModeForm, KeyPass},
 		{"form: shift-tab passes for focus chain", gdk.KEY_ISO_Left_Tab, gdk.ShiftMask, ModeForm, KeyPass},
 		{"form: down passes", gdk.KEY_Down, 0, ModeForm, KeyPass},
@@ -112,6 +115,8 @@ func TestKeyActionString(t *testing.T) {
 		KeyFormCancel:  "form-cancel",
 		KeyDeleteWord:  "delete-word",
 		KeyFormSubmit:  "form-submit",
+
+		KeyFormSubmitForce: "form-submit-force",
 
 		KeyPickerUp:       "picker-up",
 		KeyPickerDown:     "picker-down",

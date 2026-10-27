@@ -58,6 +58,7 @@ func TestGeneratedCSSParses(t *testing.T) {
 		{"generated buttons are square", "min-width: 28px"},
 		{"picker cells are large glyphs", "font-size: 28px"},
 		{"picker variant popover radius", "border-top-left-radius: 12px"},
+		{"multi-line field drops the focus outline", "outline-style: none"},
 	}
 
 	css := roundTrip(t, config.Default())
@@ -115,6 +116,14 @@ func TestGeneratedCSSKeepsEverySelector(t *testing.T) {
 		"#banshee-window checkbutton:focus-within.form-field > check",
 		"#banshee-window checkbutton.form-field > check:checked",
 		"#banshee-window checkbutton.form-field > label",
+		"#banshee-window scrolledwindow.form-multiline",
+		"#banshee-window scrolledwindow:focus-within.form-multiline",
+		"#banshee-window scrolledwindow.error.form-multiline",
+		"#banshee-window scrolledwindow.form-multiline undershoot.top",
+		"#banshee-window scrolledwindow.form-multiline undershoot.bottom",
+		"#banshee-window textview.form-field",
+		"#banshee-window textview.form-field > text",
+		"#banshee-window textview.form-field > text > selection",
 		"#banshee-window box.form-generated-row",
 		"#banshee-window label.form-generated",
 		"#banshee-window button.form-generated-toggle",

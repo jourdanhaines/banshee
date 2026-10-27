@@ -10,9 +10,11 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
@@ -90,6 +92,121 @@ func TestGeneratedFieldSmoke(t *testing.T) {
 					t.Errorf("%s: window height = %d, want constant %d", name, got, winHeight)
 				}
 			}
+		}
+	})
+	app.Run(nil)
+}
+
+// totpEditLikeForm mirrors the TOTP edit form: a prefilled name entry and a
+// prefilled multi-line notes field. An empty submitLabel keeps Enter-submits.
+func totpEditLikeForm(submitLabel string, got *map[string]string) providers.Result {
+	return providers.Result{Title: "Edit", Form: &providers.Form{Title: "Edit GitHub", SubmitLabel: submitLabel,
+		Fields: []providers.FormField{
+			{Key: "name", Label: "Name", Value: "GitHub", Required: true},
+			{Key: "notes", Label: "Notes", Value: "code-1\ncode-2", Multiline: true},
+		},
+		Build: func(v map[string]string) (providers.Action, error) {
+			*got = v
+			return providers.Action{Kind: "smoke-submit"}, nil
+		},
+	}}
+}
+
+// totpDeleteLikeForm mirrors the TOTP delete confirmation: no fields, only
+// the submit and Back buttons.
+func totpDeleteLikeForm(got *map[string]string) providers.Result {
+	return providers.Result{Title: "Delete", Form: &providers.Form{Title: "Delete GitHub?", SubmitLabel: "Delete",
+		Build: func(v map[string]string) (providers.Action, error) {
+			*got = v
+			return providers.Action{Kind: "smoke-submit"}, nil
+		},
+	}}
+}
+
+func TestMultilineFormSmoke(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	app := gtk.NewApplication("dev.jourdan.banshee.multilinesmoke", gio.ApplicationNonUnique)
+	app.ConnectActivate(func() {
+		defer app.Quit()
+		disp := launch.NewDispatcher()
+		disp.Register("smoke-submit", func(providers.Action) error { return nil })
+		l := NewLauncher(app, config.Default(), noResults{}, disp)
+		l.Show("")
+		pump(200 * time.Millisecond)
+		winHeight := l.win.AllocatedHeight()
+		checkHeight := func(step string) {
+			if got := l.win.AllocatedHeight(); got != winHeight {
+				t.Errorf("%s: window height = %d, want constant %d", step, got, winHeight)
+			}
+		}
+
+		// Prefill, and a long note scrolling inside its fixed viewport.
+		var got map[string]string
+		l.openForm(totpEditLikeForm("Save", &got))
+		pump(400 * time.Millisecond)
+		vals := l.form.values()
+		if vals["name"] != "GitHub" || vals["notes"] != "code-1\ncode-2" {
+			t.Errorf("prefilled values = %q", vals)
+		}
+		checkHeight("edit form open")
+		notes := l.form.inputs[1].(*multilineInput)
+		notes.tv.Buffer().SetText(strings.Repeat("backup-code\n", 40))
+		pump(150 * time.Millisecond)
+		checkHeight("long notes")
+		if h := notes.box.AllocatedHeight(); h > multilineHeight+40 {
+			t.Errorf("notes box grew to %d, want about %d", h, multilineHeight)
+		}
+
+		// Ctrl+Enter submits from the focused text view.
+		notes.grabFocus()
+		pump(50 * time.Millisecond)
+		if !l.form.textViewFocused() {
+			t.Fatal("text view not focused after grabFocus")
+		}
+		if !l.handleKey(gdk.KEY_Return, gdk.ControlMask) || l.form != nil || got == nil {
+			t.Errorf("ctrl+enter did not submit (form open: %v, values: %q)", l.form != nil, got)
+		}
+
+		// Plain Enter on a focused text view passes through even when
+		// Enter would otherwise submit.
+		got = nil
+		l.Show("")
+		l.openForm(totpEditLikeForm("", &got))
+		pump(300 * time.Millisecond)
+		l.form.inputs[1].grabFocus()
+		pump(50 * time.Millisecond)
+		if l.handleKey(gdk.KEY_Return, 0) || l.form == nil || got != nil {
+			t.Error("enter on a focused text view was not passed through")
+		}
+		l.form.inputs[0].grabFocus()
+		pump(50 * time.Millisecond)
+		if !l.handleKey(gdk.KEY_Return, 0) || got == nil {
+			t.Error("enter on the name entry did not submit")
+		}
+
+		// A zero-field confirm form focuses its submit button.
+		got = nil
+		l.Show("")
+		l.openForm(totpDeleteLikeForm(&got))
+		pump(300 * time.Millisecond)
+		checkHeight("delete form open")
+		if !l.form.submit.IsFocus() {
+			t.Error("zero-field form did not focus its submit button")
+		}
+
+		// A form opened by a still-held Enter swallows it until release.
+		l.Show("")
+		l.enterHeld = true
+		l.openForm(totpDeleteLikeForm(&got))
+		pump(300 * time.Millisecond)
+		if !l.handleKey(gdk.KEY_Return, 0) || !l.handleKey(gdk.KEY_Return, gdk.ControlMask) || l.form == nil || got != nil {
+			t.Error("unarmed enter was not swallowed")
+		}
+		l.handleKeyRelease(gdk.KEY_Return)
+		if !l.handleKey(gdk.KEY_Return, gdk.ControlMask) || got == nil {
+			t.Error("enter after release did not submit")
 		}
 	})
 	app.Run(nil)

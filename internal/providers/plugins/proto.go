@@ -249,7 +249,8 @@ type WireForm struct {
 	SubmitLabel string `json:"submit_label,omitempty"`
 }
 
-// WireFormField is one input in a WireForm.
+// WireFormField is one input in a WireForm. FormField.Value and Multiline
+// are host-only and have no wire form.
 type WireFormField struct {
 	// Key keys the submitted value in EventSubmit's values map.
 	Key         string `json:"key"`

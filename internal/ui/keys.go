@@ -32,6 +32,9 @@ const (
 	KeyFormCancel
 	// KeyFormSubmit validates and submits an open form (Enter).
 	KeyFormSubmit
+	// KeyFormSubmitForce submits an open form even from a multi-line field,
+	// where plain Enter inserts a newline (Ctrl+Enter).
+	KeyFormSubmitForce
 	// KeyPickerUp moves the picker highlight, or the variant popover's, up.
 	KeyPickerUp
 	// KeyPickerDown moves the picker highlight, or the variant popover's, down.
@@ -77,6 +80,8 @@ func (a KeyAction) String() string {
 		return "form-cancel"
 	case KeyFormSubmit:
 		return "form-submit"
+	case KeyFormSubmitForce:
+		return "form-submit-force"
 	case KeyPickerUp:
 		return "picker-up"
 	case KeyPickerDown:
@@ -104,8 +109,9 @@ func (a KeyAction) String() string {
 // Lock, and Tab is matched in both its plain and Shift (ISO_Left_Tab) forms.
 //
 // ModeForm is deliberately minimal: Esc cancels back to the results, Enter
-// submits, and everything else — including Tab — passes through so GTK's own
-// focus chain moves between the form's fields and text editing keeps working.
+// submits, Ctrl+Enter force-submits (past a multi-line field), and everything
+// else — including Tab — passes through so GTK's own focus chain moves between
+// the form's fields and text editing keeps working.
 //
 // ModePicker drives the grid while the search entry keeps focus: Esc cancels,
 // Enter activates, the arrows and Ctrl-J/K/N/P move the highlight, and Ctrl-W
@@ -117,6 +123,9 @@ func KeyFor(keyval uint, state gdk.ModifierType, mode UIMode) KeyAction {
 		case gdk.KEY_Escape:
 			return KeyFormCancel
 		case gdk.KEY_Return, gdk.KEY_KP_Enter, gdk.KEY_ISO_Enter:
+			if state&gdk.ControlMask != 0 {
+				return KeyFormSubmitForce
+			}
 			return KeyFormSubmit
 		}
 		return KeyPass
@@ -210,15 +219,41 @@ func (l *Launcher) newKeyController() *gtk.EventControllerKey {
 	keys := gtk.NewEventControllerKey()
 	keys.SetPropagationPhase(gtk.PhaseCapture)
 	keys.ConnectKeyPressed(func(keyval, _ uint, state gdk.ModifierType) bool {
+		if isEnter(keyval) {
+			l.enterHeld = true
+		}
 		return l.handleKey(keyval, state)
 	})
+	keys.ConnectKeyReleased(func(keyval, _ uint, _ gdk.ModifierType) {
+		l.handleKeyRelease(keyval)
+	})
 	return keys
+}
+
+// handleKeyRelease arms an open form once Enter is released.
+func (l *Launcher) handleKeyRelease(keyval uint) {
+	if !isEnter(keyval) {
+		return
+	}
+	l.enterHeld = false
+	if l.form != nil {
+		l.form.enterArmed = true
+	}
+}
+
+// isEnter reports whether keyval is one of the Enter keys.
+func isEnter(keyval uint) bool {
+	switch keyval {
+	case gdk.KEY_Return, gdk.KEY_KP_Enter, gdk.KEY_ISO_Enter:
+		return true
+	}
+	return false
 }
 
 // handleKey runs the launcher's response to a key press and reports whether
 // it consumed the key; false lets the focused widget have it.
 func (l *Launcher) handleKey(keyval uint, state gdk.ModifierType) bool {
-	switch KeyFor(keyval, state, l.mode()) {
+	switch action := KeyFor(keyval, state, l.mode()); action {
 	case KeyHide:
 		l.Hide()
 	case KeyNext:
@@ -233,7 +268,13 @@ func (l *Launcher) handleKey(keyval uint, state gdk.ModifierType) bool {
 		l.deleteWordBeforeCursor()
 	case KeyFormCancel:
 		l.closeForm(true)
-	case KeyFormSubmit:
+	case KeyFormSubmit, KeyFormSubmitForce:
+		if !l.form.enterArmed {
+			return true // the opening Enter's auto-repeat: swallow it
+		}
+		if action == KeyFormSubmitForce {
+			return l.submitFormForce()
+		}
 		// Not always ours: Enter inside a form dropdown belongs to the
 		// widget. The decision needs the focused widget, which KeyFor
 		// (a pure keyval→action mapping, testable without a display)

@@ -19,7 +19,8 @@ import (
 
 // TrimValues returns a copy of values with every value TrimSpace'd, so
 // providers and validation both see what the user meant rather than stray
-// whitespace.
+// whitespace. Only the ends are trimmed: a multi-line value keeps its inner
+// newlines.
 func TrimValues(values map[string]string) map[string]string {
 	out := make(map[string]string, len(values))
 	for k, v := range values {
@@ -39,10 +40,12 @@ const (
 	KindSlider
 	KindCheckbox
 	KindGenerated
+	KindMultiline
 )
 
 // KindOf resolves a field's widget kind by precedence Options > Slider >
-// Checkbox > Generate > entry. A slider whose Max <= Min is ignored, so the
+// Checkbox > Generate > Multiline > entry. Secret beats Multiline, since a
+// text area cannot mask its contents. A slider whose Max <= Min is ignored, so the
 // field falls through to the next kind rather than rendering an unusable range.
 func KindOf(f providers.FormField) FieldKind {
 	switch {
@@ -54,6 +57,8 @@ func KindOf(f providers.FormField) FieldKind {
 		return KindCheckbox
 	case f.Generate != nil:
 		return KindGenerated
+	case f.Multiline && !f.Secret:
+		return KindMultiline
 	}
 	return KindEntry
 }
@@ -128,11 +133,11 @@ func VisibleValues(fields []providers.FormField, values map[string]string) map[s
 }
 
 // FirstMissingRequired returns the index of the first visible required entry
-// whose value is empty. ok is true when the form is submittable.
+// or multi-line field whose value is empty. ok is true when the form is submittable.
 func FirstMissingRequired(fields []providers.FormField, values map[string]string) (int, bool) {
 	vis := Visible(fields, values)
 	for i, f := range fields {
-		if KindOf(f) != KindEntry || !vis[i] {
+		if k := KindOf(f); (k != KindEntry && k != KindMultiline) || !vis[i] {
 			// Dropdowns, sliders, checkboxes and generated fields always
 			// carry a value, and a hidden field is never submitted.
 			continue
@@ -149,6 +154,18 @@ func FirstMissingRequired(fields []providers.FormField, values map[string]string
 // opens and commits its list and only the button submits.
 func EnterSubmits(form providers.Form) bool {
 	return form.SubmitLabel == ""
+}
+
+// FormHint is the keyboard hint under a form without a submit button. A
+// multi-line field takes plain Enter for newlines, so such a form advertises
+// Ctrl+Enter instead.
+func FormHint(form providers.Form) string {
+	for _, f := range form.Fields {
+		if KindOf(f) == KindMultiline {
+			return "Ctrl+Enter to save · Esc to go back"
+		}
+	}
+	return "Enter to save · Esc to go back"
 }
 
 // Generation bounds: a pick-based value defaults to defaultGenerateLength and

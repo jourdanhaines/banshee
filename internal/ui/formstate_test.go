@@ -24,6 +24,7 @@ func TestTrimValues(t *testing.T) {
 		{"trims whitespace", map[string]string{"a": "  x  ", "b": "\ty\n"}, map[string]string{"a": "x", "b": "y"}},
 		{"empty map", map[string]string{}, map[string]string{}},
 		{"blank becomes empty", map[string]string{"a": "   "}, map[string]string{"a": ""}},
+		{"inner newlines survive", map[string]string{"n": "\n line one\nline two \n"}, map[string]string{"n": "line one\nline two"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -127,6 +128,27 @@ func TestFirstMissingRequired(t *testing.T) {
 			-1, true,
 		},
 		{
+			"an empty required multi-line field blocks submission",
+			[]providers.FormField{{Key: "notes", Required: true, Multiline: true}},
+			map[string]string{"notes": " \n\t"},
+			0, false,
+		},
+		{
+			"a filled required multi-line field is fine",
+			[]providers.FormField{{Key: "notes", Required: true, Multiline: true}},
+			map[string]string{"notes": "a\nb"},
+			-1, true,
+		},
+		{
+			"a hidden required multi-line field never blocks submission",
+			[]providers.FormField{
+				{Key: "mode", Options: []string{"a", "b"}},
+				{Key: "notes", Required: true, Multiline: true, ShowWhen: when("mode", "b")},
+			},
+			map[string]string{"mode": "a"},
+			-1, true,
+		},
+		{
 			"a hidden empty entry is skipped for a later visible empty one",
 			[]providers.FormField{
 				{Key: "mode", Options: []string{"a", "b"}},
@@ -165,6 +187,26 @@ func TestEnterSubmits(t *testing.T) {
 	}
 }
 
+func TestFormHint(t *testing.T) {
+	tests := []struct {
+		name string
+		form providers.Form
+		want string
+	}{
+		{"no fields", providers.Form{}, "Enter to save · Esc to go back"},
+		{"entries only", providers.Form{Fields: []providers.FormField{{Key: "a"}}}, "Enter to save · Esc to go back"},
+		{"a multi-line field", providers.Form{Fields: []providers.FormField{{Key: "a"}, {Key: "n", Multiline: true}}}, "Ctrl+Enter to save · Esc to go back"},
+		{"a secret multi-line field is an entry", providers.Form{Fields: []providers.FormField{{Key: "n", Multiline: true, Secret: true}}}, "Enter to save · Esc to go back"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FormHint(tt.form); got != tt.want {
+				t.Errorf("FormHint = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestKindOf(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -186,6 +228,12 @@ func TestKindOf(t *testing.T) {
 		{"checkbox beats generate", providers.FormField{Checkbox: true, Generate: &providers.GenerateSpec{}}, KindCheckbox},
 		{"options beat generate", providers.FormField{Options: []string{"x"}, Generate: &providers.GenerateSpec{}}, KindDropdown},
 		{"slider beats generate", providers.FormField{Slider: &providers.SliderSpec{Max: 10}, Generate: &providers.GenerateSpec{}}, KindSlider},
+		{"multiline", providers.FormField{Multiline: true}, KindMultiline},
+		{"generate beats multiline", providers.FormField{Generate: &providers.GenerateSpec{}, Multiline: true}, KindGenerated},
+		{"checkbox beats multiline", providers.FormField{Checkbox: true, Multiline: true}, KindCheckbox},
+		{"options beat multiline", providers.FormField{Options: []string{"x"}, Multiline: true}, KindDropdown},
+		{"secret beats multiline", providers.FormField{Secret: true, Multiline: true}, KindEntry},
+		{"value alone is an entry", providers.FormField{Value: "x"}, KindEntry},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -182,6 +182,46 @@ window#banshee-window {
 	border-color: rgba(247, 118, 142, 0.7);
 }
 
+/* A multi-line field (FormField.Multiline): the scrolled window carries the
+   entry look and the text view inside it stays transparent. */
+#banshee-window scrolledwindow.form-multiline {
+	background-color: rgba(255, 255, 255, 0.04);
+	border: 1px solid {{ alpha .AccentRGB 0.22 }};
+	border-radius: 10px;
+	margin-bottom: 8px;
+}
+
+#banshee-window scrolledwindow.form-multiline:focus-within {
+	border-color: {{ alpha .AccentRGB 0.6 }};
+	background-color: rgba(255, 255, 255, 0.06);
+}
+
+#banshee-window scrolledwindow.form-multiline.error {
+	border-color: rgba(247, 118, 142, 0.7);
+}
+
+#banshee-window scrolledwindow.form-multiline undershoot.top,
+#banshee-window scrolledwindow.form-multiline undershoot.bottom {
+	background-image: none;
+}
+
+#banshee-window textview.form-field {
+	background-color: transparent;
+	color: #e6e9f0;
+	font-size: 15px;
+	caret-color: {{ .Accent }};
+	outline-style: none;
+}
+
+#banshee-window textview.form-field > text {
+	background-color: transparent;
+}
+
+#banshee-window textview.form-field > text > selection {
+	background-color: {{ alpha .AccentRGB 0.35 }};
+	color: #ffffff;
+}
+
 #banshee-window .form-hint {
 	color: rgba(223, 228, 238, 0.35);
 	font-size: 11px;
